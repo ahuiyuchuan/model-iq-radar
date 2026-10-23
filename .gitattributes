@@ -1,0 +1,6 @@
+# 作者 ahui：源码与文档统一 LF，二进制资源保持原始字节。
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.zip binary
+*.exe binary

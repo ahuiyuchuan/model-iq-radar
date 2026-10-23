@@ -1,0 +1,43 @@
+{
+    "name": "model-probe",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "author": "ahui",
+    "license": "GPL-3.0-only",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ahuiyuchuan/model-iq-radar.git"
+    },
+    "homepage": "https://github.com/ahuiyuchuan/model-iq-radar#readme",
+    "bugs": "https://github.com/ahuiyuchuan/model-iq-radar/issues",
+    "description": "支持自定义题目与连续字符串判定的桌面测智雷达",
+    "scripts": {
+        "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+        "build": "vue-tsc --noEmit && vite build",
+        "format": "prettier --write src tests *.json *.ts *.md index.html",
+        "format:check": "prettier --check src tests *.json *.ts *.md index.html",
+        "test": "vitest run",
+        "tauri": "tauri"
+    },
+    "dependencies": {
+        "@tauri-apps/api": "2.12.4",
+        "dompurify": "3.4.17",
+        "highlight.js": "11.12.0",
+        "lucide-vue-next": "^0.468.0",
+        "markdown-it": "15.0.3",
+        "markdown-it-task-lists": "2.1.1",
+        "vue": "3.5.44"
+    },
+    "devDependencies": {
+        "@tauri-apps/cli": "2.12.4",
+        "@vitejs/plugin-vue": "^6.0.0",
+        "@vue/test-utils": "^2.4.6",
+        "jsdom": "^27.0.0",
+        "prettier": "^3.6.0",
+        "typescript": "^5.9.0",
+        "vite": "^7.3.0",
+        "vitest": "^3.2.0",
+        "vue-tsc": "^3.1.0"
+    }
+}
