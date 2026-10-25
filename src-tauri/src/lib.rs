@@ -3,8 +3,11 @@
 
 pub mod api;
 mod autostart;
+pub mod backup;
+pub mod conditions;
 mod discovery;
 pub mod model;
+pub mod notifications;
 pub mod storage;
 mod updates;
 
@@ -18,7 +21,8 @@ use std::sync::{
 use std::time::Instant;
 use storage::Store;
 use tauri::{
-    Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    Emitter, Listener, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
@@ -40,7 +44,15 @@ struct AppState {
     settings_gate: Mutex<()>,
     layout: Mutex<WidgetLayout>,
     dragging: AtomicBool,
+    /// 原生拖动从按下到移动之间可能没有 `Moved` 事件；单独记录是否真的移动，
+    /// 避免仅点击标题栏就清除边缘吸附状态，导致鼠标离开后无法自动收起。
+    drag_moved: AtomicBool,
+    /// 每次按下独立世代，旧释放监视器不能结束后续拖动。
+    drag_generation: AtomicU64,
+    drag_origin: Mutex<Option<(i32, i32)>>,
     next_auto_test: Mutex<Instant>,
+    notifications: Mutex<notifications::NotificationTracker>,
+    notification_error: Mutex<Option<String>>,
 }
 
 /// 仅保存本次进程的边缘呈现状态；数据库仍保存完整面板位置，重启可直接操作。
@@ -57,6 +69,12 @@ struct WidgetLayout {
 struct DockNotice {
     side: Option<String>,
     tucked: bool,
+}
+
+/// 配置事务已提交后的附加提示；warning 不表示保存失败，调用方不得因此重复写入。
+#[derive(serde::Serialize)]
+struct SaveOutcome {
+    warning: Option<String>,
 }
 
 /// 锁中毒时拒绝继续写配置，避免把部分更新视作成功。
@@ -105,13 +123,60 @@ fn set_key(entry: &Entry, key: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// 凭据可决定同网关请求的账户/上游，因此实际替换或移除也属于测试条件变化。
+/// 只保存随机修订标识，不对密钥做可离线猜测的散列；重复保存相同密钥保持结论。
+/// has_key=false 时忽略系统残留条目，与请求实际不读取该凭据的边界保持一致。
+fn next_credential_revision(
+    previous: Option<&ModelProfile>,
+    old_key: Option<&str>,
+    next_key: Option<&str>,
+) -> Option<String> {
+    let had_key = previous.is_some_and(|profile| profile.has_key);
+    let effective_key = if had_key { old_key } else { None };
+    if had_key != next_key.is_some() || effective_key != next_key {
+        Some(Uuid::new_v4().to_string())
+    } else {
+        previous.and_then(|profile| profile.credential_revision.clone())
+    }
+}
+
 #[tauri::command]
-fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+fn get_snapshot(
+    state: State<'_, AppState>,
+    include_history: Option<bool>,
+) -> Result<AppSnapshot, String> {
     let running = lock(&state.running)?;
     let store = lock(&state.store)?;
+    // 悬浮窗只需要当前模型的一条最新记录来显示结果。设置页显式请求完整历史，
+    // 避免自动测试每次广播时反复序列化最多 128 MiB 的原始回答。
+    let history = if include_history.unwrap_or(false) {
+        store.history()?
+    } else {
+        store
+            .config
+            .selected_profile_id
+            .as_deref()
+            .map(|profile_id| store.latest_record_for_profile(profile_id))
+            .transpose()?
+            .into_iter()
+            .flatten()
+            .collect()
+    };
     Ok(AppSnapshot {
         config: store.config.clone(),
-        history: store.history()?,
+        condition_fingerprints: store
+            .config
+            .profiles
+            .iter()
+            .filter_map(|profile| {
+                // 单个历史配置不再合法时只撤销其结论，不阻断设置页读取和修复。
+                conditions::condition_fingerprint(&store.config, profile)
+                    .ok()
+                    .map(|fingerprint| (profile.id.clone(), fingerprint))
+            })
+            .collect(),
+        history,
+        email_notification_error: lock(&state.notification_error)?.clone(),
         running: running.as_ref().map(|run| run.info.clone()),
         auto_test_remaining_ms: if store.config.preferences.auto_test_enabled
             && store
@@ -132,19 +197,33 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 }
 
 /// 临时草稿诊断只读凭据，不保存表单；改域名时不得隐式发送旧配置的密钥。
-fn diagnostic_key(state: &AppState, input: &ProfileInput) -> Result<String, String> {
-    api::endpoint(&input.base_url)?;
+/// 凭据与配置版本在同一存储锁内捕获，防止旧凭据请求结果关联到并发保存的新配置。
+fn diagnostic_context(
+    state: &AppState,
+    input: &ProfileInput,
+) -> Result<(String, Option<ModelProfile>), String> {
+    if !matches!(
+        input.interface_mode.as_str(),
+        "chat_completions" | "responses"
+    ) {
+        return Err("接口模式必须是 Chat Completions 或 Responses。".into());
+    }
+    if input.interface_mode == "responses" {
+        api::responses_endpoint(&input.base_url)?;
+    } else {
+        api::endpoint(&input.base_url)?;
+    }
+    if let Some(timeout) = input.timeout_seconds {
+        if !(10..=300).contains(&timeout) {
+            return Err("模型超时应为 10—300 秒，或留空继承全局设置。".into());
+        }
+    }
+    validate_reasoning_effort(input.reasoning_effort.as_deref())?;
     if input.api_key.len() > 2500 || input.api_key.contains(['\r', '\n']) {
         return Err("API Key 太长或包含换行。".into());
     }
     if input.remove_key && !input.api_key.is_empty() {
         return Err("移除密钥与输入新密钥不能同时使用。".into());
-    }
-    if !input.api_key.is_empty() {
-        return Ok(input.api_key.clone());
-    }
-    if input.remove_key || input.id.is_empty() {
-        return Ok(String::new());
     }
     let store = lock(&state.store)?;
     let original = store
@@ -152,15 +231,26 @@ fn diagnostic_key(state: &AppState, input: &ProfileInput) -> Result<String, Stri
         .profiles
         .iter()
         .find(|p| p.id == input.id)
-        .ok_or("原配置不存在，请重新选择。")?;
-    if original.has_key && api::endpoint(&original.base_url)? != api::endpoint(&input.base_url)? {
+        .cloned();
+    if !input.api_key.is_empty() {
+        return Ok((input.api_key.clone(), original));
+    }
+    if input.remove_key || input.id.is_empty() {
+        return Ok((String::new(), original));
+    }
+    let saved = original.as_ref().ok_or("原配置不存在，请重新选择。")?;
+    // 同一服务只切换协议无需重输密钥；统一成 Chat 端点比较，仍拒绝改域名或基础路径。
+    let original_endpoint = api::endpoint(&saved.base_url)?;
+    let input_endpoint = api::endpoint(&input.base_url)?;
+    if saved.has_key && original_endpoint != input_endpoint {
         return Err("接口地址已修改，请明确输入用于新地址的密钥后重试。".into());
     }
-    if original.has_key {
-        read_key(&credential(&input.id)?)?.ok_or("原配置密钥不存在，请重新输入。".into())
+    let key = if saved.has_key {
+        read_key(&credential(&input.id)?)?.ok_or("原配置密钥不存在，请重新输入。")?
     } else {
-        Ok(String::new())
-    }
+        String::new()
+    };
+    Ok((key, original))
 }
 
 /// 拉取模型仅发 GET，不消耗测智周期，不写入历史；诊断门禁跨窗口去重。
@@ -168,23 +258,76 @@ fn diagnostic_key(state: &AppState, input: &ProfileInput) -> Result<String, Stri
 async fn fetch_models(
     state: State<'_, AppState>,
     input: ProfileInput,
-) -> Result<Vec<discovery::FetchedModel>, String> {
+) -> Result<discovery::ModelCatalog, String> {
     let _guard = discovery::DiagnosticGuard::acquire()?;
-    let key = diagnostic_key(&state, &input)?;
-    discovery::fetch_models(&input.base_url, &key).await
+    let (key, original) = diagnostic_context(&state, &input)?;
+    let endpoint = discovery::models_endpoint(&input.base_url)?.to_string();
+    let unchanged = original.as_ref().is_some_and(|item| {
+        input.api_key.is_empty()
+            && !input.remove_key
+            && discovery::models_endpoint(&item.base_url).is_ok_and(|url| url.as_str() == endpoint)
+    });
+    let token = if unchanged {
+        original
+            .as_ref()
+            .and_then(|item| item.catalog_token.clone())
+    } else {
+        None
+    }
+    .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let models = discovery::fetch_models(&input.base_url, &key).await?;
+    let mut store = lock(&state.store)?;
+    store.save_model_catalog(&token, &endpoint, &models)?;
+    // 只关联拉取开始/结束时地址与凭据版本均未改变的已保存配置；未保存草稿随保存关联。
+    if unchanged {
+        let mut config = store.config.clone();
+        if let Some(current) = config.profiles.iter_mut().find(|item| item.id == input.id) {
+            if original.as_ref().is_some_and(|before| {
+                current.credential_revision == before.credential_revision
+                    && current.base_url == before.base_url
+                    && current.catalog_token == before.catalog_token
+            }) && current.catalog_token.as_deref() != Some(token.as_str())
+            {
+                current.catalog_token = Some(token.clone());
+                store.save_config(config)?;
+            }
+        }
+    }
+    Ok(discovery::ModelCatalog { token, models })
 }
 
-/// 独立固定提示词连接测试，使用已保存的测智请求超时；不更改配置、周期和结果。
+/// 缓存只读取同一端点，无网络及凭据读取；输入表单的密钥不进入缓存查询或日志。
+#[tauri::command]
+fn get_model_catalog(
+    state: State<'_, AppState>,
+    token: String,
+    base_url: String,
+) -> Result<Vec<discovery::FetchedModel>, String> {
+    let endpoint = discovery::models_endpoint(&base_url)?.to_string();
+    lock(&state.store)?.model_catalog(&token, &endpoint)
+}
+
+/// 独立固定提示词连接测试，草稿模型超时覆盖已保存的全局值；不更改配置、周期和结果。
 #[tauri::command]
 async fn test_connection(
     state: State<'_, AppState>,
     input: ProfileInput,
 ) -> Result<discovery::ConnectionResult, String> {
     let _guard = discovery::DiagnosticGuard::acquire()?;
-    let key = diagnostic_key(&state, &input)?;
+    let (key, _) = diagnostic_context(&state, &input)?;
     // 请求开始时取同一份持久化超时；不在网络等待期间持有存储锁。
     let timeout = lock(&state.store)?.config.preferences.timeout_seconds;
-    discovery::test_connection(&input.base_url, &input.model, &key, timeout).await
+    let effective_timeout = input.timeout_seconds.unwrap_or(timeout);
+    discovery::test_connection(
+        &input.base_url,
+        &input.model,
+        &key,
+        effective_timeout,
+        &input.interface_mode,
+        input.reasoning_effort.clone(),
+        input.protocol_fallback_enabled,
+    )
+    .await
 }
 
 /// 保存接口：凭据操作先行；若数据库提交失败，尝试恢复原凭据并明确报告回滚失败。
@@ -195,6 +338,12 @@ fn save_profile(
     input: ProfileInput,
 ) -> Result<(), String> {
     let _idle = require_idle(&state)?;
+    if !matches!(
+        input.interface_mode.as_str(),
+        "chat_completions" | "responses"
+    ) {
+        return Err("接口模式必须是 Chat Completions 或 Responses。".into());
+    }
     if input.name.trim().is_empty()
         || input.name.chars().count() > 80
         || input.model.trim().is_empty()
@@ -203,7 +352,17 @@ fn save_profile(
     {
         return Err("配置名称、模型名称或地址不符合长度要求。".into());
     }
-    api::endpoint(&input.base_url)?;
+    if input.interface_mode == "responses" {
+        api::responses_endpoint(&input.base_url)?;
+    } else {
+        api::endpoint(&input.base_url)?;
+    }
+    if let Some(timeout) = input.timeout_seconds {
+        if !(10..=300).contains(&timeout) {
+            return Err("模型超时应为 10—300 秒，或留空继承全局设置。".into());
+        }
+    }
+    validate_reasoning_effort(input.reasoning_effort.as_deref())?;
     if input.api_key.len() > 2500 || input.api_key.contains(['\r', '\n']) {
         return Err("API Key 太长或包含换行，请检查粘贴内容。".into());
     }
@@ -222,33 +381,83 @@ fn save_profile(
     };
     let entry = credential(&id)?;
     let old_key = read_key(&entry)?;
+    if let Some(previous) = config.profiles.iter().find(|item| item.id == id) {
+        if previous.has_key
+            && !input.remove_key
+            && input.api_key.is_empty()
+            && api::endpoint(&previous.base_url)? != api::endpoint(&input.base_url)?
+        {
+            return Err("接口地址已修改，请输入新地址使用的密钥，或明确移除已有密钥。".into());
+        }
+    }
     let next_key = if input.remove_key {
         None
     } else if input.api_key.is_empty() {
-        old_key.clone()
+        // 导入配置的 has_key=false 是明确边界，不能因系统残留同 ID 凭据而恢复旧密钥。
+        config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id && profile.has_key)
+            .and(old_key.clone())
     } else {
         Some(input.api_key)
     };
-    set_key(&entry, next_key.as_deref())?;
+    let previous = config.profiles.iter().find(|item| item.id == id);
+    let mut catalog_token = input.catalog_token;
+    // 旧句柄不能跨凭据或地址复用；新拉取的句柄还须通过缓存端点检查。
+    if previous.is_some_and(|item| {
+        item.catalog_token == catalog_token
+            && (old_key != next_key
+                || discovery::models_endpoint(&item.base_url).ok()
+                    != discovery::models_endpoint(&input.base_url).ok())
+    }) {
+        catalog_token = None;
+    }
+    if let Some(token) = &catalog_token {
+        if store
+            .model_catalog(token, discovery::models_endpoint(&input.base_url)?.as_str())?
+            .is_empty()
+        {
+            catalog_token = None;
+        }
+    }
     let profile = ModelProfile {
         id: id.clone(),
         name: input.name.trim().into(),
         base_url: input.base_url.trim().trim_end_matches('/').into(),
         model: input.model.trim().into(),
         has_key: next_key.is_some(),
+        credential_revision: next_credential_revision(
+            config.profiles.iter().find(|item| item.id == id),
+            old_key.as_deref(),
+            next_key.as_deref(),
+        ),
+        interface_mode: input.interface_mode,
+        protocol_fallback_enabled: input.protocol_fallback_enabled,
+        reasoning_effort: input.reasoning_effort,
+        timeout_seconds: input.timeout_seconds,
+        rule_preset_id: input.rule_preset_id,
+        catalog_token,
     };
     if let Some(previous) = config.profiles.iter_mut().find(|item| item.id == id) {
         *previous = profile;
     } else {
+        // 首版合法旧库可能已超过 100 个：允许编辑现有项，但不能继续新增。
+        if config.profiles.len() >= 100 {
+            return Err("模型配置最多新增至 100 个；已有超额旧配置可继续编辑或删除。".into());
+        }
         config.profiles.push(profile);
     }
     config.selected_profile_id = Some(id);
+    conditions::validate_stored_config(&config)?;
+    set_key(&entry, next_key.as_deref())?;
     if let Err(message) = store.save_config(config) {
         if set_key(&entry, old_key.as_deref()).is_err() {
             return Err(format!("{message} 凭据回滚也失败，请重新保存该配置。"));
         }
         return Err(message);
     }
+    drop(store);
     changed(&app);
     Ok(())
 }
@@ -278,6 +487,7 @@ fn delete_profile(
         }
         return Err(message);
     }
+    drop(store);
     changed(&app);
     Ok(())
 }
@@ -296,46 +506,201 @@ fn select_profile(
     }
     config.selected_profile_id = Some(id);
     store.save_config(config)?;
+    drop(store);
     changed(&app);
     Ok(())
 }
 
+/// 默认规则名称与题答在一个配置事务中保存；旧调用省略名称时保留已有名称。
 #[tauri::command]
 fn save_rule(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     rule: TestRule,
+    name: Option<String>,
 ) -> Result<(), String> {
     let _idle = require_idle(&state)?;
     rule.validate()?;
     let mut store = lock(&state.store)?;
     let mut config = store.config.clone();
     config.rule = rule;
+    if let Some(name) = name {
+        if name.trim().is_empty() || name.chars().count() > 80 {
+            return Err("规则名称必须为 1—80 个字符。".into());
+        }
+        config.default_rule_name = name.trim().to_owned();
+    }
     store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
+}
+
+/// 保存或更新规则预设；每个预设沿用与全局规则相同的长度和空白校验。
+#[tauri::command]
+fn save_rule_preset(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    preset: RulePreset,
+) -> Result<(), String> {
+    let _idle = require_idle(&state)?;
+    conditions::validate_id(&preset.id)?;
+    if preset.name.trim().is_empty() || preset.name.chars().count() > 80 {
+        return Err("预设名称必须为 1—80 个字符。".into());
+    }
+    let rule = TestRule {
+        prompt: preset.prompt.clone(),
+        keyword: preset.keyword.clone(),
+        alternative_keywords: preset.alternative_keywords.clone(),
+    };
+    rule.validate()?;
+    let mut store = lock(&state.store)?;
+    let mut config = store.config.clone();
+    if let Some(existing) = config
+        .rule_presets
+        .iter_mut()
+        .find(|item| item.id == preset.id)
+    {
+        *existing = preset;
+    } else {
+        if preset.id != CANDY_RULE_ID
+            && config
+                .rule_presets
+                .iter()
+                .filter(|item| item.id != CANDY_RULE_ID)
+                .count()
+                >= 100
+        {
+            return Err("自定义规则预设最多保存 100 组。".into());
+        }
+        config.rule_presets.push(preset);
+    }
+    store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
+}
+
+/// 卡片只修改指定模型的规则绑定，避免提交整个模型而覆盖设置页草稿或凭据。
+/// 与正式测试共用运行门禁，持锁核验当前对象和规则；不重置自动倒计时，不自动请求。
+#[tauri::command]
+fn set_profile_rule(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    rule_preset_id: Option<String>,
+) -> Result<(), String> {
+    let _idle = require_idle(&state)?;
+    let mut store = lock(&state.store)?;
+    let mut config = store.config.clone();
+    let index = config
+        .profiles
+        .iter()
+        .position(|item| item.id == profile_id)
+        .ok_or("模型配置已不存在，请刷新后重试。")?;
+    config.profiles[index].rule_preset_id = rule_preset_id;
+    conditions::effective_rule(&config, &config.profiles[index])?;
+    store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
+}
+
+/// 快捷切换思考等级仅修改指定字段；运行门禁、持久化与结果指纹沿用正式配置路径。
+/// 不触碰凭据、规则绑定或自动测试期限；null 明确表示省略请求参数，非法档位原样拒绝。
+#[tauri::command]
+fn set_profile_effort(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    reasoning_effort: Option<String>,
+) -> Result<(), String> {
+    validate_reasoning_effort(reasoning_effort.as_deref())?;
+    let _idle = require_idle(&state)?;
+    let mut store = lock(&state.store)?;
+    let mut config = store.config.clone();
+    let profile = config
+        .profiles
+        .iter_mut()
+        .find(|item| item.id == profile_id)
+        .ok_or("模型配置已不存在，请刷新后重试。")?;
+    profile.reasoning_effort = reasoning_effort;
+    store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
+}
+
+/// 删除预设；被引用时必须明确同意原子解绑，避免静默改变模型测试题目。
+#[tauri::command]
+fn delete_rule_preset(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    unbind_profiles: Option<bool>,
+) -> Result<(), String> {
+    let _idle = require_idle(&state)?;
+    let mut store = lock(&state.store)?;
+    let mut config = store.config.clone();
+    if !unbind_profiles.unwrap_or(false)
+        && config
+            .profiles
+            .iter()
+            .any(|profile| profile.rule_preset_id.as_deref() == Some(id.as_str()))
+    {
+        return Err("该规则预设仍被模型配置使用，请先解除绑定。".into());
+    }
+    // 仅用户明确确认后统一解除引用；解绑和删除在同一配置事务中落盘。
+    for profile in &mut config.profiles {
+        if profile.rule_preset_id.as_deref() == Some(id.as_str()) {
+            profile.rule_preset_id = None;
+        }
+    }
+    let before = config.rule_presets.len();
+    config.rule_presets.retain(|preset| preset.id != id);
+    if before == config.rule_presets.len() {
+        return Err("规则预设不存在。".into());
+    }
+    store.save_config(config)?;
+    drop(store);
     changed(&app);
     Ok(())
 }
 
 /// 快捷键和置顶变更若失败，会撤回数据库写入前的运行时设置。
+/// 未明确编辑自动开关的保存，在存储锁内保留该权威字段，避免托盘已更新但
+/// 跨窗口事件尚未送达时，整个旧偏好对象将外部开关覆盖；省略参数兼容旧调用方。
 #[tauri::command]
 fn save_preferences(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    preferences: Preferences,
-) -> Result<(), String> {
+    mut preferences: Preferences,
+    confirm_cleanup: Option<bool>,
+    preserve_auto_test: Option<bool>,
+) -> Result<SaveOutcome, String> {
     let _idle = require_idle(&state)?;
     if !(80..=100).contains(&preferences.opacity)
         || !(10..=300).contains(&preferences.timeout_seconds)
         || !(1..=1440).contains(&preferences.auto_test_interval_minutes)
+        || preferences
+            .history_max_records
+            .is_some_and(|value| !(1..=5000).contains(&value))
+        || preferences
+            .history_retention_days
+            .is_some_and(|value| !(1..=3650).contains(&value))
     {
         return Err("不透明度应为 80—100%，超时应为 10—300 秒，定时间隔应为 1—1440 分钟。".into());
     }
     let mut store = lock(&state.store)?;
     let mut config = store.config.clone();
     let previous = config.preferences.clone();
+    if preserve_auto_test.unwrap_or(false) {
+        preferences.auto_test_enabled = previous.auto_test_enabled;
+    }
     apply_preferences(&app, &preferences)?;
     config.preferences = preferences;
-    if let Err(message) = store.save_config(config) {
+    if let Err(message) = store.save_config_with_retention(config, confirm_cleanup.unwrap_or(false))
+    {
         if apply_preferences(&app, &previous).is_err() {
             return Err(format!(
                 "{message} 运行时设置恢复失败，请重新保存悬浮设置或重启应用。"
@@ -343,24 +708,174 @@ fn save_preferences(
         }
         return Err(message);
     }
-    *lock(&state.next_auto_test)? = Instant::now()
-        + std::time::Duration::from_secs(store.config.preferences.auto_test_interval_minutes * 60);
+    // 透明度、置顶和快捷键等展示设置不应推迟既有自动测试；只有开关或间隔
+    // 真正改变调度时才从当前时刻重新计算完整周期。
+    if auto_schedule_changed(&previous, &store.config.preferences) {
+        *lock(&state.next_auto_test)? = Instant::now()
+            + std::time::Duration::from_secs(
+                store.config.preferences.auto_test_interval_minutes * 60,
+            );
+    }
     let restore_dock = !store.config.preferences.snap_to_edge;
     drop(store);
-    if restore_dock {
+    let warning = restore_dock_after_commit(&app, restore_dock);
+    changed(&app);
+    Ok(SaveOutcome { warning })
+}
+
+/// 关闭吸边后的原生恢复属于已提交事务的呈现收尾。操作失败只返回明确警告，
+/// 仍广播权威快照；不能伪装成可重试的保存/导入失败，尤其不能再次执行历史清理。
+fn restore_dock_after_commit(app: &tauri::AppHandle, restore: bool) -> Option<String> {
+    if !restore {
+        return None;
+    }
+    let result = (|| {
+        let state = app.state::<AppState>();
         let expanded = lock(&state.layout)?.expanded;
         set_widget_layout(app.clone(), expanded, 0, false)?;
-        let mut layout = lock(&state.layout)?;
-        layout.side = None;
-        drop(layout);
-        let _ = app.emit(
+        lock(&state.layout)?.side = None;
+        app.emit(
             "widget-dock",
             DockNotice {
                 side: None,
                 tucked: false,
             },
-        );
+        )
+        .map_err(|_| "无法刷新边缘状态。".to_string())
+    })();
+    result.err().map(|message| {
+        format!("配置已保存，但悬浮窗退出吸边失败：{message} 请重新打开应用恢复窗口。")
+    })
+}
+
+/// 只读清理预览；实际保存重新计算，避免预览到提交期间新增历史被静默删除。
+#[tauri::command]
+fn preview_history_retention(
+    state: State<'_, AppState>,
+    preferences: Preferences,
+) -> Result<storage::HistoryCleanupPreview, String> {
+    lock(&state.store)?.preview_history_retention(&preferences)
+}
+
+/// 备份仅序列化非敏感数据；导入通过一次配置事务提交，永不循环调用单配置保存。
+#[tauri::command]
+fn export_config_backup(state: State<'_, AppState>) -> Result<backup::BackupDocument, String> {
+    backup::export_backup(&lock(&state.store)?.config)
+}
+
+#[tauri::command]
+fn preview_config_import(
+    state: State<'_, AppState>,
+    backup: serde_json::Value,
+) -> Result<backup::ImportPreview, String> {
+    backup::preview_import(&lock(&state.store)?.config, &backup)
+}
+
+/// 先验证完整合并结果；运行时设置失败则不落盘，落盘失败则恢复运行时。
+#[tauri::command]
+fn import_config_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    backup: serde_json::Value,
+    duplicate_strategy: String,
+    confirm_cleanup: Option<bool>,
+) -> Result<backup::ImportReport, String> {
+    let _idle = require_idle(&state)?;
+    let mut store = lock(&state.store)?;
+    let mut prepared = backup::prepare_import(&store.config, &backup, &duplicate_strategy)?;
+    let previous = store.config.preferences.clone();
+    let next = prepared.config.preferences.clone();
+    apply_preferences(&app, &next)?;
+    if let Err(message) =
+        store.save_config_with_retention(prepared.config, confirm_cleanup.unwrap_or(false))
+    {
+        if apply_preferences(&app, &previous).is_err() {
+            return Err(format!("{message} 运行时恢复失败，请重新保存设置或重启。"));
+        }
+        return Err(message);
     }
+    if auto_schedule_changed(&previous, &next) {
+        *lock(&state.next_auto_test)? =
+            Instant::now() + std::time::Duration::from_secs(next.auto_test_interval_minutes * 60);
+    }
+    drop(store);
+    prepared.report.warning = restore_dock_after_commit(&app, !next.snap_to_edge);
+    changed(&app);
+    Ok(prepared.report)
+}
+
+/// 授权码先写系统凭据；数据库失败时恢复旧凭据，不把密码放入快照或日志。
+#[tauri::command]
+fn save_email_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: notifications::EmailSettingsInput,
+) -> Result<AppConfig, String> {
+    let mut store = lock(&state.store)?;
+    let old_password = notifications::read_password()?;
+    let next_password = notifications::validate_input(&store.config.email_notifications, &input)?;
+    let mut config = store.config.clone();
+    config.email_notifications = input.settings;
+    config.email_notifications.has_password = next_password.is_some();
+    notifications::save_password(next_password.as_deref())?;
+    if let Err(message) = store.save_config(config) {
+        if notifications::save_password(old_password.as_deref()).is_err() {
+            return Err(format!(
+                "{message} 邮箱授权码恢复失败，请重新保存邮件设置。"
+            ));
+        }
+        return Err(message);
+    }
+    let config = store.config.clone();
+    drop(store);
+    changed(&app);
+    Ok(config)
+}
+
+/// 试发使用表单草稿，既不保存，也不触发模型测试或通知状态变化。
+#[tauri::command]
+async fn send_test_email(
+    state: State<'_, AppState>,
+    input: notifications::EmailSettingsInput,
+) -> Result<(), String> {
+    let password = {
+        let store = lock(&state.store)?;
+        notifications::validate_input(&store.config.email_notifications, &input)?
+            .ok_or("请填写 SMTP 授权码后发送测试邮件。")?
+    };
+    notifications::send_test(&input.settings, &password).await
+}
+
+/// 判断偏好保存是否真正影响自动测试期限；仅外观、置顶和快捷键变化时保持原期限。
+fn auto_schedule_changed(previous: &Preferences, next: &Preferences) -> bool {
+    previous.auto_test_enabled != next.auto_test_enabled
+        || previous.auto_test_interval_minutes != next.auto_test_interval_minutes
+}
+
+/// 悬浮窗、托盘和设置页共用的自动测试开关。
+///
+/// 关闭开关只阻止后续自动请求，不取消已经领取的请求；开启时从当前时刻重新
+/// 计算一个完整周期，避免沿用关闭前已经过期的期限立即补跑。
+#[tauri::command]
+fn set_auto_test_enabled(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut store = lock(&state.store)?;
+    if store.config.preferences.auto_test_enabled == enabled {
+        return Ok(());
+    }
+    let mut config = store.config.clone();
+    config.preferences.auto_test_enabled = enabled;
+    store.save_config(config)?;
+    if enabled {
+        *lock(&state.next_auto_test)? = Instant::now()
+            + std::time::Duration::from_secs(
+                store.config.preferences.auto_test_interval_minutes * 60,
+            );
+    }
+    drop(store);
     changed(&app);
     Ok(())
 }
@@ -411,17 +926,25 @@ async fn run_test(
     state: State<'_, AppState>,
     automatic: bool,
 ) -> Result<(), String> {
-    let (profile, rule, timeout, info, token) = {
+    let (profile, rule, rule_name, timeout, fingerprint, info, token) = {
         let mut running = require_idle(&state)?;
         let store = lock(&state.store)?;
         let config = &store.config;
-        config.rule.validate()?;
         let profile = config
             .profiles
             .iter()
             .find(|profile| Some(&profile.id) == config.selected_profile_id.as_ref())
             .cloned()
             .ok_or("请先添加模型接口配置。")?;
+        let rule = conditions::effective_rule(config, &profile)?;
+        // 名称是请求开始时的展示快照；不参与条件摘要，后续改名不能改写历史。
+        let rule_name = profile
+            .rule_preset_id
+            .as_ref()
+            .and_then(|id| config.rule_presets.iter().find(|preset| &preset.id == id))
+            .map(|preset| preset.name.clone())
+            .unwrap_or_else(|| config.default_rule_name.clone());
+        let fingerprint = conditions::condition_fingerprint(config, &profile)?;
         if !claim_test_deadline(
             &config.preferences,
             &mut *lock(&state.next_auto_test)?,
@@ -441,42 +964,35 @@ async fn run_test(
             info: info.clone(),
             token: token.clone(),
         });
-        (
-            profile,
-            config.rule.clone(),
-            config.preferences.timeout_seconds,
-            info,
-            token,
-        )
+        let timeout = profile
+            .timeout_seconds
+            .unwrap_or(config.preferences.timeout_seconds);
+        (profile, rule, rule_name, timeout, fingerprint, info, token)
     };
     changed(&app);
     let start = Instant::now();
-    let key_result = credential(&profile.id)
-        .and_then(|entry| read_key(&entry))
-        .and_then(|key| {
-            if profile.has_key && key.is_none() {
-                Err("已保存的密钥不存在，请重新保存 API Key。".into())
-            } else {
-                Ok(key.unwrap_or_default())
-            }
-        });
+    let key_result = if profile.has_key {
+        credential(&profile.id)
+            .and_then(|entry| read_key(&entry))
+            .and_then(|key| key.ok_or("已保存的密钥不存在，请重新保存 API Key。".into()))
+    } else {
+        Ok(String::new())
+    };
     let completion = match key_result {
         Ok(key) => api::complete(&profile, &rule, &key, timeout, &token).await,
-        Err(message) => api::Completion {
-            answer: String::new(),
-            error: Some(message),
-            cancelled: false,
-        },
+        Err(message) => api::Completion::failure("credentials", &message),
     };
-    let status = if completion.cancelled {
+    // 在协议错误返回到历史结算之间收到取消也必须优先记为取消，防止发出失败邮件。
+    let status = if completion.cancelled || token.is_cancelled() {
         "cancelled"
     } else if completion.error.is_some() {
         "error"
-    } else if completion.answer.contains(&rule.keyword) {
+    } else if rule.matches(&completion.answer) {
         "passed"
     } else {
         "failed"
     };
+    let rule_version = rule.version().to_owned();
     let record = TestRecord {
         id: info.id,
         profile_id: profile.id,
@@ -489,16 +1005,89 @@ async fn run_test(
         error: completion.error,
         prompt: rule.prompt,
         keyword: rule.keyword,
-        rule_version: RULE_VERSION.into(),
+        alternative_keywords: rule.alternative_keywords,
+        rule_name: Some(rule_name),
+        rule_version,
+        source: Some(if automatic { "automatic" } else { "manual" }.into()),
+        interface_mode: Some(
+            completion
+                .attempted_modes
+                .last()
+                .unwrap_or(&profile.interface_mode)
+                .clone(),
+        ),
+        protocol_fallback_enabled: Some(profile.protocol_fallback_enabled),
+        attempted_modes: completion.attempted_modes,
+        reasoning_effort: profile.reasoning_effort.clone(),
+        effective_timeout_seconds: Some(timeout),
+        condition_fingerprint: Some(fingerprint),
+        error_kind: completion.error_kind,
+        http_status: completion.http_status,
+        request_id: completion.request_id,
     };
     let result = {
         let mut running = lock(&state.running)?;
-        let result = lock(&state.store)?.save_record(&record);
+        let mut store = lock(&state.store)?;
+        let result = store.save_record(&record);
+        let mut next = lock(&state.next_auto_test)?;
+        // 手动/自动请求都可能比周期更慢；丢弃执行期间错过的期限，不结算后立即补跑。
+        skip_elapsed_deadline(&store.config.preferences, &mut next, Instant::now());
+        drop(next);
+        drop(store);
+        // 释放运行门禁之前推进通知状态，避免另一个极快请求先结算导致邮件状态倒序。
+        // dispatch 只做本地快照/持久化和启动异步任务，不等待 SMTP。
+        if result.is_ok() {
+            dispatch_notification(&app, &state, record);
+        }
         *running = None;
         result
     };
     changed(&app);
     result
+}
+
+/// 邮件与请求/持久化生命周期隔离；先消费状态变化，再异步发送且不自动重试。
+/// 发送失败不改测试结论，不持有数据库或运行门禁，也不会阻止下次手动测试。
+fn dispatch_notification(app: &tauri::AppHandle, state: &AppState, record: TestRecord) {
+    // 配置锁内配对 SMTP 目标和对应凭据，禁止并发保存时把新密码发给旧主机。
+    let delivery = (|| {
+        let store = lock(&state.store)?;
+        let mut tracker = lock(&state.notifications)?;
+        let mut next = tracker.clone();
+        let event = next.consider(&record);
+        let payload = serde_json::to_string(&next).map_err(|_| "邮件通知状态保存失败。")?;
+        store.save_notification_state(&payload)?;
+        *tracker = next;
+        let Some(event) = event else {
+            return Ok(None);
+        };
+        let settings = store.config.email_notifications.clone();
+        if !event.enabled(&settings) || !settings.has_password {
+            return Ok(None);
+        }
+        let password =
+            notifications::read_password()?.ok_or("邮箱授权码不存在，请重新保存邮件设置。")?;
+        Ok::<_, String>(Some((settings, password, event)))
+    })();
+    let (settings, password, event) = match delivery {
+        Ok(Some(delivery)) => delivery,
+        Ok(None) => return,
+        Err(message) => {
+            if let Ok(mut error) = state.notification_error.lock() {
+                *error = Some(message);
+            }
+            changed(app);
+            return;
+        }
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = notifications::send_notification(&settings, &password, &record, event).await;
+        if let Ok(mut error) = app.state::<AppState>().notification_error.lock() {
+            *error = result.err();
+        }
+        changed(&app);
+    });
 }
 
 #[tauri::command]
@@ -698,9 +1287,10 @@ fn set_widget_layout(
         (
             360,
             if expanded {
-                540
+                572
             } else {
-                124_u32.max(86 + menu_height.min(208))
+                // 卡片新增规则快捷选择行，菜单按较低的规则触发器预留空间。
+                156_u32.max(118 + menu_height.min(210))
             },
         )
     };
@@ -738,28 +1328,94 @@ fn set_widget_layout(
 #[tauri::command]
 fn prepare_widget_drag(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut layout = lock(&state.layout)?;
-    layout.side = None;
+    let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
+    let position = window.outer_position().map_err(|_| "无法读取拖动起点。")?;
+    *lock(&state.drag_origin)? = Some((position.x, position.y));
+    // 原生拖动可能最终没有产生任何 `Moved` 事件；仅按下标题栏时保留
+    // 边缘侧信息，避免鼠标离开后丢失自动收起状态。
+    state.drag_moved.store(false, Ordering::Relaxed);
     state.dragging.store(true, Ordering::Relaxed);
-    app.emit(
+    let generation = state.drag_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    // 即使系统没有产生任何 Moved，也必须在松开鼠标后清理拖动状态。
+    // 这条释放监视路径与 Moved 后的收尾共用幂等 finish，单击标题栏不会丢失吸附。
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let state = app.state::<AppState>();
+            if state.drag_generation.load(Ordering::Relaxed) != generation
+                || !state.dragging.load(Ordering::Relaxed)
+            {
+                return;
+            }
+            #[cfg(windows)]
+            let pressed =
+                unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(1) } < 0;
+            #[cfg(not(windows))]
+            let pressed = false;
+            if !pressed {
+                if state.drag_moved.load(Ordering::Relaxed) {
+                    let _ = snap_widget(app.clone());
+                }
+                let _ = finish_widget_drag(&app);
+                return;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 首次收到真实位移后才解除吸附呈现；单击标题栏不会改变边缘状态。
+fn mark_widget_drag_moved(app: &tauri::AppHandle, position: (i32, i32)) {
+    let state = app.state::<AppState>();
+    if !state.dragging.load(Ordering::Relaxed)
+        || lock(&state.drag_origin).ok().and_then(|origin| *origin) == Some(position)
+        || state.drag_moved.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    if let Ok(mut layout) = state.layout.lock() {
+        layout.side = None;
+    }
+    let _ = app.emit(
         "widget-dock",
         DockNotice {
             side: None,
             tucked: false,
         },
-    )
-    .map_err(|_| "无法准备拖动。".into())
+    );
 }
 
 /// 松开鼠标后识别左、右、顶部，关闭吸附时不产生边缘图标。
 fn finish_widget_drag(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if !state.dragging.swap(false, Ordering::Relaxed) {
+    let Some(moved) = release_widget_drag(&state)? else {
         return Ok(());
+    };
+    if !moved {
+        let layout = lock(&state.layout)?;
+        return app
+            .emit(
+                "widget-dock",
+                DockNotice {
+                    side: layout.side.clone(),
+                    tucked: layout.tucked,
+                },
+            )
+            .map_err(|_| "无法刷新边缘状态。".into());
     }
     let notice = get_widget_dock(app.clone())?;
     app.emit("widget-dock", notice)
         .map_err(|_| "无法刷新边缘状态。".into())
+}
+
+/// 释放与位移独立：无位移也结束拖动，重复的系统释放/延迟 Moved 收尾必须幂等。
+/// 返回 None 表示本次无需收尾，Some(false) 表示仅单击，Some(true) 表示实际拖动。
+fn release_widget_drag(state: &AppState) -> Result<Option<bool>, String> {
+    if !state.dragging.swap(false, Ordering::Relaxed) {
+        return Ok(None);
+    }
+    *lock(&state.drag_origin)? = None;
+    Ok(Some(state.drag_moved.swap(false, Ordering::Relaxed)))
 }
 
 /// 首次订阅时主动读取真实边缘状态，修复启动后尚未拖动的顶部面板不会自动收起。
@@ -817,15 +1473,62 @@ fn widget_dock_side(
 /// 定时器属于桌面后端，边签与托盘隐藏时仍运行；互斥门禁保证不会重叠请求。
 fn start_scheduler(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let mut previous_tick = Instant::now();
+        let mut previous_wall = Utc::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let due = scheduled_ready(&app.state::<AppState>(), Instant::now());
+            let now = Instant::now();
+            let wall = Utc::now();
+            // 休眠或长请求跨过期限后只恢复一个完整周期，不补齐错过的任务。
+            // 同时看单调时间和系统时间，兼容不同平台休眠期间时钟是否前进的差异。
+            if scheduler_gap(previous_tick, now, (wall - previous_wall).num_seconds()) {
+                if let Ok(store) = app.state::<AppState>().store.lock() {
+                    if let Ok(mut next) = app.state::<AppState>().next_auto_test.lock() {
+                        *next = now
+                            + std::time::Duration::from_secs(
+                                store.config.preferences.auto_test_interval_minutes * 60,
+                            );
+                    }
+                }
+                changed(&app);
+            }
+            previous_tick = now;
+            previous_wall = wall;
+            let due = scheduled_ready(&app.state::<AppState>(), now);
             if due == Ok(true) {
-                // 与手动入口共用鉴权、规则快照、超时和历史，不自动重试失败请求。
+                // 与手动入口共用鉴权、规则快照、总超时和协议回退策略；调度器不额外重试。
                 let _ = run_test(app.clone(), app.state::<AppState>(), true).await;
+                // 请求本身耗时不算休眠；若请求跨过下一期限，丢弃该过期期限，
+                // 防止慢模型/超时返回后立即再发一个自动请求。
+                if let Ok(store) = app.state::<AppState>().store.lock() {
+                    if let Ok(mut next) = app.state::<AppState>().next_auto_test.lock() {
+                        let finished = Instant::now();
+                        if *next <= finished {
+                            *next = finished
+                                + std::time::Duration::from_secs(
+                                    store.config.preferences.auto_test_interval_minutes * 60,
+                                );
+                        }
+                    }
+                }
+                previous_tick = Instant::now();
+                previous_wall = Utc::now();
             }
         }
     });
+}
+
+/// 正常每秒轮询；超过十秒表示执行已暂停，系统时钟回拨本身不触发补跑。
+fn scheduler_gap(previous: Instant, now: Instant, wall_seconds: i64) -> bool {
+    now.saturating_duration_since(previous) > std::time::Duration::from_secs(10)
+        || wall_seconds > 10
+}
+
+/// 只跳过已过期的期限；在途请求期间从其他入口新开启的未来期限仍保留。
+fn skip_elapsed_deadline(preferences: &Preferences, next: &mut Instant, now: Instant) {
+    if *next <= now {
+        *next = now + std::time::Duration::from_secs(preferences.auto_test_interval_minutes * 60);
+    }
 }
 
 /// 轮询只预检，不提前消费期限；真正领取在运行门禁内再次验证，避免手动重置后误执行。
@@ -909,6 +1612,14 @@ pub fn run() {
             let store = Store::open(&folder.join("probe.db")).map_err(std::io::Error::other)?;
             let position = store.config.widget_position;
             let mut preferences = store.config.preferences.clone();
+            let notification_tracker = match store
+                .read_notification_state()
+                .map_err(std::io::Error::other)?
+            {
+                Some(payload) => notifications::NotificationTracker::restore(&payload)
+                    .map_err(std::io::Error::other)?,
+                None => notifications::NotificationTracker::from_history(&store.history()?),
+            };
             app.manage(AppState {
                 store: Mutex::new(store),
                 running: Mutex::new(None),
@@ -916,6 +1627,11 @@ pub fn run() {
                 settings_gate: Mutex::new(()),
                 layout: Mutex::new(WidgetLayout::default()),
                 dragging: AtomicBool::new(false),
+                drag_moved: AtomicBool::new(false),
+                drag_generation: AtomicU64::new(0),
+                drag_origin: Mutex::new(None),
+                notifications: Mutex::new(notification_tracker),
+                notification_error: Mutex::new(None),
                 next_auto_test: Mutex::new(
                     Instant::now()
                         + std::time::Duration::from_secs(
@@ -931,7 +1647,7 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let mut store = lock(&state.store).map_err(std::io::Error::other)?;
                 let mut config = store.config.clone();
-                config.preferences = preferences;
+                config.preferences = preferences.clone();
                 store.save_config(config).map_err(std::io::Error::other)?;
             }
             let window = app
@@ -950,13 +1666,31 @@ pub fn run() {
             }
             snap_widget(handle.clone()).map_err(std::io::Error::other)?;
             use tauri::{
-                menu::{Menu, MenuItem},
+                menu::{CheckMenuItem, Menu, MenuItem},
                 tray::TrayIconBuilder,
             };
             let show = MenuItem::with_id(app, "show", "显示悬浮组件", true, None::<&str>)?;
+            let auto_test = CheckMenuItem::with_id(
+                app,
+                "auto-test",
+                "自动测试",
+                true,
+                preferences.auto_test_enabled,
+                None::<&str>,
+            )?;
+            // 设置页和悬浮窗保存后广播快照；托盘复选项据同一持久化值刷新，
+            // 避免从不同入口切换后勾选状态滞留。
+            let sync_app = app.handle().clone();
+            let sync_item = auto_test.clone();
+            let listener_app = sync_app.clone();
+            sync_app.listen("snapshot-changed", move |_| {
+                if let Ok(store) = listener_app.state::<AppState>().store.lock() {
+                    let _ = sync_item.set_checked(store.config.preferences.auto_test_enabled);
+                }
+            });
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出测智雷达", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &auto_test, &settings, &quit])?;
             let mut tray = TrayIconBuilder::new()
                 .tooltip("测智雷达")
                 .menu(&menu)
@@ -972,6 +1706,18 @@ pub fn run() {
                         let _ = open_settings(handle).await;
                     });
                 }
+                "auto-test" => {
+                    let state = app.state::<AppState>();
+                    let enabled = state
+                        .store
+                        .lock()
+                        .map(|store| !store.config.preferences.auto_test_enabled)
+                        .unwrap_or(false);
+                    if set_auto_test_enabled(app.clone(), state, enabled).is_err() {
+                        // 原生复选项可能已自行翻转；写盘失败时从权威快照恢复勾选。
+                        changed(app);
+                    }
+                }
                 "quit" => {
                     // 退出立即取消本地等待，不承诺服务商撤销计费；进程关闭后数据库连接自动释放。
                     if let Ok(running) = app.state::<AppState>().running.lock() {
@@ -986,6 +1732,7 @@ pub fn run() {
             .build(app)?;
             window.show()?;
             start_scheduler(handle.clone());
+            updates::start_monitor(handle.clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -997,9 +1744,10 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                tauri::WindowEvent::Moved(_) => {
+                tauri::WindowEvent::Moved(position) => {
                     // 拖动结束 220ms 后再吸附和持久化，避免每个鼠标移动都执行写盘。
                     let app = window.app_handle().clone();
+                    mark_widget_drag_moved(&app, (position.x, position.y));
                     let state = app.state::<AppState>();
                     let generation = state.move_generation.fetch_add(1, Ordering::Relaxed) + 1;
                     tauri::async_runtime::spawn(async move {
@@ -1041,8 +1789,10 @@ pub fn run() {
             autostart::get_autostart,
             autostart::set_autostart,
             updates::open_external_url,
+            updates::get_update_status,
             updates::check_updates,
             fetch_models,
+            get_model_catalog,
             test_connection,
             get_snapshot,
             get_widget_dock,
@@ -1050,7 +1800,18 @@ pub fn run() {
             delete_profile,
             select_profile,
             save_rule,
+            save_rule_preset,
+            set_profile_rule,
+            set_profile_effort,
+            delete_rule_preset,
             save_preferences,
+            preview_history_retention,
+            export_config_backup,
+            preview_config_import,
+            import_config_backup,
+            save_email_settings,
+            send_test_email,
+            set_auto_test_enabled,
             start_test,
             cancel_test,
             clear_history,
@@ -1066,6 +1827,34 @@ pub fn run() {
 #[cfg(test)]
 mod desktop_tests {
     use super::*;
+
+    /// 只对实际鉴权条件变化换修订；不泄露密钥，重复保存与残留凭据不误失效。
+    #[test]
+    fn credential_changes_invalidate_results_without_storing_the_key() {
+        let mut profile: ModelProfile = serde_json::from_value(serde_json::json!({
+            "id":"one", "name":"fixture", "baseUrl":"https://example.com/v1", "model":"fixture", "hasKey":true,
+            "credentialRevision":"previous-revision"
+        })).unwrap();
+        assert_eq!(
+            next_credential_revision(Some(&profile), Some("fixture-old"), Some("fixture-old"))
+                .as_deref(),
+            Some("previous-revision")
+        );
+        let replaced =
+            next_credential_revision(Some(&profile), Some("fixture-old"), Some("fixture-new"))
+                .unwrap();
+        assert_ne!(replaced, "previous-revision");
+        assert!(!replaced.contains("fixture"));
+        assert!(next_credential_revision(Some(&profile), Some("fixture-old"), None).is_some());
+        assert!(next_credential_revision(Some(&profile), None, None).is_some());
+        profile.has_key = false;
+        assert_eq!(
+            next_credential_revision(Some(&profile), Some("orphaned-fixture"), None).as_deref(),
+            Some("previous-revision")
+        );
+        assert!(next_credential_revision(None, None, None).is_none());
+        assert!(next_credential_revision(None, None, Some("fixture-new")).is_some());
+    }
 
     /// 拖动结束一次贴边，无10px过渡位置；125%物理尺寸和负坐标屏幕也保持一致。
     #[test]
@@ -1127,9 +1916,23 @@ mod desktop_tests {
             settings_gate: Mutex::new(()),
             layout: Mutex::new(WidgetLayout::default()),
             dragging: AtomicBool::new(false),
+            drag_moved: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_origin: Mutex::new(None),
+            notifications: Mutex::new(notifications::NotificationTracker::default()),
+            notification_error: Mutex::new(None),
             next_auto_test: Mutex::new(now),
         };
         assert!(!scheduled_ready(&state, now).unwrap());
+        // 复用真实状态，覆盖“边缘标题栏只按下又松开、没有任何 Moved”的路径。
+        state.layout.lock().unwrap().side = Some("top".into());
+        state.dragging.store(true, Ordering::Relaxed);
+        *state.drag_origin.lock().unwrap() = Some((700, 0));
+        assert_eq!(release_widget_drag(&state).unwrap(), Some(false));
+        assert!(!state.dragging.load(Ordering::Relaxed));
+        assert_eq!(state.layout.lock().unwrap().side.as_deref(), Some("top"));
+        assert!(state.drag_origin.lock().unwrap().is_none());
+        assert_eq!(release_widget_drag(&state).unwrap(), None);
         {
             let mut store = state.store.lock().unwrap();
             store.config.profiles.push(ModelProfile {
@@ -1138,6 +1941,13 @@ mod desktop_tests {
                 base_url: "http://localhost/v1".into(),
                 model: "fixture".into(),
                 has_key: false,
+                credential_revision: None,
+                interface_mode: "chat_completions".into(),
+                protocol_fallback_enabled: false,
+                reasoning_effort: Some("low".into()),
+                timeout_seconds: None,
+                rule_preset_id: None,
+                catalog_token: None,
             });
             store.config.selected_profile_id = Some("one".into());
         }
@@ -1234,6 +2044,80 @@ mod desktop_tests {
             true
         ));
         assert_eq!(deadline, at(600));
+    }
+
+    /// 外观类设置保存不应推迟自动测试；开关或间隔变化才重新计算周期。
+    #[test]
+    fn unrelated_preferences_keep_auto_deadline() {
+        let previous = Preferences::default();
+        let mut visual = previous.clone();
+        visual.opacity = 90;
+        visual.always_on_top = false;
+        visual.shortcut_enabled = false;
+        assert!(!auto_schedule_changed(&previous, &visual));
+
+        let mut disabled = previous.clone();
+        disabled.auto_test_enabled = false;
+        assert!(auto_schedule_changed(&previous, &disabled));
+
+        let mut interval = previous.clone();
+        interval.auto_test_interval_minutes = 5;
+        assert!(auto_schedule_changed(&previous, &interval));
+    }
+
+    /// 唤醒只重置一个未来周期，不把错过的间隔当队列；时钟回拨不会密集补跑。
+    #[test]
+    fn scheduler_detects_suspend_without_treating_clock_rollback_as_backlog() {
+        let now = Instant::now();
+        assert!(!scheduler_gap(
+            now,
+            now + std::time::Duration::from_secs(1),
+            1
+        ));
+        assert!(!scheduler_gap(
+            now,
+            now + std::time::Duration::from_secs(1),
+            -3600
+        ));
+        assert!(scheduler_gap(
+            now,
+            now + std::time::Duration::from_secs(3600),
+            3600
+        ));
+        assert!(scheduler_gap(
+            now,
+            now + std::time::Duration::from_secs(1),
+            3600
+        ));
+        let mut next = now;
+        let resumed = now + std::time::Duration::from_secs(3600);
+        assert!(claim_test_deadline(
+            &Preferences::default(),
+            &mut next,
+            resumed,
+            true
+        ));
+        assert_eq!(next, resumed + std::time::Duration::from_secs(180));
+        assert!(!claim_test_deadline(
+            &Preferences::default(),
+            &mut next,
+            resumed,
+            true
+        ));
+    }
+
+    /// 请求耗时超过测试周期时丢弃旧期限；期间重新开启的未来期限不能再次被推迟。
+    #[test]
+    fn slow_run_skips_expired_deadline_but_preserves_a_new_future_deadline() {
+        let now = Instant::now();
+        let preferences = Preferences::default();
+        let mut expired = now - std::time::Duration::from_secs(20);
+        skip_elapsed_deadline(&preferences, &mut expired, now);
+        assert_eq!(expired, now + std::time::Duration::from_secs(180));
+        let future = now + std::time::Duration::from_secs(120);
+        let mut next = future;
+        skip_elapsed_deadline(&preferences, &mut next, now);
+        assert_eq!(next, future);
     }
 
     /// 老配置补齐新增字段，同时保留原有关闭选项。

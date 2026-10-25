@@ -1,5 +1,5 @@
-//! 接口配置页的临时诊断，不写配置/历史，不重置自动测试，不读取模型回答作为指令。
-//! 参考 CC Switch 的 /models 发现与可编辑模型选择，限于本项目 Chat Completions 协议。
+//! 接口配置页的模型发现与临时连接诊断，不写测智历史、不重置周期；成功列表由调用方缓存。
+//! 参考 CC Switch 的 /models 发现与可编辑模型选择；连接测试沿用所选请求协议。
 //! 密钥由调用端短暂传入，只发往经过现有 API 地址验证的同一服务。作者：ahui。
 
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
     model::{ModelProfile, TestRule},
 };
 use reqwest::{redirect::Policy, Client, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -35,30 +35,45 @@ impl Drop for DiagnosticGuard {
 }
 
 /// 返回可选择的模型 ID 与可选服务商信息，不伪造“可调用”或配额承诺。
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchedModel {
     pub id: String,
     pub owned_by: Option<String>,
 }
 
-/// 真实完成一次轻量 Chat Completions 请求的耗时；不产生测智结论。
+/// 真实完成一次所选协议的轻量请求耗时；不产生测智结论。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionResult {
     duration_ms: u64,
+    interface_mode: String,
+    attempted_modes: Vec<String>,
 }
 
 /// 从已支持的根路径/完整 completions URL 推导同一服务的模型路径，不猜测其他域名。
-fn models_endpoint(base: &str) -> Result<Url, String> {
-    let mut url = api::endpoint(base)?;
+pub fn models_endpoint(base: &str) -> Result<Url, String> {
+    let mut url = if base.trim().trim_end_matches('/').ends_with("/responses") {
+        api::responses_endpoint(base)?
+    } else {
+        api::endpoint(base)?
+    };
     let root = url
         .path()
         .strip_suffix("/chat/completions")
+        .or_else(|| url.path().strip_suffix("/responses"))
         .unwrap_or("")
         .to_string();
     url.set_path(&format!("{root}/models"));
     Ok(url)
+}
+
+/// 本机缓存的句柄与列表；句柄随机生成，不派生自密钥，也不代表模型调用权限。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    pub token: String,
+    pub models: Vec<FetchedModel>,
 }
 
 /// GET /models，仅列表请求，无模型推理；15秒总体超时、1MiB上限、不重定向、不重试。
@@ -146,12 +161,16 @@ fn parse_models(bytes: &[u8], key: &str) -> Result<Vec<FetchedModel>, String> {
     Ok(models.into_values().collect())
 }
 
-/// 使用固定独立消息验证连接，timeout_seconds 为已保存的测智超时（秒），不发送测试规则。
+/// 使用固定独立消息验证连接，timeout_seconds 为该配置有效测智超时（秒）。
+/// 请求开始后固定该期限；接口模式、思考强度与正式请求相同，不发送测试规则。
 pub async fn test_connection(
     base: &str,
     model: &str,
     key: &str,
     timeout_seconds: u64,
+    interface_mode: &str,
+    reasoning_effort: Option<String>,
+    protocol_fallback_enabled: bool,
 ) -> Result<ConnectionResult, String> {
     if model.trim().is_empty() || model.chars().count() > 200 {
         return Err("请先填写或选择模型 ID。".into());
@@ -163,10 +182,18 @@ pub async fn test_connection(
         base_url: base.into(),
         model: model.into(),
         has_key: !key.is_empty(),
+        credential_revision: None,
+        interface_mode: interface_mode.into(),
+        protocol_fallback_enabled,
+        reasoning_effort,
+        timeout_seconds: None,
+        rule_preset_id: None,
+        catalog_token: None,
     };
     let rule = TestRule {
         prompt: "请只回复 OK。".into(),
         keyword: "OK".into(),
+        alternative_keywords: Vec::new(),
     };
     let result = api::complete(
         &profile,
@@ -181,6 +208,12 @@ pub async fn test_connection(
     }
     Ok(ConnectionResult {
         duration_ms: start.elapsed().as_millis() as u64,
+        interface_mode: result
+            .attempted_modes
+            .last()
+            .cloned()
+            .unwrap_or_else(|| interface_mode.into()),
+        attempted_modes: result.attempted_modes,
     })
 }
 
@@ -203,10 +236,18 @@ mod tests {
             let _ = stream.read(&mut bytes).unwrap();
             std::thread::sleep(Duration::from_millis(1300));
         });
-        let error = test_connection(&base, "fixture", "", 1)
-            .await
-            .err()
-            .unwrap();
+        let error = test_connection(
+            &base,
+            "fixture",
+            "",
+            1,
+            "chat_completions",
+            Some("low".into()),
+            false,
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(error.contains("1 秒"));
         worker.join().unwrap();
     }
@@ -266,9 +307,17 @@ mod tests {
                 )
                 .unwrap();
         });
-        assert!(test_connection(&base, "chosen-fixture", "", 60)
-            .await
-            .is_ok());
+        assert!(test_connection(
+            &base,
+            "chosen-fixture",
+            "",
+            60,
+            "chat_completions",
+            Some("low".into()),
+            false,
+        )
+        .await
+        .is_ok());
         worker.join().unwrap();
     }
 

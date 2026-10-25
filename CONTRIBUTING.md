@@ -28,6 +28,8 @@ npm run tauri -- build --no-bundle
 
 依赖安装完成且 Cargo 在 PATH 中时，运行 `node scripts/generate_notices.mjs` 可重新生成第三方许可证合订本；生成器不联网，缺少依赖或声明会失败，不能手工删改第三方原文。原始声明的上游补充来源见 `docs/licenses/README.md`。
 
+邮件图标为已提交的 PNG，常规构建不需要图像依赖。需要重新生成时，在 `npm ci` 后准备已安装的 `sharp`，执行 `node scripts/generate_mail_assets.mjs [sharp 模块绝对目录]`；省略路径时从当前环境解析 `sharp`。脚本仅将现有 Lucide 图标写入 `src-tauri/assets/mail` 白名单，不联网、不改第三方原文。邮件模板位于 `src-tauri/src/notifications/template.rs`，采用内联样式、表格和 CID 图标；所有记录字段必须安全转义，完整回答不得截断或渲染成 HTML。设置 `MODEL_PROBE_EMAIL_PREVIEW_DIR` 后执行 Rust 测试，可将虚构记录的 HTML/EML 导出到指定 QA 目录；这条路径仅在测试代码中使用，不会发信或读取正式凭据。须以真实 MIME 中的 CID 附件预览并核对长内容与窄屏，不把浏览器预览等同于 Outlook/Gmail 实际投递验证。
+
 ## 目录职责
 
 - `src/components`：悬浮窗、设置、共用 Markdown、选择器和关于组件。
@@ -37,6 +39,7 @@ npm run tauri -- build --no-bundle
 - `src-tauri/src/lib.rs`：运行门禁、定时、凭据与窗口生命周期。
 - `src-tauri/src/storage.rs` / `model.rs`：SQLite、配置、规则与历史契约。
 - `src-tauri/src/autostart.rs` / `updates.rs`：当前用户自启、只读更新检查与系统浏览器入口。
+- `src-tauri/src/notifications.rs` / `notifications/template.rs`：加密 SMTP、通知去重、当次记录的 HTML/纯文本正文与内嵌图标。
 - `tests` / `src-tauri/tests`：组件与后端回归，接口只使用本机 Mock；自启测试只操作随机私有注册表键并清理。
 
 ## 变更约束

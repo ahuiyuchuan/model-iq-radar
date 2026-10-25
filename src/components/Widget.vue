@@ -1,5 +1,6 @@
 <!--
-    悬浮组件：单一主操作、独立拖动区域、可滚动回答。所有模型文本通过 Vue 转义。
+    悬浮组件：单一主操作、独立拖动区域、可滚动回答。
+    回答仅交给共用安全 Markdown 显示层，状态和复制始终使用后端结论与原文。
     @author ahui
 -->
 <script setup lang="ts">
@@ -7,6 +8,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
     Target,
     Settings2,
+    TimerReset,
     ChevronDown,
     ChevronUp,
     Play,
@@ -23,19 +25,40 @@ import {
     Grip,
 } from 'lucide-vue-next';
 import { call, dragWindow, openSettings, resizeWidget, subscribeDock } from '../bridge';
-import { formatTime, useProbe } from '../useProbe';
+import { formatTime, formatRelativeTime, useProbe } from '../useProbe';
 import ModelPicker from './ModelPicker.vue';
 import MarkdownAnswer from './MarkdownAnswer.vue';
+import { ruleAnswers } from '../rules';
+import { reasoningSupport } from '../reasoning';
+import type { ModelProfile } from '../types';
 
-const { snapshot, snapshotReceivedAt, error, profile, latest, busy, start, cancel } = useProbe();
+const {
+    snapshot,
+    snapshotReceivedAt,
+    error,
+    profile,
+    latest,
+    latestRecord,
+    stale,
+    busy,
+    refresh,
+    start,
+    cancel,
+} = useProbe();
 const uiNow = ref({ monotonic: performance.now(), wall: Date.now() });
 let clockTimer: ReturnType<typeof setInterval> | undefined;
 const expanded = ref(false);
 const copied = ref(false);
 const cancelling = ref(false);
 const picker = ref<InstanceType<typeof ModelPicker>>();
+const rulePicker = ref<InstanceType<typeof ModelPicker>>();
+const effortPicker = ref<InstanceType<typeof ModelPicker>>();
+const rulePickerOpen = ref(false);
+const effortPickerOpen = ref(false);
 const pickerOpen = ref(false);
 const selecting = ref(false);
+const autoSwitchPending = ref(false);
+const layoutPending = ref(false);
 const edgeSide = ref<string | null>(null);
 const tucked = ref(false);
 const collapsing = ref(false);
@@ -45,26 +68,54 @@ let hovering = false;
 let tuckTimer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribeDock: (() => void) | undefined;
 let disposed = false;
+let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+let motionTimer: ReturnType<typeof setTimeout> | undefined;
+let releaseMotion: (() => void) | undefined;
+
+/** 键盘或辅助功能点击也必须互斥；不能只依赖 pointerdown 的外部点击关闭。 */
+async function closeOtherPickers(current: 'model' | 'rule' | 'effort'): Promise<void> {
+    if (current !== 'model') await picker.value?.close();
+    if (current !== 'rule') await rulePicker.value?.close();
+    if (current !== 'effort') await effortPicker.value?.close();
+}
+
+/** 关闭窗口时可结束等待；后续世代检查保证异步动画不再操作原生窗口。 */
+function waitForMotion(): Promise<void> {
+    return new Promise((resolve) => {
+        releaseMotion = resolve;
+        motionTimer = setTimeout(() => {
+            releaseMotion = undefined;
+            resolve();
+        }, 180);
+    });
+}
 
 /** 鼠标离开 250ms 后收回；只缩短等待，保留原有 180/220ms 过渡动画。 */
 function scheduleTuck(): void {
     clearTimeout(tuckTimer);
     if (!edgeSide.value || tucked.value) return;
     tuckTimer = setTimeout(() => {
-        if (!hovering && !pickerOpen.value && !selecting.value) void setTucked(true);
+        if (
+            !hovering &&
+            !pickerOpen.value &&
+            !rulePickerOpen.value &&
+            !effortPickerOpen.value &&
+            !selecting.value
+        )
+            void setTucked(true);
     }, 250);
 }
 
 /** 边签使用真实小窗口，不留下透明的大面积鼠标遮挡。 */
 async function setTucked(value: boolean): Promise<void> {
-    if (disposed || (!value && revealing.value)) return;
+    if (disposed || (value && (collapsing.value || tucked.value)) || (!value && revealing.value)) return;
     clearTimeout(tuckTimer);
     const generation = ++animationGeneration;
     try {
         if (value) {
             collapsing.value = true;
             if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
-                await new Promise((resolve) => setTimeout(resolve, 180));
+                await waitForMotion();
             }
             if (generation !== animationGeneration || hovering) {
                 collapsing.value = false;
@@ -103,6 +154,8 @@ async function setTucked(value: boolean): Promise<void> {
 function pointerEntered(): void {
     hovering = !tucked.value;
     clearTimeout(tuckTimer);
+    clearTimeout(motionTimer);
+    releaseMotion?.();
     if (collapsing.value) {
         animationGeneration++;
         collapsing.value = false;
@@ -134,6 +187,9 @@ onUnmounted(() => {
     disposed = true;
     animationGeneration++;
     clearTimeout(tuckTimer);
+    clearTimeout(copiedTimer);
+    clearTimeout(motionTimer);
+    releaseMotion?.();
     clearInterval(clockTimer);
     unsubscribeDock?.();
 });
@@ -147,7 +203,7 @@ const stateLabels: Record<string, string> = {
     error: '测试失败',
     cancelled: '已取消',
 };
-const resultLabel = computed(() => stateLabels[state.value]);
+const resultLabel = computed(() => (!busy.value && stale.value ? '待重新测试' : stateLabels[state.value]));
 /** 两种布局共用主按钮文案：任何已完成/失败/取消记录均允许重新测试。 */
 const primaryLabel = computed(() =>
     busy.value
@@ -156,25 +212,70 @@ const primaryLabel = computed(() =>
             : '取消测试'
         : !profile.value
           ? '配置接口'
-          : latest.value
+          : latestRecord.value
             ? '重新测试'
             : '开始测试',
 );
 const testStartedAt = computed(() =>
-    busy.value ? snapshot.value?.running?.startedAt : latest.value?.startedAt,
+    // 条件变化只使结论失效；上次测试的真实时间仍应保留，不能误写成从未测试。
+    busy.value ? snapshot.value?.running?.startedAt : latestRecord.value?.startedAt,
 );
 const compactTestTime = computed(() => {
-    const value = testStartedAt.value ? new Date(testStartedAt.value) : null;
-    return value && !Number.isNaN(value.getTime())
-        ? value.toLocaleTimeString('zh-CN', { hour12: false })
-        : '尚未测试';
+    return busy.value && !testStartedAt.value ? '正在测试' : formatTime(testStartedAt.value);
 });
+/** 可见值固定为绝对时间便于截图核对；相对时效仅作为悬停补充，不覆盖真实时间。 */
+const testTimeTitle = computed(() =>
+    testStartedAt.value
+        ? `${compactTestTime.value}（${formatRelativeTime(testStartedAt.value, uiNow.value.wall)}）`
+        : compactTestTime.value,
+);
 const requestDuration = computed(() => {
-    if (!busy.value) return latest.value ? `${(latest.value.durationMs / 1000).toFixed(2)}s` : '—';
+    if (!busy.value) return latest.value ? `${(latest.value.durationMs / 1000).toFixed(2)}s` : '暂无数据';
     const started = Date.parse(testStartedAt.value ?? '');
-    return Number.isFinite(started) ? `${(Math.max(0, uiNow.value.wall - started) / 1000).toFixed(1)}s` : '—';
+    return Number.isFinite(started)
+        ? `${(Math.max(0, uiNow.value.wall - started) / 1000).toFixed(1)}s`
+        : '计时中';
 });
+/** 旧配置缺省为 low；显式 null 表示不发送参数，不能用空值合并把它改回 low。 */
+const currentEffort = computed(() =>
+    profile.value?.reasoningEffort === undefined ? 'low' : (profile.value.reasoningEffort ?? ''),
+);
+const reasoning = computed(() =>
+    reasoningSupport(profile.value?.model ?? '', profile.value?.interfaceMode, currentEffort.value || null),
+);
 const autoTestEnabled = computed(() => snapshot.value?.config.preferences.autoTestEnabled ?? false);
+/** 规则由稳定 ID 解析，失效绑定明确标识；强度缺字段沿用旧配置 low，null 为不指定。 */
+const profileSummaries = computed(() =>
+    Object.fromEntries(
+        (snapshot.value?.config.profiles ?? []).map((item) => [
+            item.id,
+            {
+                rule: item.rulePresetId
+                    ? (snapshot.value?.config.rulePresets?.find((preset) => preset.id === item.rulePresetId)
+                          ?.name ?? '规则已失效')
+                    : (snapshot.value?.config.defaultRuleName ?? '默认规则'),
+                effort: item.reasoningEffort === undefined ? 'low' : (item.reasoningEffort ?? '不指定'),
+            },
+        ]),
+    ),
+);
+const ruleOptions = computed(() => [
+    { id: '', name: snapshot.value?.config.defaultRuleName ?? '默认规则', model: '' },
+    ...(snapshot.value?.config.rulePresets ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        model: '',
+    })),
+]);
+// 仅解释后端已判定的历史；状态不在前端重判，多答案通过时展示实际命中的项。
+const resultAnswers = computed(() => {
+    const record = latest.value;
+    if (!record) return '';
+    const answers = ruleAnswers(record);
+    return record.status === 'passed'
+        ? (answers.find((answer) => record.answer.includes(answer)) ?? '')
+        : answers.join(' / ');
+});
 /** 后端提供剩余时长，前端用单调时钟平滑显示；不每秒发 IPC，也不自行触发付费请求。 */
 const autoCountdown = computed(() => {
     if (!profile.value) return '待配置';
@@ -189,6 +290,7 @@ const autoCountdown = computed(() => {
 });
 const hint = computed(() => {
     if (busy.value) return cancelling.value ? '正在取消请求…' : '正在等待模型完整回答…';
+    if (stale.value) return '测试条件已变更，待重新测试';
     if (!latest.value) return '配置好接口后，即可开始第一次测试';
     if (latest.value.status === 'passed') return '命中连续字符串：';
     if (latest.value.status === 'failed') return '未命中连续字符串：';
@@ -197,13 +299,19 @@ const hint = computed(() => {
 
 /** 保持窗口外框与内容尺寸一致，失败时撤回展开状态并提供可见提示。 */
 async function toggleExpanded(): Promise<void> {
+    if (layoutPending.value || disposed) return;
+    layoutPending.value = true;
     const next = !expanded.value;
     try {
         await picker.value?.close();
+        await rulePicker.value?.close();
+        await effortPicker.value?.close();
         await resizeWidget(next);
         expanded.value = next;
     } catch (cause) {
         error.value = String(cause);
+    } finally {
+        layoutPending.value = false;
     }
 }
 
@@ -213,7 +321,7 @@ async function primaryAction(): Promise<void> {
         await safeOpenSettings();
     } else if (busy.value) {
         cancelling.value = true;
-        await cancel();
+        if (!(await cancel())) cancelling.value = false;
     } else {
         await start();
     }
@@ -228,6 +336,22 @@ async function safeOpenSettings(): Promise<void> {
     }
 }
 
+/** 悬浮窗快捷切换自动测试；后端负责持久化、重置周期并通知托盘与设置页。 */
+async function toggleAutoTest(): Promise<void> {
+    if (autoSwitchPending.value) return;
+    autoSwitchPending.value = true;
+    try {
+        await call('set_auto_test_enabled', {
+            enabled: !autoTestEnabled.value,
+        });
+    } catch (cause) {
+        error.value = String(cause);
+    } finally {
+        await refresh();
+        autoSwitchPending.value = false;
+    }
+}
+
 /** 模型选择只更新后端选中项，不复制界面中的旧配置覆盖其他窗口。 */
 async function selectProfile(id: string): Promise<void> {
     if (selecting.value || busy.value) return;
@@ -237,6 +361,42 @@ async function selectProfile(id: string): Promise<void> {
     } catch (cause) {
         error.value = String(cause);
     } finally {
+        await refresh();
+        selecting.value = false;
+    }
+}
+
+/** 只提交当前模型的绑定；等待期间禁止重复切换，读取权威快照后再解除门禁。 */
+async function selectRule(id: string): Promise<void> {
+    const current = profile.value;
+    if (!current || selecting.value || busy.value) return;
+    selecting.value = true;
+    error.value = '';
+    try {
+        await call('set_profile_rule', { profileId: current.id, rulePresetId: id || null });
+    } catch (cause) {
+        error.value = String(cause);
+    } finally {
+        await refresh();
+        selecting.value = false;
+    }
+}
+
+/** 快捷强度切换只写当前模型这一字段；不重计时、不自动测试，失败保留原值并重新读取。 */
+async function selectEffort(id: string): Promise<void> {
+    const current = profile.value;
+    if (!current || selecting.value || busy.value || id === currentEffort.value) return;
+    selecting.value = true;
+    error.value = '';
+    try {
+        await call('set_profile_effort', {
+            profileId: current.id,
+            reasoningEffort: (id || null) as ModelProfile['reasoningEffort'],
+        });
+    } catch (cause) {
+        error.value = String(cause);
+    } finally {
+        await refresh();
         selecting.value = false;
     }
 }
@@ -246,7 +406,8 @@ async function copyAnswer(): Promise<void> {
     try {
         await navigator.clipboard.writeText(latest.value?.answer ?? '');
         copied.value = true;
-        window.setTimeout(() => {
+        clearTimeout(copiedTimer);
+        copiedTimer = setTimeout(() => {
             copied.value = false;
         }, 1800);
     } catch {
@@ -269,7 +430,6 @@ watch(error, (value) => {
         class="edge-tab"
         :class="[edgeSide, `state-${state}`, { 'edge-restoring': revealing }]"
         :aria-label="`显示测智雷达：${resultLabel}`"
-        :title="`${resultLabel} · 移入鼠标展开`"
         @mouseenter="pointerEntered"
         @click="setTucked(false)"
         @focus="setTucked(false)"
@@ -283,7 +443,11 @@ watch(error, (value) => {
         v-else
         class="widget panel"
         :class="[
-            { expanded, 'picker-visible': pickerOpen, 'dock-away': collapsing || revealing },
+            {
+                expanded,
+                'picker-visible': pickerOpen || rulePickerOpen || effortPickerOpen,
+                'dock-away': collapsing || revealing,
+            },
             `state-${state}`,
             edgeSide ? `dock-${edgeSide}` : '',
         ]"
@@ -299,12 +463,24 @@ watch(error, (value) => {
             </div>
             <Grip :size="22" class="drag-grip" aria-hidden="true" />
             <div class="widget-tools" @mousedown.stop>
+                <button
+                    class="icon-button"
+                    :class="{ active: autoTestEnabled }"
+                    :aria-pressed="autoTestEnabled"
+                    :disabled="autoSwitchPending"
+                    aria-label="切换自动测试"
+                    :title="`${autoTestEnabled ? '关闭' : '开启'}自动测试 · 每 ${snapshot?.config.preferences.autoTestIntervalMinutes ?? 3} 分钟`"
+                    @click="toggleAutoTest"
+                >
+                    <TimerReset :size="15" />
+                </button>
                 <button class="icon-button" aria-label="打开设置" title="设置" @click="safeOpenSettings">
                     <Settings2 :size="15" />
                 </button>
                 <button
                     class="icon-button expand-button"
                     :aria-expanded="expanded"
+                    :disabled="layoutPending"
                     :aria-label="expanded ? '收起结果' : '展开测试详情'"
                     :title="expanded ? '收起' : '展开'"
                     @click="toggleExpanded"
@@ -320,11 +496,47 @@ watch(error, (value) => {
             :selected-id="snapshot?.config.selectedProfileId ?? null"
             :expanded="expanded"
             :disabled="busy || selecting"
+            :summaries="profileSummaries"
+            :before-open="() => closeOtherPickers('model')"
             @select="selectProfile"
             @configure="safeOpenSettings"
             @open-change="pickerOpen = $event"
             @error="error = $event"
         />
+
+        <div class="widget-rule-row">
+            <ModelPicker
+                ref="rulePicker"
+                class="widget-rule-picker"
+                label="当前测试规则"
+                :profiles="ruleOptions"
+                :selected-id="profile?.rulePresetId ?? ''"
+                :placeholder="profile?.rulePresetId ? '规则已失效' : '默认规则'"
+                :expanded="expanded"
+                :disabled="busy || selecting || !profile"
+                :show-model="false"
+                :before-open="() => closeOtherPickers('rule')"
+                @select="selectRule"
+                @open-change="rulePickerOpen = $event"
+                @error="error = $event"
+            />
+            <ModelPicker
+                ref="effortPicker"
+                class="widget-effort-picker"
+                label="当前思考等级"
+                :profiles="reasoning.options"
+                :selected-id="currentEffort"
+                :expanded="expanded"
+                :disabled="busy || selecting || !profile"
+                :show-model="false"
+                :show-icon="false"
+                :description="reasoning.notice"
+                :before-open="() => closeOtherPickers('effort')"
+                @select="selectEffort"
+                @open-change="effortPickerOpen = $event"
+                @error="error = $event"
+            />
+        </div>
 
         <section v-if="expanded" class="result-content">
             <div class="result-heading" aria-live="polite">
@@ -337,10 +549,10 @@ watch(error, (value) => {
                 </span>
                 <div class="result-heading-copy">
                     <h1>{{ resultLabel }}</h1>
-                    <p :title="hint + (latest?.keyword ?? '')">
+                    <p :title="hint + resultAnswers">
                         {{ hint }}
                         <strong v-if="!busy && (state === 'passed' || state === 'failed')">{{
-                            latest?.keyword
+                            resultAnswers
                         }}</strong>
                     </p>
                 </div>
@@ -358,11 +570,10 @@ watch(error, (value) => {
                 </p>
             </div>
             <div class="metadata" :class="{ 'with-countdown': autoTestEnabled }">
-                <div>
+                <div class="test-timestamp">
                     <Clock3 :size="14" /><span
-                        >测试时间<strong :title="formatTime(testStartedAt)">{{
-                            formatTime(testStartedAt)
-                        }}</strong></span
+                        >{{ stale && !busy ? '上次测试' : '测试时间'
+                        }}<strong :title="testTimeTitle">{{ compactTestTime }}</strong></span
                     >
                 </div>
                 <div>
@@ -385,7 +596,7 @@ watch(error, (value) => {
                 <button
                     class="button"
                     :class="{ secondary: busy }"
-                    :disabled="cancelling || selecting"
+                    :disabled="cancelling || selecting || (busy && !snapshot?.running)"
                     @click="primaryAction"
                 >
                     <X v-if="busy" :size="15" /><RotateCw v-else-if="latest" :size="15" /><Play
@@ -409,19 +620,20 @@ watch(error, (value) => {
                     <Minus v-else :size="12" /> </span
                 >{{ resultLabel }}
             </div>
-            <div
-                class="compact-timing"
-                :title="`测试时间：${formatTime(testStartedAt)}；请求耗时：${requestDuration}`"
-            >
-                <span
-                    >测试时间 {{ compactTestTime }} <span>耗时 {{ requestDuration }}</span></span
-                >
-                <span v-if="autoTestEnabled" class="auto-countdown">下次测试 {{ autoCountdown }}</span>
+            <div class="compact-timing" :title="`测试时间：${testTimeTitle}；请求耗时：${requestDuration}`">
+                <!-- 标签必须直接可见，不能仅藏在悬停说明中；日期仍与耗时、倒计时分行。 -->
+                <span class="compact-test-time">测试时间 {{ compactTestTime }}</span>
+                <span v-if="busy || latest || autoTestEnabled" class="compact-request-details">
+                    <span v-if="busy || latest">耗时 {{ requestDuration }}</span>
+                    <span v-if="autoTestEnabled" class="auto-countdown"
+                        >{{ busy || latest ? ' · ' : '' }}下次 {{ autoCountdown }}</span
+                    >
+                </span>
             </div>
             <button
                 class="button compact-primary"
                 :class="{ secondary: busy }"
-                :disabled="cancelling || selecting"
+                :disabled="cancelling || selecting || (busy && !snapshot?.running)"
                 @click="primaryAction"
             >
                 <X v-if="busy" :size="13" /><RotateCw v-else-if="latest" :size="13" /><Play

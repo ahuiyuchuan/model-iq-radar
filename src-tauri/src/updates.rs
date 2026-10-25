@@ -1,18 +1,111 @@
-//! 关于页的只读正式发布检查与系统浏览器边界。仅用户点击时联网，不接收模型配置。
+//! 进程级每小时静默检查与用户主动检查共用公开发布请求，与模型配置隔离。
 //! 不下载/执行程序，不发送题目、历史或凭据，不持有测试和存储锁。作者：ahui。
 
 use reqwest::{redirect::Policy, Client, Response, StatusCode};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri::{Emitter, Manager, State};
 use url::Url;
 
 const REPOSITORY: &str = "https://github.com/ahuiyuchuan/model-iq-radar";
 const API_REPOSITORY: &str = "https://api.github.com/repos/ahuiyuchuan/model-iq-radar";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 检查结束后等待完整一小时；失败、唤醒、窗口重开都不能引起密集重试或补跑。
+const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// 只读更新结果；status 为 available / current / no-release，失败以 IPC 错误返回。
-#[derive(Serialize)]
+/// 网络请求合并门禁与公开发布缓存；不接触模型运行锁或业务数据库。
+#[derive(Default)]
+pub struct UpdateCache {
+    state: Mutex<CacheState>,
+    request: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    latest: Option<UpdateResult>,
+    generation: u64,
+    /// 仅供已等待同一次请求的调用方共享失败；新的一次主动检查仍可重试。
+    outcome: Option<Result<UpdateResult, String>>,
+}
+
+impl UpdateCache {
+    /// 同时到来的后台/手动调用共用一次网络请求；失败保留最近成功结果。
+    /// 返回值中的 bool 仅在成功缓存内容变化时为 true，防止重复广播。
+    async fn check<F, R>(&self, check: F) -> Result<(UpdateResult, bool), String>
+    where
+        F: FnOnce() -> R,
+        R: Future<Output = Result<UpdateResult, String>>,
+    {
+        let generation = self
+            .state
+            .lock()
+            .map_err(|_| "更新缓存暂不可用。")?
+            .generation;
+        let _request = self.request.lock().await;
+        {
+            let state = self.state.lock().map_err(|_| "更新缓存暂不可用。")?;
+            if state.generation != generation {
+                if let Some(outcome) = &state.outcome {
+                    return outcome.clone().map(|result| (result, false));
+                }
+            }
+        }
+        let outcome = check().await;
+        let mut state = self.state.lock().map_err(|_| "更新缓存暂不可用。")?;
+        let changed = outcome
+            .as_ref()
+            .is_ok_and(|result| state.latest.as_ref() != Some(result));
+        if let Ok(result) = &outcome {
+            state.latest = Some(result.clone());
+        }
+        state.generation = state.generation.wrapping_add(1);
+        state.outcome = Some(outcome.clone());
+        outcome.map(|result| (result, changed))
+    }
+}
+
+/// 设置页只读内存缓存，不触发网络检查。缓存异常按静默约定由前端忽略。
+#[tauri::command]
+pub fn get_update_status(state: State<'_, UpdateCache>) -> Result<Option<UpdateResult>, String> {
+    state
+        .state
+        .lock()
+        .map(|value| value.latest.clone())
+        .map_err(|_| "更新缓存暂不可用。".into())
+}
+
+/// setup 仅启动一个后台任务；打开多个窗口或重开设置不创建新的检查器。
+/// 无论成功失败都不弹通知、不自动下载，也不持有测试运行门禁或存储锁。
+pub fn start_monitor(app: tauri::AppHandle) {
+    if !app.manage(UpdateCache::default()) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        monitor_loop(|| check_updates(app.clone()), |_| {}).await;
+    });
+}
+
+/// 串行检查、完成后计时；不用 interval 的追赶行为，休眠错过的轮次直接跳过。
+/// 将只读检查与发布回调分离，便于用虚拟时钟验证失败节流且不请求真实 GitHub。
+async fn monitor_loop<F, R, P>(mut check: F, mut publish: P)
+where
+    F: FnMut() -> R,
+    R: Future<Output = Result<UpdateResult, String>>,
+    P: FnMut(UpdateResult),
+{
+    loop {
+        if let Ok(result) = check().await {
+            publish(result);
+        }
+        tokio::time::sleep(CHECK_INTERVAL).await;
+    }
+}
+
+/// 只读更新结果；后台失败不反馈，主动检查失败仅返回给主动调用的界面。
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateResult {
     status: &'static str,
@@ -83,9 +176,19 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
-/// 固定公开仓库；只有明确点击检查才请求，不读取模型地址、配置或 API Key。
+/// 主动检查与后台共用请求门禁；成功同步所有窗口，错误只由主动调用方显示。
 #[tauri::command]
-pub async fn check_updates() -> Result<UpdateResult, String> {
+pub async fn check_updates(app: tauri::AppHandle) -> Result<UpdateResult, String> {
+    let cache = app.state::<UpdateCache>();
+    let (result, changed) = cache.check(fetch_updates).await?;
+    if changed {
+        let _ = app.emit("update-status-changed", &result);
+    }
+    Ok(result)
+}
+
+/// 固定公开仓库、单次总预算，不读取模型地址、配置或 API Key。
+async fn fetch_updates() -> Result<UpdateResult, String> {
     let client = Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(5))
@@ -211,6 +314,116 @@ fn parse_release(bytes: &[u8], current: &str) -> Result<UpdateResult, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn available() -> UpdateResult {
+        UpdateResult {
+            status: "available",
+            current_version: "1.0.1".into(),
+            latest_version: Some("1.1.0".into()),
+            release_url: REPOSITORY.into(),
+            notes: "公开发布说明".into(),
+        }
+    }
+
+    /// 后台和多个窗口同时主动检查只发一次请求，成功结果变化也只广播一次。
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_checks_share_one_request_and_one_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = UpdateCache::default();
+        let calls = AtomicUsize::new(0);
+        let fetch = || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(available())
+        };
+        let (first, second, third) =
+            tokio::join!(cache.check(fetch), cache.check(fetch), cache.check(fetch));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(first.unwrap().1);
+        assert!(!second.unwrap().1);
+        assert!(!third.unwrap().1);
+        assert!(!cache.check(fetch).await.unwrap().1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// 失败合并给当前等待者，保留成功缓存；之后的主动点击可重新检查，不被失败缓存锁死。
+    #[tokio::test(start_paused = true)]
+    async fn shared_failure_preserves_success_and_later_click_can_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = UpdateCache::default();
+        cache.check(|| async { Ok(available()) }).await.unwrap();
+        let calls = AtomicUsize::new(0);
+        let fail = || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err("模拟离线".into())
+        };
+        let (first, second) = tokio::join!(cache.check(fail), cache.check(fail));
+        assert!(first.is_err());
+        assert!(second.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache.state.lock().unwrap().latest.as_ref().unwrap().status,
+            "available"
+        );
+        assert!(!cache.check(|| async { Ok(available()) }).await.unwrap().1);
+        assert!(cache
+            .state
+            .lock()
+            .unwrap()
+            .outcome
+            .as_ref()
+            .unwrap()
+            .is_ok());
+    }
+
+    /// 首次检查立即执行；失败也等一小时，跨多小时恢复仅执行一次，不补跑历史轮次。
+    #[tokio::test(start_paused = true)]
+    async fn hourly_monitor_is_silent_on_failure_and_skips_missed_checks() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let notices = published.clone();
+        let worker = tokio::spawn(monitor_loop(
+            move || {
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(if index == 0 {
+                    Err("离线".into())
+                } else {
+                    Ok(UpdateResult {
+                        status: "available",
+                        current_version: "1.0.1".into(),
+                        latest_version: Some("1.1.0".into()),
+                        release_url: REPOSITORY.into(),
+                        notes: String::new(),
+                    })
+                })
+            },
+            move |_| {
+                notices.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(published.load(Ordering::SeqCst), 0);
+        tokio::time::advance(CHECK_INTERVAL - Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        tokio::time::advance(CHECK_INTERVAL * 12).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        worker.abort();
+    }
 
     /// 恶意协议、控制字符和本机文件在原生边界也被拒绝，不能仅依赖 DOM 过滤。
     #[test]

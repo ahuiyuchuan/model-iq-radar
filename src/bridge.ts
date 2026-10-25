@@ -6,18 +6,24 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { AppSnapshot } from './types';
+import type { AppSnapshot, ModelProfile, ProfileInput, UpdateResult } from './types';
 
 export const desktop = isTauri();
 /** 默认五行题目不插入空行；与 Rust 默认值一致，不覆盖用户已保存的自定义问题。 */
 export const DEFAULT_PROMPT =
     '请快速按顺序回答：\n1. 仅依据你的记忆，你所知道的最新一位日本首相是谁？\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
+/** 浏览器布局预览使用与 Rust 同源文案；题目只发送正文，不附加 21颗 判定答案。 */
+export const CANDY_PROMPT =
+    '请完成回答下面的问题，答案要求只能由数字和“颗”组成，例如10颗、20颗、30颗；数字与“颗”之间不得有空格：\n\n在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4';
 
 const preview: AppSnapshot = {
     config: {
         profiles: [],
         selectedProfileId: null,
         rule: { prompt: DEFAULT_PROMPT, keyword: '高市早苗' },
+        defaultRuleName: '日本首相测试',
+        builtinRulesVersion: 1,
+        rulePresets: [{ id: 'builtin-candy-test', name: '糖果测试', prompt: CANDY_PROMPT, keyword: '21颗' }],
         preferences: {
             alwaysOnTop: true,
             snapToEdge: true,
@@ -26,6 +32,8 @@ const preview: AppSnapshot = {
             shortcutEnabled: true,
             autoTestEnabled: true,
             autoTestIntervalMinutes: 3,
+            historyMaxRecords: 500,
+            historyRetentionDays: null,
         },
     },
     history: [],
@@ -43,8 +51,18 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
         return invoke<T>(command, args);
     }
     if (command === 'get_snapshot') {
-        return structuredClone(preview) as T;
+        // 预览也遵循桌面读取范围，不能让布局调试无意依赖悬浮窗全量历史。
+        const snapshot = structuredClone(preview);
+        if (args.includeHistory !== true) {
+            const latest = snapshot.history.find(
+                (record) => record.profileId === snapshot.config.selectedProfileId,
+            );
+            snapshot.history = latest ? [latest] : [];
+        }
+        return snapshot as T;
     }
+    if (command === 'get_model_catalog') return [] as T;
+    if (command === 'get_update_status') return null as T;
     if (command === 'start_test') {
         throw new Error('请在桌面应用中测试。浏览器仅预览界面，不调用模型 API。');
     }
@@ -52,21 +70,80 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
     if (['get_autostart', 'set_autostart'].includes(command)) {
         throw new Error('开机自启仅在 Windows 桌面应用中可用。');
     }
-    if (['check_updates', 'open_external_url', 'fetch_models', 'test_connection'].includes(command)) {
+    if (
+        [
+            'open_external_url',
+            'fetch_models',
+            'test_connection',
+            'check_updates',
+            'send_test_email',
+            'save_email_settings',
+            'export_config_backup',
+            'preview_config_import',
+            'import_config_backup',
+        ].includes(command)
+    ) {
         throw new Error('请在桌面应用中使用此功能，浏览器预览不会联网检查或打开外部页面。');
     }
     if (command === 'save_rule') {
         preview.config.rule = structuredClone(args.rule) as typeof preview.config.rule;
+        if (typeof args.name === 'string') preview.config.defaultRuleName = args.name;
+    } else if (command === 'set_profile_rule') {
+        const profile = preview.config.profiles.find((item) => item.id === args.profileId);
+        if (!profile) throw new Error('模型配置已不存在，请刷新后重试。');
+        if (
+            args.rulePresetId != null &&
+            !preview.config.rulePresets?.some((item) => item.id === args.rulePresetId)
+        )
+            throw new Error('规则预设已不存在，请刷新后重试。');
+        profile.rulePresetId = (args.rulePresetId as string | null) ?? null;
+    } else if (command === 'set_profile_effort') {
+        const profile = preview.config.profiles.find((item) => item.id === args.profileId);
+        if (!profile) throw new Error('模型配置已不存在，请刷新后重试。');
+        const value = args.reasoningEffort;
+        if (value != null && !['low', 'medium', 'high', 'xhigh'].includes(String(value)))
+            throw new Error('思考强度无效。');
+        profile.reasoningEffort = value as ModelProfile['reasoningEffort'];
     } else if (command === 'save_preferences') {
         preview.config.preferences = structuredClone(args.preferences) as typeof preview.config.preferences;
+    } else if (command === 'set_auto_test_enabled') {
+        preview.config.preferences.autoTestEnabled = Boolean(args.enabled);
+    } else if (command === 'preview_history_retention') {
+        return { removedCount: 0, remainingCount: preview.history.length } as T;
+    } else if (command === 'save_rule_preset') {
+        const preset = structuredClone(args.preset) as NonNullable<typeof preview.config.rulePresets>[number];
+        const presets = (preview.config.rulePresets ??= []);
+        const index = presets.findIndex((item) => item.id === preset.id);
+        if (index < 0) presets.push(preset);
+        else presets[index] = preset;
+    } else if (command === 'delete_rule_preset') {
+        preview.config.rulePresets = preview.config.rulePresets?.filter((item) => item.id !== args.id);
+        for (const profile of preview.config.profiles) {
+            if (profile.rulePresetId === args.id) profile.rulePresetId = null;
+        }
     } else if (command === 'save_profile') {
-        const input = args.input as Record<string, string>;
+        const input = args.input as ProfileInput;
+        const interfaceMode: ModelProfile['interfaceMode'] =
+            input.interfaceMode === 'responses' ? 'responses' : 'chat_completions';
+        const reasoningEffort: ModelProfile['reasoningEffort'] =
+            input.reasoningEffort === 'low' ||
+            input.reasoningEffort === 'medium' ||
+            input.reasoningEffort === 'high' ||
+            input.reasoningEffort === 'xhigh'
+                ? input.reasoningEffort
+                : null;
         const profile = {
             id: input.id || crypto.randomUUID(),
             name: input.name,
             baseUrl: input.baseUrl,
             model: input.model,
             hasKey: false,
+            interfaceMode,
+            protocolFallbackEnabled: input.protocolFallbackEnabled ?? false,
+            reasoningEffort,
+            timeoutSeconds: input.timeoutSeconds ? Number(input.timeoutSeconds) : null,
+            rulePresetId: input.rulePresetId || null,
+            catalogToken: input.catalogToken || null,
         };
         const index = preview.config.profiles.findIndex((item) => item.id === profile.id);
         if (index < 0) preview.config.profiles.push(profile);
@@ -95,6 +172,34 @@ export async function subscribe(handler: () => void): Promise<() => void> {
     return () => window.removeEventListener('preview-changed', handler);
 }
 
+/**
+ * 订阅进程级更新缓存；先监听后读取，避免打开设置时旧缓存撤销刚收到的新版本标记。
+ * @param handler 仅呈现更新标记，不弹窗、不触发网络请求；null 表示尚无成功检查结果。
+ * @returns 卸载设置页时必须调用的清理函数；浏览器只提供空缓存预览。
+ * @throws IPC/事件订阅失败时拒绝，调用方按静默检查约定忽略，不影响其他设置。
+ */
+export async function subscribeUpdateStatus(
+    handler: (result: UpdateResult | null) => void,
+): Promise<() => void> {
+    if (!desktop) {
+        handler(null);
+        return () => {};
+    }
+    let receivedEvent = false;
+    const cleanup = await listen<UpdateResult>('update-status-changed', (event) => {
+        receivedEvent = true;
+        handler(event.payload);
+    });
+    try {
+        const initial = await call<UpdateResult | null>('get_update_status');
+        if (!receivedEvent) handler(initial);
+        return cleanup;
+    } catch (cause) {
+        cleanup();
+        throw cause;
+    }
+}
+
 let layoutQueue: Promise<unknown> = Promise.resolve();
 
 /**
@@ -112,7 +217,12 @@ export async function resizeWidget(expanded: boolean, menuHeight = 0, tucked = f
     await update;
 }
 
-/** 监听左、右、顶部边缘吸附及图标状态，返回的清理函数须在窗口卸载时执行。 */
+/**
+ * 监听左、右、顶部边缘吸附及图标状态，先注册事件再读取初始状态，优先采用新事件。
+ * @param handler 接收边缘方向（未吸附时 null）与是否收为图标的状态，不应发起测试。
+ * @returns 卸载时必须调用的清理函数；浏览器预览返回无副作用空函数。
+ * @throws 桌面监听或初始读取失败时拒绝 Promise；已注册的监听会先清理。
+ */
 export async function subscribeDock(
     handler: (dock: { side: string | null; tucked: boolean }) => void,
 ): Promise<() => void> {
@@ -148,11 +258,34 @@ export async function openSettings(): Promise<void> {
     else window.open('/?view=settings', 'model-probe-settings');
 }
 
-/** 根据窗口角色执行关闭；悬浮窗隐藏到托盘，设置窗口可直接销毁。 */
+/**
+ * 执行原生窗口操作；设置页关闭仍经过草稿保护，悬浮窗关闭由后端转为隐藏到托盘。
+ * @param action 关闭、最小化或切换最大化；浏览器预览不执行原生操作。
+ * @throws 原生操作失败时拒绝 Promise，交由调用方提供可见反馈。
+ */
 export async function windowAction(action: 'close' | 'minimize' | 'maximize'): Promise<void> {
     if (!desktop) return;
     const current = getCurrentWindow();
     if (action === 'minimize') await current.minimize();
     else if (action === 'maximize') await current.toggleMaximize();
     else await current.close();
+}
+
+/**
+ * 拦截标题栏、Alt+F4 等原生关闭路径，让设置页统一保护草稿。
+ * 监听注册前组件可能卸载，调用方仍须在 Promise 完成后清理。
+ * @param handler 统一关闭流程，负责保存/放弃/取消及最终销毁窗口。
+ * @returns 解除原生监听的函数，浏览器预览返回无副作用空函数。
+ */
+export async function protectWindowClose(handler: () => Promise<void>): Promise<() => void> {
+    if (!desktop) return () => {};
+    return getCurrentWindow().onCloseRequested((event) => {
+        event.preventDefault();
+        void handler();
+    });
+}
+
+/** 用户已完成保存/放弃选择后销毁设置窗口，绕过 close 事件防止重复确认。 */
+export async function closeSettingsWindow(): Promise<void> {
+    if (desktop) await getCurrentWindow().destroy();
 }

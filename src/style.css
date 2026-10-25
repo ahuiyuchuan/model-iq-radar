@@ -211,7 +211,7 @@ summary:focus-visible {
  */
 .widget {
     width: 360px;
-    height: 124px;
+    height: 156px;
     border-radius: 12px;
     border: 0;
     box-shadow: none;
@@ -242,9 +242,12 @@ summary:focus-visible {
     cursor: move;
 }
 .model-select {
+    /* 三个卡片选择器在紧凑/展开时共用尺寸；设置表单只覆盖这两个尺寸变量。 */
+    --picker-height: 29px;
+    --picker-font-size: 11px;
     border: 1px solid var(--line);
     border-radius: 5px;
-    min-height: 29px;
+    min-height: var(--picker-height);
     flex-shrink: 0;
     position: relative;
     background: #ffffff02;
@@ -259,11 +262,11 @@ summary:focus-visible {
     color: #dce6f3;
     border: 0;
     outline-offset: 0;
-    height: 27px;
+    height: calc(var(--picker-height) - 2px);
     min-width: 0;
     text-align: left;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: var(--picker-font-size);
     font-weight: 550;
     cursor: pointer;
     text-overflow: ellipsis;
@@ -277,6 +280,34 @@ summary:focus-visible {
 }
 .model-trigger > svg {
     flex-shrink: 0;
+}
+/* 可编辑选择器沿用模型选择器的菜单，输入和箭头共用一个边界，避免重复控件。 */
+.model-input-wrap {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+.settings .editable-picker .model-input-wrap input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    /* 输入与普通触发器均扣除外框两条边，防止模型名称控件额外增高。 */
+    height: calc(var(--picker-height) - 2px);
+    padding: 0 8px;
+    font-size: var(--picker-font-size);
+}
+.model-input-wrap > button {
+    flex-shrink: 0;
+    margin-right: 4px;
+}
+.editable-picker:focus-within {
+    outline: 2px solid #8ac3ff;
+    outline-offset: 1px;
+}
+.model-input-wrap input:focus-visible {
+    outline: 0;
 }
 .model-select:hover,
 .model-select.picker-open {
@@ -301,7 +332,7 @@ summary:focus-visible {
     left: -1px;
     right: -1px;
     padding: 4px;
-    max-height: 208px;
+    max-height: 210px;
     overflow: auto;
     border: 1px solid #58769875;
     border-radius: 9px;
@@ -310,10 +341,16 @@ summary:focus-visible {
         0 10px 22px #07132166,
         inset 0 1px 0 #d4e9ff0a;
 }
+.model-menu.opens-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+}
 .model-option {
     width: 100%;
     height: 40px;
-    display: flex;
+    /* 所有行都预留勾选列，避免仅选中行的摘要向左跳动 24px。 */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 14px;
     align-items: center;
     gap: 10px;
     border: 0;
@@ -325,6 +362,10 @@ summary:focus-visible {
 }
 .model-option.active {
     background: #365f8d66;
+}
+.model-option.has-summary {
+    /* 规则跟随左侧标题；强度与固定勾选列独立居中，选中状态不改变它们的位置。 */
+    grid-template-columns: minmax(0, 1fr) 48px 14px;
 }
 .model-option.selected {
     color: #a6d5ff;
@@ -341,6 +382,38 @@ summary:focus-visible {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+}
+/* 两态共用约 80:20 比例；等级列至少 70px，确保相同字号/箭头下 medium 仍完整可读。 */
+.widget-rule-row {
+    display: grid;
+    grid-template-columns: minmax(0, 4fr) minmax(70px, 1fr);
+    align-items: center;
+    gap: 8px;
+    margin-top: 5px;
+    min-width: 0;
+}
+.widget-rule-picker {
+    min-width: 0;
+}
+.widget-effort-picker {
+    min-width: 0;
+}
+.widget .widget-effort-picker .model-trigger {
+    gap: 2px;
+    /* 窄列只压缩侧边留白；字号和箭头与另外两框一致，不靠缩字容纳等级名称。 */
+    padding: 0 2px;
+}
+.widget-effort-picker .model-menu {
+    /* 窄触发器不限制菜单宽度，向左展开并停留在 360px 卡片范围内。 */
+    left: auto;
+    min-width: 240px;
+}
+.option-effort {
+    color: #9cb0c7;
+    font-size: 9px;
+    line-height: 1.3;
+    white-space: nowrap;
+    text-align: center;
 }
 .option-copy > span {
     font-size: 11px;
@@ -392,7 +465,7 @@ select option {
     flex-direction: column;
     gap: 3px;
     color: #a5b7cd;
-    font-size: 9px;
+    font-size: 10px;
     line-height: 1.3;
 }
 .compact-timing > span {
@@ -401,7 +474,7 @@ select option {
     white-space: nowrap;
 }
 .compact-timing > span > span {
-    margin-left: 2px;
+    white-space: nowrap;
 }
 .compact-timing .auto-countdown {
     color: #8dbdff;
@@ -414,6 +487,10 @@ select option {
     gap: 2px;
     align-items: center;
     margin-left: auto;
+}
+.widget-tools .icon-button.active {
+    color: #8fd5aa;
+    background: rgba(55, 184, 115, 0.16);
 }
 .widget .drag-grip {
     left: 48%;
@@ -547,7 +624,7 @@ select option {
 
 /* 展开卡片以回答区域吸收剩余高度，长正文只滚动回答，不挤出底部按钮。 */
 .widget.expanded {
-    height: 540px;
+    height: 572px;
     padding-bottom: 12px;
 }
 .expanded .widget-header {
@@ -555,13 +632,6 @@ select option {
 }
 .collapse {
     font-size: 11px;
-}
-.expanded .model-select {
-    min-height: 34px;
-}
-.expanded .model-trigger {
-    height: 32px;
-    font-size: 12px;
 }
 .result-content {
     min-height: 0;
@@ -662,6 +732,7 @@ select option {
     border-radius: 7px;
     padding: 10px;
     margin-top: 11px;
+    row-gap: 8px;
 }
 .metadata > div {
     display: flex;
@@ -672,7 +743,7 @@ select option {
     min-width: 0;
 }
 .metadata.with-countdown {
-    grid-template-columns: 1.35fr 0.8fr 0.85fr;
+    grid-template-columns: 1fr 1fr;
     column-gap: 6px;
 }
 .metadata > div > span {
@@ -691,6 +762,19 @@ select option {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+/* 完整日期独占一行，避免三列挤掉年月日或秒；其余耗时/倒计时仍沿用并列布局。 */
+.metadata .test-timestamp {
+    grid-column: 1 / -1;
+}
+.metadata .test-timestamp > span {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.metadata .test-timestamp strong {
+    margin-top: 0;
 }
 .expanded-actions {
     display: flex;
@@ -857,6 +941,30 @@ select option {
 .settings-sidebar nav button > svg:last-child:not(:first-child) {
     margin-left: auto;
 }
+/* 最小设置窗口中也必须完整显示“关于”；有更新时收紧间距，不能挤成两行。 */
+.settings-sidebar nav button.has-update {
+    gap: 4px;
+}
+.settings-sidebar nav button > svg,
+.settings-sidebar nav button > span:first-of-type {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.nav-update-badge {
+    margin-left: auto;
+    flex-shrink: 0;
+    border: 1px solid #73b5ff40;
+    border-radius: 4px;
+    padding: 2px 5px;
+    color: #a6d5ff;
+    background: #73b5ff12;
+    font-size: 9px;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+.settings-sidebar nav button > .nav-update-badge + svg {
+    margin-left: 0;
+}
 .sidebar-bottom {
     margin-top: auto;
     color: #879eb6;
@@ -883,6 +991,129 @@ select option {
     overflow: hidden;
     min-width: 0;
     min-height: 0;
+}
+/* 后端已提交但读取失败时保留独立恢复入口；主体 inert，避免旧草稿重复写入。 */
+.snapshot-recovery {
+    flex-shrink: 0;
+    margin: 12px 18px 0;
+    flex-wrap: wrap;
+}
+/* 恢复态底栏被 inert 阻止操作，同时显式减弱外观，避免看似可提交却没有响应。 */
+.settings-actions[inert] {
+    opacity: 0.55;
+}
+/* 模态选择独占交互层，背景 inert 防止快捷键/Tab 修改被确认中的草稿。 */
+.dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: #03101dcc;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+.action-dialog {
+    width: min(540px, 100%);
+    max-height: calc(100vh - 48px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    /* 复用首版深色选择菜单的边框和实底，新增确认流程沿用既有石墨蓝配色。 */
+    border: 1px solid #58769875;
+    border-radius: 12px;
+    background: #1a2b3e;
+    padding: 23px;
+    box-shadow: 0 18px 60px #0008;
+}
+.action-dialog h2 {
+    margin: 0 0 12px;
+    font-size: 17px;
+    flex-shrink: 0;
+}
+.dialog-body {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+.action-dialog p {
+    color: #bed0e5;
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+.dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 9px;
+    margin-top: 24px;
+    flex-shrink: 0;
+}
+.import-options {
+    margin-top: 16px;
+}
+.mail-settings fieldset {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+}
+.mail-settings .preference-row {
+    margin-bottom: 21px;
+}
+.settings .model-select {
+    min-width: 0;
+}
+.settings .model-trigger {
+    max-width: 100%;
+}
+/* 接口/规则表单沿用首版 36px 控件，不影响历史工具栏自有的紧凑布局。 */
+.settings-form .model-select {
+    --picker-height: 36px;
+    --picker-font-size: 12px;
+}
+.settings-actions {
+    flex-wrap: wrap;
+}
+/* 规则删除与恢复放在固定底栏左侧，选择器旁只留新增；小窗口允许次要操作换行。 */
+.rule-footer-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.settings-actions .footer-hint {
+    flex: 1 1 100%;
+}
+.history-export-controls {
+    display: flex;
+    flex: 1;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+}
+.history-export-controls > .model-select {
+    flex: 1;
+    min-width: 110px;
+    max-width: 170px;
+}
+.history-export-controls .model-trigger {
+    font-size: 11px;
+    min-height: 34px;
+}
+.settings-actions .model-menu {
+    top: auto;
+    bottom: calc(100% + 8px);
+}
+.history-time {
+    flex-wrap: wrap;
+}
+.history-detail {
+    min-width: 0;
+}
+.settings .field-row > label {
+    overflow-wrap: anywhere;
 }
 .settings-scroll {
     /* 约束绝对定位的辅助标签，避免它们越过滚动区撑出整窗滚动条。 */
@@ -936,7 +1167,8 @@ select option {
     color: #82a4c8;
     flex-shrink: 0;
 }
-input:not([type='checkbox']):not([type='range']),
+/* 隐藏文件字段沿用 sr-only 的 1px 尺寸，不能被普通表单宽度撑出页面；where 不提高选择器权重。 */
+input:not([type='checkbox']):not([type='range']):where(:not(.sr-only)),
 textarea {
     background: #9dc5f207;
     border: 1px solid #afcbed24;
@@ -1012,16 +1244,20 @@ textarea {
     position: absolute;
     right: 5px;
 }
-.checkbox-line {
+/* 二值设置统一沿用首版滑动开关；整段标签可点击，长文案换行时开关不被挤压。 */
+.toggle-line {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 8px;
+    min-height: 28px;
     margin-top: 8px;
-    font-size: 10px;
+    font-size: 11px;
+    line-height: 1.6;
     color: #9eb1c9;
+    cursor: pointer;
 }
-input[type='checkbox'] {
-    accent-color: #388cfd;
+.toggle-line:has(input:disabled) {
+    cursor: not-allowed;
 }
 .form-footer {
     display: flex;
@@ -1084,6 +1320,27 @@ input[type='checkbox'] {
 }
 .keyword-field {
     margin-top: 17px;
+}
+.rule-answer-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 8px;
+}
+.rule-answer-row textarea {
+    flex: 1;
+    min-width: 0;
+    min-height: 66px;
+}
+.rule-answer-row > button {
+    flex-shrink: 0;
+}
+.history-answers {
+    margin: 0;
+    padding-left: 20px;
+}
+.history-answers li + li {
+    margin-top: 8px;
 }
 .keyword-field > input {
     margin-top: 8px;
@@ -1157,17 +1414,27 @@ input[type='checkbox'] {
     font-size: 10px;
     color: #92a9c2;
 }
-.switch {
+/* 保留原生 checked/disabled、标签激活和空格键语义，不用额外点击处理器重复提交。
+   Markdown 任务是外部回答的只读状态：共享外观，但不赋予可编辑的开关角色。 */
+.switch,
+.markdown-body input.task-list-item-checkbox {
     appearance: none;
     width: 32px;
     height: 18px;
+    box-sizing: border-box;
+    padding: 0;
+    margin: 0;
+    border: 0;
     border-radius: 12px;
     background: #53647b;
     position: relative;
     cursor: pointer;
     flex-shrink: 0;
+    vertical-align: middle;
+    transition: background-color 150ms;
 }
-.switch::after {
+.switch::after,
+.markdown-body input.task-list-item-checkbox::after {
     content: '';
     width: 12px;
     height: 12px;
@@ -1178,11 +1445,17 @@ input[type='checkbox'] {
     left: 3px;
     transition: left 150ms;
 }
-.switch:checked {
+.switch:checked,
+.markdown-body input.task-list-item-checkbox:checked {
     background: #2b86fc;
 }
-.switch:checked::after {
+.switch:checked::after,
+.markdown-body input.task-list-item-checkbox:checked::after {
     left: 17px;
+}
+.switch:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 .range-control {
     display: flex;
@@ -1197,25 +1470,22 @@ input[type='checkbox'] {
 }
 .number-control {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     gap: 8px;
     color: #a7bbd5;
     font-size: 11px;
 }
 .number-control input {
-    width: 65px !important;
+    /* 同时容纳“继承全局”“不限制”、四位上限及 Windows 数字微调按钮；
+     * 保留首版数值控件外观，不能再按仅有两位数字的旧宽度裁切提示或数值。
+     */
+    width: 104px !important;
+    flex-shrink: 0;
     padding: 7px 9px !important;
 }
 .preferences-form .notice {
     margin: 18px 0 0;
-}
-.history-toolbar {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 16px;
-}
-.history-toolbar .input-affix {
-    flex: 1;
 }
 .history-toolbar .input-affix > svg {
     position: absolute;
@@ -1502,11 +1772,7 @@ input[type='checkbox'] {
     list-style: none;
 }
 .markdown-body input.task-list-item-checkbox {
-    width: 12px;
-    height: 12px;
-    margin: 0 6px 0 -17px;
-    vertical-align: middle;
-    accent-color: #58acff;
+    margin: 0 6px 0 0;
     opacity: 1;
     cursor: default;
 }
@@ -1552,19 +1818,127 @@ input[type='checkbox'] {
 .history-toolbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
+    margin-bottom: 16px;
 }
 .history-toolbar > .model-select {
-    width: 210px;
-    flex-shrink: 0;
+    width: auto;
+    flex: 1 1 150px;
 }
 .history-toolbar .model-trigger {
     height: 32px;
     font-size: 12px;
 }
 .history-toolbar > .input-affix {
+    flex: 1 1 230px;
+    min-width: 0;
+}
+.date-picker {
+    position: relative;
     flex: 1;
     min-width: 0;
+}
+/* 保留日期段的输入/清空能力，隐藏原生日历入口；弹层统一复用首版深色菜单。 */
+.date-picker input.date-picker-input {
+    width: 100%;
+    height: 32px;
+    padding: 0 30px 0 8px;
+    font-size: 11px;
+    cursor: pointer;
+}
+.date-picker-input::-webkit-calendar-picker-indicator {
+    display: none;
+}
+.date-picker-icon {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    color: #9fb3cb;
+    pointer-events: none;
+}
+.date-picker-menu {
+    right: auto;
+    padding: 8px;
+    white-space: normal;
+}
+.date-picker-header {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 6px;
+}
+.date-picker-header strong {
+    flex: 1;
+    min-width: 0;
+    color: #d8e5f4;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 550;
+}
+.date-picker-header .icon-button {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+}
+.date-picker-grid {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 2px;
+}
+.date-picker-grid th {
+    height: 22px;
+    padding: 0;
+    color: #9cb0c7;
+    font-size: 10px;
+    font-weight: 400;
+    text-align: center;
+}
+.date-picker-grid td {
+    padding: 0;
+    text-align: center;
+}
+.date-picker-day {
+    width: 100%;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: #d8e5f4;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.date-picker-day.outside {
+    color: #9cb0c7;
+}
+.date-picker-day.today {
+    border-color: #58769875;
+}
+.date-picker-day:hover:not(:disabled),
+.date-picker-day:focus-visible,
+.date-picker-day.selected {
+    background: #365f8d66;
+    color: #a6d5ff;
+}
+.date-picker-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 8px;
+    margin-top: 6px;
+    border-top: 1px solid var(--line);
+}
+.history-date-filter {
+    display: inline-flex;
+    flex: 0 1 170px;
+    min-width: 0;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+    white-space: nowrap;
+    font-size: 10px;
 }
 .history-detail dl {
     min-width: 0;
@@ -1739,8 +2113,17 @@ input[type='checkbox'] {
         inset 0 1px 0 #ffffff0a;
 }
 .browser-preview .settings {
-    width: 1120px;
-    height: 900px;
+    width: min(1120px, 100vw);
+    height: min(900px, 100vh);
+}
+@media (max-width: 1210px), (max-height: 990px) {
+    .browser-preview #app {
+        padding: 0;
+    }
+    /* 预览卡片已占满窗口时没有额外留白，固定说明不能覆盖底部保存/导出按钮。 */
+    .browser-preview .preview-note {
+        display: none;
+    }
 }
 .preview-note {
     position: fixed;

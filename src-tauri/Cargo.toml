@@ -1,6 +1,6 @@
 [package]
 name = "model-probe"
-version = "1.0.0"
+version = "1.0.1"
 description = "自定义题目与连续字符串规则的桌面测智雷达"
 authors = ["ahui"]
 license = "GPL-3.0-only"
@@ -25,12 +25,19 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 keyring = { version = "3", features = ["windows-native"] }
-tokio = { version = "1", features = ["time", "macros"] }
+tokio = { version = "1", features = ["time", "macros", "sync"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 semver = "1"
+sha2 = "0.10"
+# 只允许加密 SMTP；异步发送不占用测试门禁，凭据由 Windows keyring 单独保存。
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "hostname"] }
+
+[dev-dependencies]
+# 虚拟时钟验证小时级检查与失败节流，不在测试中联网或真实等待一小时。
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 # 复用 Windows 注册表安全封装；仅用户主动切换时修改本程序的当前用户启动项。
