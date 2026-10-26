@@ -39,7 +39,7 @@ npm run tauri -- build --no-bundle
 - `src-tauri/src/lib.rs`：运行门禁、定时、凭据与窗口生命周期。
 - `src-tauri/src/storage.rs` / `model.rs`：SQLite、配置、规则与历史契约。
 - `src-tauri/src/autostart.rs` / `updates.rs`：当前用户自启、只读更新检查与系统浏览器入口。
-- `src-tauri/src/notifications.rs` / `notifications/template.rs`：加密 SMTP、通知去重、当次记录的 HTML/纯文本正文与内嵌图标。
+- `src-tauri/src/notifications.rs` / `notifications/template.rs`：加密 SMTP、模型分组通知状态、当次记录的 HTML/纯文本正文与内嵌图标。
 - `tests` / `src-tauri/tests`：组件与后端回归，接口只使用本机 Mock；自启测试只操作随机私有注册表键并清理。
 
 ## 变更约束

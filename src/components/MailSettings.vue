@@ -113,7 +113,7 @@ defineExpose({ save, discard, dirty, isWorking });
 <template>
     <form id="mail-settings" class="settings-form mail-settings" @submit.prevent="save">
         <div class="notice">
-            应用需要保持运行并联网。相同模型和测试条件的持续同类异常只通知一次；手动取消不发信，发送失败不影响测试结果。
+            应用需要保持运行并联网。每次降智和测试失败都会通知；恢复邮件在同一分组此前降智后再次不降智时发送。手动取消不发信，发送失败不影响测试结果。
         </div>
         <div v-if="notificationError" class="inline-error" role="alert">
             最近通知发送失败：{{ notificationError }}。模型测试结果不受影响。
@@ -241,7 +241,7 @@ defineExpose({ save, discard, dirty, isWorking });
                             type="checkbox"
                             class="switch"
                             role="switch"
-                        />变为降智</label
+                        />降智（每次通知）</label
                     ><label class="toggle-line"
                         ><input
                             v-model="form.onRecovered"

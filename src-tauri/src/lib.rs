@@ -1612,14 +1612,9 @@ pub fn run() {
             let store = Store::open(&folder.join("probe.db")).map_err(std::io::Error::other)?;
             let position = store.config.widget_position;
             let mut preferences = store.config.preferences.clone();
-            let notification_tracker = match store
-                .read_notification_state()
-                .map_err(std::io::Error::other)?
-            {
-                Some(payload) => notifications::NotificationTracker::restore(&payload)
-                    .map_err(std::io::Error::other)?,
-                None => notifications::NotificationTracker::from_history(&store.history()?),
-            };
+            let notification_tracker = store
+                .load_notification_tracker()
+                .map_err(std::io::Error::other)?;
             app.manage(AppState {
                 store: Mutex::new(store),
                 running: Mutex::new(None),

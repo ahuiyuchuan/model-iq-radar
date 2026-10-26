@@ -4,6 +4,7 @@
 use crate::{
     conditions::{validate_preferences, validate_stored_config},
     model::{AppConfig, Preferences, TestRecord},
+    notifications::NotificationTracker,
 };
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -421,8 +422,21 @@ impl Store {
         Ok(())
     }
 
-    /// 邮件去重状态独立于历史保留范围；清理/导出回答不会丢失此前降智或故障状态。
-    /// 只保存按条件哈希分组的有限状态，不保存题目、回答、邮箱授权码或 API Key。
+    /// 启动时恢复并立即保存通知状态；旧格式或尚无状态时才读取保留历史进行重建。
+    /// 必须在开放清空历史/测试入口前完成，避免迁移只留在内存，重启后丢失恢复依据。
+    /// 只写独立状态，不发信或补发旧事件；读取、解析或保存失败均报错并保留原 payload。
+    pub fn load_notification_tracker(&self) -> Result<NotificationTracker, String> {
+        let tracker = match self.read_notification_state()? {
+            Some(payload) => NotificationTracker::restore(&payload, || self.history())?,
+            None => NotificationTracker::from_history(&self.history()?),
+        };
+        let payload = serde_json::to_string(&tracker).map_err(|_| "邮件通知状态序列化失败。")?;
+        self.save_notification_state(&payload)?;
+        Ok(tracker)
+    }
+
+    /// 邮件状态独立于历史保留范围；清理/导出回答不会丢失模型分组的降智状态。
+    /// 只保存有限的模型分组状态，不保存题目、回答、邮箱授权码或 API Key。
     pub fn read_notification_state(&self) -> Result<Option<String>, String> {
         match self.connection.query_row(
             "SELECT payload FROM notification_state WHERE id=1",
@@ -435,7 +449,7 @@ impl Store {
         }
     }
 
-    /// 调用方在尝试发信前保存状态，不因发送失败积压补发；数据库失败必须明确报告。
+    /// 启动恢复后及尝试发信前保存状态，不因发送失败积压补发；数据库失败必须明确报告。
     pub fn save_notification_state(&self, payload: &str) -> Result<(), String> {
         if payload.len() > 2 * 1024 * 1024
             || serde_json::from_str::<serde_json::Value>(payload).is_err()
@@ -583,6 +597,47 @@ mod tests {
         assert_eq!(
             store.read_notification_state().unwrap().as_deref(),
             Some(state)
+        );
+    }
+
+    /// 首次升级后尚未结算新测试就清空历史，再次启动仍须保留已经重建的恢复依据。
+    #[test]
+    fn notification_migration_survives_clear_before_first_new_test() {
+        use crate::notifications::MailEvent;
+
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut degraded = record("degraded", "2026-10-26T00:00:00Z");
+        degraded.status = "failed".into();
+        store.save_record(&degraded).unwrap();
+        let legacy = r#"{"states":{"profile:sha256:fixture":{"degraded":true,"last_failure":null}},"insertion_order":["profile:sha256:fixture"]}"#;
+        store.save_notification_state(legacy).unwrap();
+        // 直接走生产启动入口：不依靠后续测试写入，清空前就应持久化迁移结果。
+        let _tracker = store.load_notification_tracker().unwrap();
+        store.clear_history().unwrap();
+        let mut restarted = store.load_notification_tracker().unwrap();
+        assert_eq!(
+            restarted.consider(&record("recovered", "2026-10-26T00:01:00Z")),
+            Some(MailEvent::Recovered)
+        );
+    }
+
+    /// 迁移持久化失败须中止启动，保留旧状态供备份/重试，不能返回仅在内存生效的结果。
+    #[test]
+    fn notification_migration_write_failure_preserves_legacy_payload() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let legacy = r#"{"states":{},"insertion_order":[]}"#;
+        store.save_notification_state(legacy).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER prevent_notification_update BEFORE UPDATE ON notification_state
+                 BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+            )
+            .unwrap();
+        assert!(store.load_notification_tracker().is_err());
+        assert_eq!(
+            store.read_notification_state().unwrap().as_deref(),
+            Some(legacy)
         );
     }
 

@@ -1,5 +1,5 @@
-//! 邮件通知与状态去重。邮件不参与模型判定，不自动重试；正文包含当次完整回答，
-//! 去重状态只保存条件摘要，不复制题目/回答。HTML 转义原文，图标通过 CID 本地内嵌。
+//! 邮件通知与状态管理。邮件不参与模型判定，不自动重试；正文包含当次完整回答，
+//! 状态只保存模型分组摘要，不复制题目/回答。HTML 转义原文，图标通过 CID 本地内嵌。
 //! SMTP 授权码仅存 Windows 凭据管理器；调用方须在释放应用状态锁后等待网络。
 //! 作者：ahui。
 
@@ -15,15 +15,13 @@ mod template;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 // SMTP 与模型 API 使用不同服务名，导入的 profile ID 不能碰撞邮件凭据账户。
 const CREDENTIAL_SERVICE: &str = "com.ahui.model-probe.smtp";
 const CREDENTIAL_ACCOUNT: &str = "smtp-authorization";
-const MAX_TRACKED_CONDITIONS: usize = 1000;
-static MAIL_BUSY: AtomicBool = AtomicBool::new(false);
+const MAX_TRACKED_PROFILES: usize = 1000;
 
 /// SMTP 配置只有非敏感字段。缺省关闭；仅 TLS / STARTTLS，禁止明文登录。
 #[derive(Clone, Serialize, Deserialize)]
@@ -184,7 +182,7 @@ pub fn validate_input(
     Ok(password)
 }
 
-/// 事件本身不复制回答；发送时读取当次记录。恢复只指同一条件先降智，再得到不降智。
+/// 事件本身不复制回答；发送时读取当次记录。恢复指同一模型分组先降智，再得到不降智。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MailEvent {
     Degraded,
@@ -203,41 +201,69 @@ impl MailEvent {
     }
 }
 
+/// 只保留同一模型分组最近一次有效判定；请求失败和取消不代表能力恢复。
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct ConditionState {
+struct ProfileNotificationState {
     degraded: bool,
-    last_failure: Option<String>,
 }
 
-/// 按 profile + 已哈希的完整请求条件跟踪，最多 1000 组；不存题目和密钥。
-/// 状态在尝试发送前推进，发送失败不排队补发；重启可从历史重建，防止重复邮件。
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// 当前通知状态格式；独立于数据库 schema 和配置备份格式。
+const NOTIFICATION_STATE_VERSION: u8 = 1;
+
+/// 按模型分组跟踪恢复通知，最多 1000 个分组；不保存题目、回答或凭据。
+/// 每次降智/请求失败都产生事件，只有恢复事件需要比较该分组上次有效判定。
+/// 发送失败不改变测试结论；历史重放只重建状态，不发送或补发旧邮件。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NotificationTracker {
-    states: HashMap<String, ConditionState>,
+    #[serde(default)]
+    version: u8,
+    states: HashMap<String, ProfileNotificationState>,
     insertion_order: VecDeque<String>,
 }
 
+impl Default for NotificationTracker {
+    fn default() -> Self {
+        Self {
+            version: NOTIFICATION_STATE_VERSION,
+            states: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+}
+
 impl NotificationTracker {
-    /// 恢复独立持久化状态并校验资源界限；只允许有界去重摘要，不接受任意原文。
-    /// 队列依据实际状态重建，避免旧版本或损坏数据导致淘汰顺序不完整。
-    pub fn restore(payload: &str) -> Result<Self, String> {
+    /// 读取有界通知状态；仅迁移旧格式时调用 load_history，需返回最新在前的历史。
+    /// 旧条件状态没有更新时刻，插入顺序不能证明最近判定，因此依据保留历史重建。
+    /// 已清空历史的分组从未确认状态开始，避免把其他规则的旧降智臆测为当前状态。
+    /// payload 无效、版本不支持或迁移所需历史读取失败时返回错误，不覆盖持久状态。
+    pub fn restore(
+        payload: &str,
+        load_history: impl FnOnce() -> Result<Vec<TestRecord>, String>,
+    ) -> Result<Self, String> {
         if payload.len() > 2 * 1024 * 1024 {
             return Err("邮件通知状态超过安全大小，请先备份本地数据库。".into());
         }
         let mut tracker: Self = serde_json::from_str(payload)
             .map_err(|_| "邮件通知状态格式无效，请先备份本地数据库。")?;
-        if tracker.states.len() > MAX_TRACKED_CONDITIONS
-            || tracker.insertion_order.len() > MAX_TRACKED_CONDITIONS
-            || tracker.states.iter().any(|(key, state)| {
-                key.is_empty()
-                    || key.len() > 256
-                    || key.chars().any(char::is_control)
-                    || state.last_failure.as_ref().is_some_and(|failure| {
-                        failure.len() > 256 || failure.chars().any(char::is_control)
-                    })
-            })
+        if tracker.version > NOTIFICATION_STATE_VERSION
+            || tracker.states.len() > MAX_TRACKED_PROFILES
+            || tracker.insertion_order.len() > MAX_TRACKED_PROFILES
+            || tracker
+                .states
+                .keys()
+                .any(|key| key.is_empty() || key.len() > 256 || key.chars().any(char::is_control))
         {
-            return Err("邮件通知状态超出安全范围，请先备份本地数据库。".into());
+            return Err("邮件通知状态超出支持范围，请先备份本地数据库。".into());
+        }
+        if tracker.version == 0 {
+            return Ok(Self::from_history(&load_history()?));
+        }
+        if tracker
+            .states
+            .keys()
+            .any(|id| crate::conditions::validate_id(id).is_err())
+        {
+            return Err("邮件通知中的模型分组无效，请先备份本地数据库。".into());
         }
         let mut order = VecDeque::new();
         for key in tracker.insertion_order {
@@ -254,7 +280,7 @@ impl NotificationTracker {
         Ok(tracker)
     }
 
-    /// history 由存储按最新在前返回，因此倒序重放；旧记录缺条件快照时跳过。
+    /// history 由存储按最新在前返回，因此倒序重放；不访问网络或读取凭据。
     pub fn from_history(history: &[TestRecord]) -> Self {
         let mut tracker = Self::default();
         for record in history.iter().rev() {
@@ -263,18 +289,17 @@ impl NotificationTracker {
         tracker
     }
 
-    /// 取消不更新状态、不触发故障；相同错误类型+HTTP 状态连续发生只发送一次。
+    /// 每条已结算记录调用一次：降智/失败逐次通知，恢复按同分组最近有效判定触发。
+    /// 来源、规则、接口、思考强度和条件摘要不限制通知；取消与未知状态不推进状态。
     pub fn consider(&mut self, record: &TestRecord) -> Option<MailEvent> {
-        if record.status == "cancelled" {
+        if !matches!(record.status.as_str(), "passed" | "failed" | "error")
+            || crate::conditions::validate_id(&record.profile_id).is_err()
+        {
             return None;
         }
-        let fingerprint = record.condition_fingerprint.as_ref()?;
-        let key = format!("{}:{fingerprint}", record.profile_id);
-        if key.len() > 256 || key.chars().any(char::is_control) {
-            return None;
-        }
+        let key = record.profile_id.clone();
         if !self.states.contains_key(&key) {
-            if self.states.len() >= MAX_TRACKED_CONDITIONS {
+            if self.states.len() >= MAX_TRACKED_PROFILES {
                 if let Some(oldest) = self.insertion_order.pop_front() {
                     self.states.remove(&oldest);
                 }
@@ -284,69 +309,18 @@ impl NotificationTracker {
         let state = self.states.entry(key).or_default();
         match record.status.as_str() {
             "failed" => {
-                let notify = !state.degraded;
                 state.degraded = true;
-                state.last_failure = None;
-                notify.then_some(MailEvent::Degraded)
+                Some(MailEvent::Degraded)
             }
             "passed" => {
                 let notify = state.degraded;
                 state.degraded = false;
-                state.last_failure = None;
                 notify.then_some(MailEvent::Recovered)
             }
-            "error" => {
-                // 旧数据库内容同样不可信，不把任意 errorKind 原文写入去重摘要。
-                let kind = record
-                    .error_kind
-                    .as_deref()
-                    .filter(|kind| {
-                        matches!(
-                            *kind,
-                            "protocol"
-                                | "tool_call"
-                                | "incomplete"
-                                | "filtered"
-                                | "empty_response"
-                                | "configuration"
-                                | "connection"
-                                | "timeout"
-                                | "authentication"
-                                | "rate_limit"
-                                | "redirect"
-                                | "request_rejected"
-                                | "http"
-                                | "response_too_large"
-                                | "read_interrupted"
-                                | "invalid_json"
-                                | "credentials"
-                                | "client"
-                        )
-                    })
-                    .unwrap_or("unknown");
-                let failure = format!("{}:{}", kind, record.http_status.unwrap_or(0));
-                let notify = state.last_failure.as_ref() != Some(&failure);
-                state.last_failure = Some(failure);
-                notify.then_some(MailEvent::Failure)
-            }
+            // 请求失败没有有效判定，不清除上次降智；下一次正常通过仍属于恢复。
+            "error" => Some(MailEvent::Failure),
             _ => None,
         }
-    }
-}
-
-/// 同时最多一封网络发送；不积压重试/补发队列，测试邮件与通知共用发送门禁。
-struct MailGuard;
-impl MailGuard {
-    fn acquire() -> Result<Self, String> {
-        MAIL_BUSY
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self)
-            .map_err(|_| "邮件正在发送，请稍后重试。".into())
-    }
-}
-impl Drop for MailGuard {
-    fn drop(&mut self) {
-        MAIL_BUSY.store(false, Ordering::Release);
     }
 }
 
@@ -391,7 +365,8 @@ async fn send(
     password: &str,
     content: template::MailContent,
 ) -> Result<(), String> {
-    let _guard = MailGuard::acquire()?;
+    // 每次通知使用独立 SMTP 连接和 20 秒总预算；另一封正在发送不应吞掉当前通知。
+    // 试发表单通过自身工作状态防止重复点击，此处不维护全局拒绝门禁或重试队列。
     let mut complete = settings.clone();
     complete.enabled = true;
     validate_settings(&complete)?;
@@ -458,57 +433,174 @@ mod tests {
         .unwrap()
     }
 
-    /// 状态按配置和完整条件隔离；取消与重复异常不产生邮件，重启重放也不补发。
+    /// 降智和故障逐次通知；恢复只看同一分组上次有效判定，不受来源或规则切换影响。
     #[test]
-    fn deduplicates_conditions_cancellation_and_rebuilds_from_history() {
+    fn notifies_every_anomaly_and_recovers_across_conditions() {
         let mut tracker = NotificationTracker::default();
         assert_eq!(tracker.consider(&record("passed")), None);
         assert_eq!(
             tracker.consider(&record("failed")),
             Some(MailEvent::Degraded)
         );
-        assert_eq!(tracker.consider(&record("failed")), None);
+        assert_eq!(
+            tracker.consider(&record("failed")),
+            Some(MailEvent::Degraded)
+        );
         assert_eq!(tracker.consider(&record("error")), Some(MailEvent::Failure));
         assert_eq!(tracker.consider(&record("cancelled")), None);
-        assert_eq!(tracker.consider(&record("error")), None);
-        assert_eq!(
-            tracker.consider(&record("passed")),
-            Some(MailEvent::Recovered)
-        );
+        assert_eq!(tracker.consider(&record("error")), Some(MailEvent::Failure));
+        let mut recovered = record("passed");
+        recovered.condition_fingerprint = Some("different-rule-and-settings".into());
+        recovered.source = Some("automatic".into());
+        assert_eq!(tracker.consider(&recovered), Some(MailEvent::Recovered));
         assert_eq!(tracker.consider(&record("passed")), None);
-        let mut other = record("failed");
-        other.condition_fingerprint = Some("scope-b".into());
-        assert_eq!(tracker.consider(&other), Some(MailEvent::Degraded));
+        let mut degraded = record("failed");
+        degraded.source = Some("manual".into());
+        assert_eq!(tracker.consider(&degraded), Some(MailEvent::Degraded));
         let mut restored = NotificationTracker::from_history(&[record("failed"), record("passed")]);
-        assert_eq!(restored.consider(&record("failed")), None);
+        assert_eq!(
+            restored.consider(&record("failed")),
+            Some(MailEvent::Degraded)
+        );
         assert_eq!(
             restored.consider(&record("passed")),
             Some(MailEvent::Recovered)
         );
     }
 
-    /// 独立通知状态不依赖可清理的历史；无界条件输入被淘汰，恢复仍遵守同一上限。
+    /// 复现两个截图：旧规则曾降智、切换规则通过后，再次降智仍必须逐次提醒。
+    /// 不同分组的通过、故障和取消不能清除本分组尚未恢复的有效判定。
+    #[test]
+    fn old_rule_state_and_other_profiles_cannot_suppress_notifications() {
+        let mut tracker = NotificationTracker::default();
+        let mut degraded = record("failed");
+        degraded.source = Some("manual".into());
+        assert_eq!(tracker.consider(&degraded), Some(MailEvent::Degraded));
+        let mut other = record("passed");
+        other.profile_id = "other-profile".into();
+        assert_eq!(tracker.consider(&other), None);
+        assert_eq!(tracker.consider(&degraded), Some(MailEvent::Degraded));
+        let mut passed = record("passed");
+        passed.condition_fingerprint = Some("candy-rule".into());
+        assert_eq!(tracker.consider(&passed), Some(MailEvent::Recovered));
+        assert_eq!(tracker.consider(&degraded), Some(MailEvent::Degraded));
+        assert_eq!(tracker.consider(&record("error")), Some(MailEvent::Failure));
+        assert_eq!(tracker.consider(&record("cancelled")), None);
+        assert_eq!(tracker.consider(&passed), Some(MailEvent::Recovered));
+    }
+
+    /// 旧条件状态的插入顺序不代表最近测试；迁移必须按真实历史重建，不猜测已清理内容。
+    #[test]
+    fn restores_legacy_condition_keys_by_latest_profile_state() {
+        let payload = serde_json::json!({
+            "states": {
+                "profile:old-rule": { "degraded": true, "last_failure": null },
+                "profile:latest-rule": { "degraded": false, "last_failure": null }
+            },
+            "insertion_order": ["profile:old-rule", "profile:latest-rule"]
+        })
+        .to_string();
+        let mut tracker =
+            NotificationTracker::restore(&payload, || Ok(vec![record("failed"), record("passed")]))
+                .unwrap();
+        assert_eq!(tracker.states.len(), 1);
+        assert_eq!(
+            tracker.consider(&record("passed")),
+            Some(MailEvent::Recovered)
+        );
+        let mut cleared = NotificationTracker::restore(&payload, || Ok(vec![])).unwrap();
+        assert!(cleared.states.is_empty());
+        assert_eq!(cleared.consider(&record("passed")), None);
+        assert_eq!(
+            tracker.consider(&record("failed")),
+            Some(MailEvent::Degraded)
+        );
+    }
+
+    /// 新格式不依赖历史；旧格式读取失败及未知版本必须报错，不能静默丢弃恢复依据。
+    #[test]
+    fn current_state_skips_history_and_legacy_load_errors_are_reported() {
+        let payload = serde_json::to_string(&NotificationTracker::default()).unwrap();
+        assert!(NotificationTracker::restore(&payload, || {
+            panic!("当前版本不应读取历史")
+        })
+        .is_ok());
+        let legacy = r#"{"states":{},"insertion_order":[]}"#;
+        assert_eq!(
+            NotificationTracker::restore(legacy, || Err("读取历史失败".into())).err(),
+            Some("读取历史失败".into())
+        );
+        let future = r#"{"version":2,"states":{},"insertion_order":[]}"#;
+        assert!(NotificationTracker::restore(future, || {
+            panic!("未知版本不能触发历史重建")
+        })
+        .is_err());
+    }
+
+    /// 关闭通知时发生的旧异常不能消耗之后的提醒；缺少旧条件摘要也不能拦截当前通知。
+    #[test]
+    fn enabling_notifications_never_consumes_later_anomalies() {
+        let mut settings = EmailNotificationSettings::default();
+        let mut tracker = NotificationTracker::default();
+        for status in ["failed", "error"] {
+            let mut row = record(status);
+            row.condition_fingerprint = None;
+            let event = tracker.consider(&row).unwrap();
+            assert!(!event.enabled(&settings));
+            settings.enabled = true;
+            assert!(tracker.consider(&row).unwrap().enabled(&settings));
+            settings.enabled = false;
+        }
+        settings.enabled = true;
+        settings.on_degraded = false;
+        assert!(!tracker
+            .consider(&record("failed"))
+            .unwrap()
+            .enabled(&settings));
+        assert!(tracker
+            .consider(&record("error"))
+            .unwrap()
+            .enabled(&settings));
+        assert!(tracker
+            .consider(&record("passed"))
+            .unwrap()
+            .enabled(&settings));
+        assert_eq!(tracker.consider(&record("passed")), None);
+        let before = serde_json::to_string(&tracker).unwrap();
+        assert_eq!(tracker.consider(&record("cancelled")), None);
+        assert_eq!(tracker.consider(&record("unknown")), None);
+        assert_eq!(serde_json::to_string(&tracker).unwrap(), before);
+    }
+
+    /// 独立通知状态不依赖可清理的历史；无界模型分组输入被淘汰，恢复仍遵守同一上限。
     #[test]
     fn persisted_tracker_survives_history_cleanup_and_stays_bounded() {
         let mut tracker = NotificationTracker::default();
         let _ = tracker.consider(&record("failed"));
         let _ = tracker.consider(&record("error"));
         let payload = serde_json::to_string(&tracker).unwrap();
-        let mut restored = NotificationTracker::restore(&payload).unwrap();
-        assert_eq!(restored.consider(&record("error")), None);
+        let mut restored = NotificationTracker::restore(&payload, || Ok(vec![])).unwrap();
+        assert_eq!(
+            restored.consider(&record("error")),
+            Some(MailEvent::Failure)
+        );
         assert_eq!(
             restored.consider(&record("passed")),
             Some(MailEvent::Recovered)
         );
-        for index in 0..=MAX_TRACKED_CONDITIONS {
+        for index in 0..=MAX_TRACKED_PROFILES {
             let mut row = record("failed");
+            row.profile_id = format!("profile-{index}");
             row.condition_fingerprint = Some(format!("condition-{index}"));
             let _ = restored.consider(&row);
         }
-        assert_eq!(restored.states.len(), MAX_TRACKED_CONDITIONS);
-        assert_eq!(restored.insertion_order.len(), MAX_TRACKED_CONDITIONS);
-        assert!(NotificationTracker::restore(&serde_json::to_string(&restored).unwrap()).is_ok());
-        assert!(NotificationTracker::restore("{invalid-json").is_err());
+        assert_eq!(restored.states.len(), MAX_TRACKED_PROFILES);
+        assert_eq!(restored.insertion_order.len(), MAX_TRACKED_PROFILES);
+        assert!(
+            NotificationTracker::restore(&serde_json::to_string(&restored).unwrap(), || Ok(vec![]))
+                .is_ok()
+        );
+        assert!(NotificationTracker::restore("{invalid-json", || Ok(vec![])).is_err());
     }
 
     /// 默认关闭无需提供邮箱；真正启用时不能接受 URL、明文模式或多行账号。
@@ -633,6 +725,65 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// 同时到来的试发与结果通知都应尝试连接；本机服务不提供 STARTTLS，确保不会真正发信。
+    /// accept/read 均有期限，回归出现漏连时应失败退出，不能留下永久等待的线程。
+    #[tokio::test]
+    async fn concurrent_notifications_are_not_dropped_by_a_global_busy_guard() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            time::Instant,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut connections = 0;
+            while connections < 2 && Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("本机 SMTP 测试服务接收失败：{error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream.write_all(b"220 fixture.local ESMTP\r\n").unwrap();
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).unwrap();
+                assert!(bytes[..count].starts_with(b"EHLO "));
+                stream.write_all(b"250 fixture.local\r\n").unwrap();
+                connections += 1;
+            }
+            connections
+        });
+        let settings = EmailNotificationSettings {
+            enabled: true,
+            smtp_host: "127.0.0.1".into(),
+            smtp_port: port,
+            security: "starttls".into(),
+            sender: "sender@example.com".into(),
+            recipients: vec!["reader@example.com".into()],
+            ..Default::default()
+        };
+        let row = record("failed");
+        let (test, notification) = tokio::join!(
+            send_test(&settings, "fixture-secret"),
+            send_notification(&settings, "fixture-secret", &row, MailEvent::Degraded)
+        );
+        assert!(test.unwrap_err().contains("邮件发送失败"));
+        assert!(notification.unwrap_err().contains("邮件发送失败"));
+        assert_eq!(worker.join().unwrap(), 2);
     }
 
     /// 本机 SMTP 故意不提供 STARTTLS；必须拒绝降级，不能发送账号/授权码或泄露服务文本。

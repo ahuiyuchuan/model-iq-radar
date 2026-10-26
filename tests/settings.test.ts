@@ -596,7 +596,7 @@ it('更新只读后台缓存，在关于入口显示新版本，切页不检查�
         .find((button) => button.text().includes('关于'))!
         .trigger('click');
     expect(wrapper.text()).toContain('免安装版');
-    expect(wrapper.text()).toContain('v1.0.1');
+    expect(wrapper.text()).toContain('v1.0.2');
     expect(fake.call.mock.calls.some(([command]) => command === 'check_updates')).toBe(false);
     expect(wrapper.find('.about-update [role="alert"]').exists()).toBe(false);
     expect(wrapper.get('.settings-actions').text()).toContain('前往下载 v1.1.0');

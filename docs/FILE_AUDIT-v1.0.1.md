@@ -7,7 +7,8 @@
 ## 后续修复：手动更新与邮件正文
 
 - `AboutPanel.vue`、`Settings.vue`、`bridge.ts`、`updates.rs`、`lib.rs`、`Cargo.toml`、`tests/settings.test.ts`：恢复手动入口，删除 UI 中后台周期/静默说明；主动检查提供加载、结果、失败和重试，前后端并发去重，失败保留缓存，晚到响应不覆盖新事件。后台每次结束仍等待完整一小时。
-- `notifications.rs`、`notifications/template.rs`、`MailSettings.vue`：三状态深色 HTML 与等价纯文本、完整原始回答、实际协议/来源/规则/时间/耗时及失败详情；所有不可信字段转义，空回答和失败部分原文明示，取消不通知，TLS/门禁/超时/去重边界保留。
+- `notifications.rs`、`notifications/template.rs`、`MailSettings.vue`：三状态深色 HTML 与等价纯文本、完整原始回答、实际协议/来源/规则/时间/耗时及失败详情；所有不可信字段转义，空回答和失败部分原文明示，取消不通知；TLS 和超时边界保留，通知逐次发送，恢复按模型分组跟踪。
+- `notifications.rs`、`storage.rs`、`lib.rs`：旧通知状态按保留历史重建并在启动时立即保存，清空历史再重启不丢恢复依据；新版恢复不额外读取整份历史，迁移保存失败保留旧状态并明确报错，不补发旧邮件。
 - `scripts/generate_mail_assets.mjs`、`src-tauri/assets/mail/*.png`：现有 Lucide 图标可重复生成，编译时内嵌并按实际引用附加 CID。运行时不增加图像依赖或外部图片请求；GitHub 固定仓库链接仅用图标呈现。
 - README、使用手册、贡献指南、更新日志、发布草稿和本复核记录同步。未更改本轮数据库、配置或凭据契约；正式模型、SMTP 投递和各邮件客户端仍须实际环境验证。
 
@@ -93,7 +94,7 @@
 | `src-tauri/src/conditions.rs`         | 规范化端点、完整有效规则、摘要版本 2、配置边界与悬空绑定拒绝。                          |
 | `src-tauri/src/backup.rs`             | 完整验证、重复策略/引用重映射、凭据目标保护及导出/导入大小一致。                        |
 | `src-tauri/src/storage.rs`            | 启动完整配置校验、事务回滚、UTC/条数/容量清理、最近记录索引和通知状态隔离。             |
-| `src-tauri/src/notifications.rs`      | 加密 SMTP、凭据配对、去重持久化、取消不通知、并发/超时及独立错误。                      |
+| `src-tauri/src/notifications.rs`      | 加密 SMTP、凭据配对、模型分组状态迁移、取消不通知、并发/超时及独立错误。                |
 | `src-tauri/src/autostart.rs`          | 当前用户私有启动项、引号路径、权限/长度及测试键清理。                                   |
 | `src-tauri/src/updates.rs`            | 正式发布比较、空发布/失败区别、URL 白名单与系统浏览器启动。                             |
 | `tests/markdown.test.ts`              | 语法、恶意内容、无资源请求、失败回退与长表格/代码。                                     |

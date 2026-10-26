@@ -31,6 +31,8 @@ import {
     Download,
     RefreshCw,
 } from 'lucide-vue-next';
+// 界面和脱敏诊断共用工程版本，发布时随清单更新，避免与关于页及原生程序版本不一致。
+import { version } from '../../package.json';
 import {
     call,
     DEFAULT_PROMPT,
@@ -773,7 +775,7 @@ async function copyDiagnostic(): Promise<void> {
     if (!record) return;
     const summary = [
         '测智雷达诊断信息',
-        '版本：v1.0.1',
+        `版本：v${version}`,
         `时间：${record.startedAt}`,
         `模型：${record.profileName} / ${record.model}`,
         `接口模式：${record.interfaceMode ?? '未记录'}`,
@@ -1008,7 +1010,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                 </button>
             </nav>
             <div class="sidebar-bottom">
-                <span class="local-dot"></span> 本地运行 <span class="version">v1.0.1</span>
+                <span class="local-dot"></span> 本地运行 <span class="version">v{{ version }}</span>
             </div>
         </aside>
 

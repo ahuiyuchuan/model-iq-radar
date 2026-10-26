@@ -1,6 +1,6 @@
 //! 自包含 HTML/纯文本邮件。所有模型/历史字段按不可信原文处理，不渲染 Markdown、远程图片或链接。
 //! PNG 由 scripts/generate_mail_assets.mjs 从现有 Lucide 图标生成，运行时通过 CID 内嵌。
-//! 模板只读取当次记录，不回查当前配置；完整回答随本次邮件发送，但不进入通知去重状态。
+//! 模板只读取当次记录，不回查当前配置；完整回答随本次邮件发送，但不进入通知状态摘要。
 //! 作者：ahui。
 
 use super::MailEvent;
@@ -153,7 +153,7 @@ fn metadata_cell(name: &str, label: &str, value: &str) -> String {
 pub(super) fn notification(record: &TestRecord, event: MailEvent) -> MailContent {
     let (title, subtitle, symbol, color, background, note) = match event {
         MailEvent::Degraded => (
-            "模型状态变为降智",
+            "模型测试结果为降智",
             "本次完整回答未命中任何已配置答案。",
             "degraded",
             "#f5b63f",
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn event_templates_use_record_snapshot_and_fixed_repository_link() {
         for (event, title, color) in [
-            (MailEvent::Degraded, "模型状态变为降智", "#f5b63f"),
+            (MailEvent::Degraded, "模型测试结果为降智", "#f5b63f"),
             (MailEvent::Recovered, "模型状态恢复不降智", "#50d694"),
             (MailEvent::Failure, "模型测试失败", "#f37670"),
         ] {
