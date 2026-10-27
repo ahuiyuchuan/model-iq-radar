@@ -67,6 +67,7 @@ export function useProbe(options: { includeHistory?: boolean } = {}) {
         const records = snapshot.value?.history ?? [];
         const fingerprint = snapshot.value?.conditionFingerprints?.[id];
         // 桌面精简快照由后端查找，完整历史/测试快照在这里采用相同优先级；旧记录不猜测条件。
+        // 此记录可用于展示/复制历史回答；当前结论必须另经 latest 的完整条件核对，不能混用。
         return (
             records.find(
                 (item) => item.profileId === id && fingerprint && item.conditionFingerprint === fingerprint,

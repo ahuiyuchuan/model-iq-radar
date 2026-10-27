@@ -17,6 +17,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+// 仅串行化会占用同一全局诊断队列的测试，避免测试自身争抢许可造成假失败。
+static DIAGNOSTIC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 本地一次性 HTTP 服务，用于观测真实请求而不是复制客户端组包实现。
 fn fixture(status: &str, response: String, delay: Duration) -> (String, mpsc::Receiver<String>) {
     sequence_fixture(vec![(status.into(), response, delay)])
@@ -97,6 +100,26 @@ fn synthetic_sse() -> String {
     }))
 }
 
+/// 合成 Chat 流，故意加入不能参与判定的推理内容，模拟标准正文与正常结束块。
+fn synthetic_chat_sse() -> String {
+    let chunks = [
+        json!({"delta":{"role":"assistant","reasoning_content":"错误推理"},"finish_reason":null}),
+        json!({"delta":{"content":"  21"},"finish_reason":null}),
+        json!({"delta":{"content":"颗\n"},"finish_reason":null}),
+        json!({"delta":{},"finish_reason":"stop"}),
+    ];
+    let mut stream = String::from(": keepalive\r\n\r\n");
+    for mut choice in chunks {
+        choice["index"] = json!(0);
+        stream.push_str(&format!(
+            "data: {}\r\n\r\n",
+            json!({"id":"chat_fixture","object":"chat.completion.chunk","choices":[choice]})
+        ));
+    }
+    stream.push_str("data: [DONE]\r\n\r\n");
+    stream
+}
+
 fn http_body(body: &str, mime: &str) -> String {
     format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nx-request-id: fixture-request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
 }
@@ -122,9 +145,33 @@ async fn wait_for_diagnostic(directory: &std::path::Path) -> serde_json::Value {
     }
 }
 
+/// 等待新增的纯元数据子目录写完，避免旧正文用例把目录误计为文件或提前删除后台任务的目录。
+async fn wait_for_transport_diagnostics(directory: &std::path::Path, expected: usize) {
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let count = std::fs::read_dir(directory.join("transport"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                std::fs::read(entry.path())
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some()
+            })
+            .count();
+        if count == expected {
+            return;
+        }
+        assert!(std::time::Instant::now() < until, "传输诊断文件未及时完成");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// 正确/错误 MIME 均兼容一次 SSE 响应；开着回退也不能因解析方式多发一次请求。
+/// 主动请求流式但不增加调用；网关实际响应仍按对应协议核对完整性。
 #[tokio::test]
-async fn responses_sse_single_request_preserves_stream_false_and_protocol_choice() {
+async fn responses_sse_single_request_requests_stream_and_preserves_protocol_choice() {
     for mime in ["text/event-stream; charset=utf-8", "application/json"] {
         let (base, requests) = wire_fixture(vec![(
             http_body(&synthetic_sse(), mime),
@@ -150,14 +197,45 @@ async fn responses_sse_single_request_preserves_stream_false_and_protocol_choice
         let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
         let payload: serde_json::Value =
             serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(payload["stream"], false);
+        assert_eq!(payload["stream"], true);
         assert!(request.starts_with("POST /v1/responses "));
         assert!(requests.try_recv().is_err());
     }
 }
 
+/// 从真实 HTTP 读取到最终判定验证 Chat 流；错误 MIME 不应触发第二次收费请求。
 #[tokio::test]
-async fn valid_json_wins_wrong_sse_mime_and_chat_never_parses_sse() {
+async fn chat_sse_single_request_preserves_text_and_protocol_choice() {
+    for mime in ["text/event-stream; charset=utf-8", "application/json"] {
+        let (base, requests) = wire_fixture(vec![(
+            http_body(&synthetic_chat_sse(), mime),
+            Duration::ZERO,
+            Duration::ZERO,
+        )]);
+        let mut selected = profile(base);
+        selected.protocol_fallback_enabled = true;
+        let result = api::complete(
+            &selected,
+            &TestRule::default(),
+            "",
+            10,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.answer, "  21颗\n");
+        assert_eq!(result.attempted_modes, ["chat_completions"]);
+        let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        let payload: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["stream"], true);
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn valid_json_wins_wrong_sse_mime_and_chat_rejects_responses_events() {
     let body = json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"原始 JSON"}]}]}).to_string();
     let (base, _) = wire_fixture(vec![(
         http_body(&body, "text/event-stream"),
@@ -188,16 +266,19 @@ async fn valid_json_wins_wrong_sse_mime_and_chat_never_parses_sse() {
         &CancellationToken::new(),
     )
     .await;
-    assert_eq!(result.error_kind.as_deref(), Some("invalid_json"));
+    assert_eq!(result.error_kind.as_deref(), Some("invalid_event_stream"));
 }
 
-/// 即使正文含 completed，也必须读完本次 HTTP；错误长度、超限、超时与取消不能成功。
+/// 两种流即使带完整结束标记也必须读完 HTTP；错误长度、超限、超时与取消不能成功。
 #[tokio::test]
 async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
-    let stream = synthetic_sse();
-    let interrupted = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len() + 100);
-    let oversized = format!("{stream}:{}\n\n", "x".repeat(2 * 1024 * 1024));
-    for (wire, hold_open, timeout, cancel, expected) in [
+    for (protocol, stream) in [
+        ("responses", synthetic_sse()),
+        ("chat_completions", synthetic_chat_sse()),
+    ] {
+        let interrupted = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len() + 100);
+        let oversized = format!("{stream}:{}\n\n", "x".repeat(2 * 1024 * 1024));
+        for (wire, hold_open, timeout, cancel, expected) in [
         (interrupted, Duration::ZERO, 10, false, "read_interrupted"),
         (http_body(&oversized, "text/event-stream"), Duration::ZERO, 10, false, "response_too_large"),
         (format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"), Duration::from_secs(2), 1, false, "timeout"),
@@ -205,7 +286,7 @@ async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
     ] {
         let (base, _) = wire_fixture(vec![(wire, Duration::ZERO, hold_open)]);
         let mut selected = profile(base);
-        selected.interface_mode = "responses".into();
+        selected.interface_mode = protocol.into();
         let token = CancellationToken::new();
         if cancel {
             let canceller = token.clone();
@@ -214,13 +295,15 @@ async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
         let result = api::complete(&selected, &TestRule::default(), "", timeout, &token).await;
         assert_eq!(result.error_kind.as_deref(), Some(expected));
         assert!(result.answer.is_empty());
-        assert_eq!(result.attempted_modes, ["responses"]);
+        assert_eq!(result.attempted_modes, [protocol]);
+    }
     }
 }
 
 /// 独立临时目录验证真实请求到后台文件的连接；既不访问用户日志，也不请求真实服务。
 #[tokio::test]
 async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_request() {
+    let _test_guard = DIAGNOSTIC_TEST_LOCK.lock().await;
     let directory = std::env::temp_dir().join(format!("probe-http-diagnostics-{}", Uuid::new_v4()));
     let body = "data: {\r\ndata: \"type\":\r\n\r\n";
     let (base, requests) = wire_fixture(vec![
@@ -271,7 +354,16 @@ async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_requ
     )
     .await;
     assert!(result.error.is_none());
-    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+    wait_for_transport_diagnostics(&directory, 2).await;
+    // 成功对照只增加 transport 元数据，原始响应仍只有失败时生成的一对文件。
+    assert_eq!(
+        std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .count(),
+        2
+    );
     assert_eq!(requests.try_iter().count(), 2);
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -279,6 +371,7 @@ async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_requ
 /// 完整语法错误、短读与超限的标志必须不同；保存量与原始字节均可核对，不能伪装完整正文。
 #[tokio::test]
 async fn diagnostic_limits_and_read_completeness_are_explicit() {
+    let _test_guard = DIAGNOSTIC_TEST_LOCK.lock().await;
     let large = "x".repeat(2 * 1024 * 1024 + 1);
     for (body, declared_length, expected, complete, truncated) in [
         ("{broken".to_owned(), 7, "invalid_json", true, false),
@@ -318,6 +411,160 @@ async fn diagnostic_limits_and_read_completeness_are_explicit() {
             assert_eq!(metadata["json_error"]["line"], 1);
         } else {
             assert!(metadata["json_error"].is_null());
+        }
+        assert_eq!(requests.try_iter().count(), 1);
+        wait_for_transport_diagnostics(&directory, 1).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+/// 回退的两份日志必须关联同一测试，流式成功只有本次回答，且不保存额外正文。
+#[tokio::test]
+async fn transport_diagnostics_link_fallback_and_record_actual_stream_timings() {
+    let _test_guard = DIAGNOSTIC_TEST_LOCK.lock().await;
+    let directory =
+        std::env::temp_dir().join(format!("probe-transport-fallback-{}", Uuid::new_v4()));
+    let body = synthetic_chat_sse();
+    let (base, requests) = wire_fixture(vec![
+        (
+            "HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            Duration::from_millis(20),
+            Duration::ZERO,
+        ),
+        (
+            http_body(&body, "text/event-stream"),
+            Duration::from_millis(20),
+            Duration::ZERO,
+        ),
+    ]);
+    let mut selected = profile(base.clone());
+    selected.interface_mode = "responses".into();
+    selected.protocol_fallback_enabled = true;
+    let result = api::complete_with_diagnostics(
+        &selected,
+        &TestRule::default(),
+        "fixture-secret",
+        10,
+        &CancellationToken::new(),
+        Some(&directory),
+    )
+    .await;
+    assert!(result.error.is_none());
+    assert_eq!(result.answer, "  21颗\n");
+    assert_eq!(result.attempted_modes, ["responses", "chat_completions"]);
+    wait_for_transport_diagnostics(&directory, 2).await;
+    let mut metadata: Vec<serde_json::Value> = std::fs::read_dir(directory.join("transport"))
+        .unwrap()
+        .map(|entry| {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            for forbidden in ["fixture-secret", &base, "错误推理", "21颗"] {
+                assert!(!text.contains(forbidden));
+            }
+            serde_json::from_slice(&bytes).unwrap()
+        })
+        .collect();
+    metadata.sort_by_key(|trace| trace["attempt_index"].as_u64().unwrap());
+    assert_eq!(metadata[0]["trace_id"], metadata[1]["trace_id"]);
+    assert!(Uuid::parse_str(metadata[0]["trace_id"].as_str().unwrap()).is_ok());
+    assert_eq!(metadata[0]["protocol"], "responses");
+    assert_eq!(metadata[0]["http_status"], 500);
+    assert_eq!(metadata[0]["outcome"], "failure");
+    assert_eq!(metadata[1]["protocol"], "chat_completions");
+    assert_eq!(metadata[1]["http_status"], 200);
+    assert_eq!(metadata[1]["outcome"], "success");
+    assert_eq!(metadata[1]["body_complete"], true);
+    assert_eq!(metadata[1]["body_truncated"], false);
+    assert_eq!(metadata[1]["received_body_bytes"], body.len());
+    assert_eq!(metadata[1]["request_id"], "fixture-request");
+    assert_eq!(metadata[1]["stage"], "completed");
+    for trace in &metadata {
+        assert_eq!(trace["format_version"], 2);
+        assert_eq!(trace["request_stream"], true);
+        assert_eq!(trace["build_variant"], "dual_protocol_stream");
+        assert!(
+            trace["elapsed_ms"].as_u64().unwrap()
+                >= trace["response_headers_after_ms"].as_u64().unwrap()
+        );
+    }
+    assert!(
+        metadata[1]["first_body_after_ms"].as_u64().unwrap()
+            >= metadata[1]["response_headers_after_ms"].as_u64().unwrap()
+    );
+    assert!(
+        metadata[1]["remaining_budget_at_start_ms"]
+            .as_u64()
+            .unwrap()
+            < metadata[0]["remaining_budget_at_start_ms"]
+                .as_u64()
+                .unwrap()
+    );
+    assert_eq!(requests.try_iter().count(), 2);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// 未收到响应头时不能编造 HTTP/请求编号；取消和应用期限不能再发起协议回退。
+#[tokio::test]
+async fn transport_diagnostics_distinguish_header_failure_timeout_and_cancel() {
+    let _test_guard = DIAGNOSTIC_TEST_LOCK.lock().await;
+    for (timeout, cancel, expected) in [
+        (10, false, "connection"),
+        (1, false, "timeout"),
+        (10, true, "cancelled"),
+    ] {
+        let directory =
+            std::env::temp_dir().join(format!("probe-transport-failure-{}", Uuid::new_v4()));
+        // 空响应立即关闭模拟 header EOF；其余情形只等待，完全不访问外部服务。
+        let delay = if expected == "connection" {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(2)
+        };
+        let (base, requests) = wire_fixture(vec![(String::new(), delay, Duration::ZERO)]);
+        let mut selected = profile(base);
+        selected.protocol_fallback_enabled = expected != "connection";
+        let token = CancellationToken::new();
+        if cancel {
+            let canceller = token.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                canceller.cancel();
+            });
+        }
+        let result = api::complete_with_diagnostics(
+            &selected,
+            &TestRule::default(),
+            "",
+            timeout,
+            &token,
+            Some(&directory),
+        )
+        .await;
+        assert_eq!(result.error_kind.as_deref(), Some(expected));
+        assert_eq!(result.attempted_modes, ["chat_completions"]);
+        wait_for_transport_diagnostics(&directory, 1).await;
+        let metadata = wait_for_diagnostic(&directory.join("transport")).await;
+        assert_eq!(metadata["stage"], "sending_or_waiting_response_headers");
+        for field in [
+            "http_status",
+            "request_id",
+            "response_headers_after_ms",
+            "first_body_after_ms",
+        ] {
+            assert!(metadata[field].is_null());
+        }
+        assert_eq!(metadata["received_body_bytes"], 0);
+        assert_eq!(metadata["body_complete"], false);
+        if expected == "connection" {
+            assert!(!metadata["transport_error"]["causes"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        } else if expected == "timeout" {
+            assert_eq!(metadata["timeout_source"], "application_total_deadline");
+        } else {
+            assert_eq!(metadata["outcome"], "cancelled");
         }
         assert_eq!(requests.try_iter().count(), 1);
         std::fs::remove_dir_all(directory).unwrap();
@@ -679,7 +926,7 @@ async fn real_request_sends_only_prompt_and_uses_complete_response() {
     assert!(!payload
         .to_string()
         .contains("do-not-send-alternative-answer"));
-    assert_eq!(payload["stream"], false);
+    assert_eq!(payload["stream"], true);
     assert!(request.starts_with("POST /v1/chat/completions "));
 }
 

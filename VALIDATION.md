@@ -1,6 +1,56 @@
-# 测智雷达 v1.0.4 本地复核记录
+# 测智雷达 v1.0.5 本地复核记录
 
-作者：ahui。日期：2026-10-27。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+作者：ahui。日期：2026-10-28。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+
+## v1.0.5 正式发布复核（2026-10-28）
+
+- 用户明确授权全面复核、测试、提交/推送并发布 Tag/Release，覆盖此前仅本地 Beta 的限制；继续禁止桌面操控，不调用真实模型或 SMTP。本轮相对 `ba4a0aa` 核对全部 22 个修改/新增文本，见 [FILE_AUDIT-v1.0.5.md](docs/FILE_AUDIT-v1.0.5.md)，保护原有诊断、流式和卡片改动，无重置或无关重构。
+- `npm test`：191 项通过，9 个测试文件、0 失败。保留并核对条件不匹配时的历史文字/HTML、耗时/复制、旧协议与重测提示、同一 iframe 会话及切回原条件恢复，不沿用旧绿色判定。
+- `run-build.ps1 -Action test`（`cargo test --locked --manifest-path src-tauri/Cargo.toml`）：126 项通过，0 失败（87 单元、17 数据完整性、22 请求回归）。新增 Chat SSE 的原文空白、推理排除、用量、BOM/换行/多行 data、唯一响应/候选、角色/工具/拒绝、缺失/重复结束及非正常结束；两种协议的实际本机 HTTP 路径均核对 stream:true、一次请求、完整 EOF、中断、超限、取消和共享期限。
+- 新增传输诊断回归核对成功/失败日志、同 trace_id 回退顺序及剩余预算、等待响应头/首块时间、无响应头的空字段、网络库错误链采集入口、应用总期限与取消区分、凭据/URL 脱敏和长度、二十份留存、四个并发写唯一性、无关文件保留、队列满/磁盘故障后仍能继续写入。只用随机临时目录；与原正文诊断共用队列的用例通过仅测试互斥避免自身抢占，生产仍非阻塞丢弃。原始响应字节保真与失败隔离回归继续通过。
+- `run-build.ps1 -Action clippy`（`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`）通过；`npm run format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 通过。受影响文件格式化、UTF-8 无 BOM/LF、链接与最终差异检查作为交付收尾单独核对。
+- `npm version 1.0.5 --no-git-tag-version --ignore-scripts`、Cargo 离线 Windows 目标元数据更新本项目锁文件版本；`node scripts/generate_notices.mjs` 离线生成 37 个前端包/315 个 Windows crate 声明。清单/锁文件/声明仅产品版本变化，无依赖升级；同步 README、使用手册、变更日志、业务注释及正式发布说明，删除当前使用流程中的 Beta 临时指导。Java 手册已查阅，Java/JVM/MyBatis 专属语法和工具不适用于本项目。
+- `run-build.ps1 -Action build` 完成 `vue-tsc --noEmit`、Vite 与 Windows x64 `tauri build --no-bundle`；只有既有 chunk 体积提示（526.87 kB，gzip 188.67 kB）和 MSVC 导入库 stdout 提示，无编译错误。`scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.5` 校验 PE x64、工程/文件/产品版本、应用输入时间和复制摘要；目录仅一个 `Model-IQ-Radar-v1.0.5-Windows-x64.exe`，16,693,760 字节，SHA-256 `2456a2dfd4e423acd9a49070a8a1242f5705afdbfee5b5539f28f68b4927fc0a`。未启动交付程序，原 Beta 文件保留。
+- 最终 22 个文本均通过严格 UTF-8 无 BOM、LF、结尾换行及无替换字符检查；本地文档路径/锚点、版本清单、逐文件索引及常见凭据模式扫描正常，`git diff --check` 无错误。构建产物、用户日志、临时发布脚本均未纳入 Git；第三方声明只变更产品版本，未手改依赖生成内容。
+- 流式请求与严格成功条件同时生效，不追加隐式非流式请求、不修改回退开关、超时或降智规则。正式构建标记改为 `dual_protocol_stream`，历史 Beta 日志原样保留。数据库 schema v3/备份 v3 不变，无迁移；退出后更换 v1.0.4 EXE 可回滚请求/展示逻辑，清理过的日志和历史不可恢复。
+- 已有用户取证确认两种协议分别流式成功；旧非流式的 TLS EOF 均发生于等待响应头阶段，而非 600 秒应用期限。具体中转断链层级与所有网络环境的稳定性仍未知，不能将模拟回归或用户单次成功写成永不再断连。HTTP 403 按用户指定不在本轮排查范围；真实外部服务、物理 DPI/多屏和最终原生交互不追加验证。
+
+以下 Beta 约束、构建与检查数字是历史记录，不替代本次正式发布检查。
+
+## 双协议流式再次复核（2026-10-28，静态检查及人工日志核验）
+
+- 按用户要求重新审阅全部十三个修改/新增文本，包含 `chat_sse.rs`、请求/诊断/连接适配、卡片与快照、回归源码及说明。未重置、覆盖已有改动，本次只补充此复核记录，未改变应用源码或重新生成 EXE；没有发现当前修复中的阻断问题。
+- 再次读取此前三份失败和两份成功的原始 transport JSON。旧非流式构建的 Responses 在 132,308 / 165,570 毫秒、Chat Completions 在 149,967 毫秒等待响应头时遇到 TLS `UnexpectedEof`，HTTP/首块时间均未取得，不是 600 秒应用期限。流式 Responses 在 3,450 毫秒取得响应头、187,862 毫秒完整成功；本轮双协议 Beta 的 Chat Completions 在 1,669 毫秒取得响应头及首块、183,098 毫秒完整成功，HTTP 200 / text/event-stream、960,864 字节、无截断。Responses 成功来自上一轮单协议对照包，其解析路径在本轮保持；不能把这些记录写成同一构建的全量回归，也不能由客户端日志定位中转内部的具体断链节点或证明固定静默超时。
+- 源码确认两协议均发送流式，实际值写入诊断；完整 JSON 兼容继续保留，SSE 按协议分别验证，Chat 检查同一标识/候选、结束原因及 [DONE]，Responses 检查完整最终响应。推理不混入答案；中断、超限、超时和取消不会凭部分正文判成功。关闭协议回退只尝试一次，开启仍最多另一协议一次、共享期限，无隐式非流式重发。
+- 展示确认按完整条件优先查找；条件不匹配仅撤销当前有效结论，卡片保留同分组历史回答/HTML、时间、耗时及原文复制，注明上次协议和待重测；不会跨分组取记录或因查看触发请求、历史重判及邮件。截图仅能确认当次 HTML 展示，未执行协议切换的桌面自动化验收。诊断写入继续脱敏、限量并隔离失败，数据库及配置格式不变。
+- 实际命令：受影响 Rust 的 `rustfmt --edition 2021 --config skip_children=true --check`、Vue/TypeScript/Markdown 的 `prettier --check`、`git diff --check` 均完成；十三个文本严格 UTF-8 无 BOM/LF、无替换字符。只读 SHA-256 与源码时间检查确认此前交付的双协议 Beta 与构建文件一致，版本 1.0.4、16,693,760 字节，摘要仍为 `fc242ae924abe6ceab1d50ec483b934d99c302c0d42473ff85daed6451276948`，应用源码没有晚于该 EXE 的修改。
+- 遵守此前限制：本轮不运行前端/Rust 回归、Clippy、界面自动化、真实模型或 SMTP，不启动应用，不提交、推送或发布。现有新增回归用例仍未执行；静态检查、此前编译及用户成功取证不能表述为全量测试通过或所有服务商永久不再断连。
+
+## 双协议流式及协议切换展示 Beta（2026-10-27 出包，次日已收到 Chat 成功日志）
+
+- 用户已提供上轮真实日志：Responses 请求流式，在 3,450 毫秒收到响应头、3,451 毫秒收到首个正文块，187,862 毫秒完整完成，HTTP 200 / text/event-stream，1,246,850 字节、无截断。本轮据此覆盖两种协议，不能由一次成功断言中转长期稳定或已定位内部断链节点。
+- `api.rs` 两种协议直接发送 `stream: true`，移除上轮临时 Cargo feature；新增 `chat_sse.rs`，按 Chat 专属分块/结束契约还原正文后进入既有判定。Responses 原终态解析、JSON 兼容、EOF/2 MiB/总期限/取消及原回退开关保持；连接测试复用同一请求方式，不新增请求或界面选项。传输格式仍为 2，构建标记为 `dual_protocol_stream_beta`，原 Responses 原文留存范围不扩展。
+- 已查明展示根因：后端返回分组历史兜底记录，前端 latest 只允许精确条件匹配；Widget 错将 latest 同时用于回答和耗时。现改为 latest 决定当前状态、latestRecord 展示/复制历史，协议变化保留 HTML 会话与真实耗时，标注旧协议和待重测；不弱化指纹、不重算历史/邮件。源码同步现有断言并补 Chat 合成回归，均未运行。
+- README、使用手册、业务注释及变更日志同步。本轮仅必要代码检查、格式化和出包类型检查/Windows 编译，不运行前端/Rust 测试、Clippy、桌面/浏览器自动化、真实模型/SMTP 或交付 EXE；不提交、推送或发布 Tag/Release，保留原改动及旧包。Rust/Vue 沿用项目规范，Java/JVM/MyBatis 专属工具和语法不适用；无数据库、备份或工程版本迁移。
+- 实际完成受影响 Rust 的 `rustfmt --edition 2021 --config skip_children=true`、Vue/TypeScript/Markdown 的 Prettier、`git diff --check` 及十三个修改/新增文本的 UTF-8 无 BOM/LF/替换字符核对。`run-build.ps1 -Action build` 完成 `vue-tsc --noEmit`、Vite、Windows x64 `tauri build --no-bundle`；收尾同步注释和用例状态后重新编译最终文件，只有既有 Vite chunk 体积与 MSVC 导入库 stdout 提示，没有编译错误。不把格式、类型检查或编译表述为测试通过，新增/调整用例均待用户允许后运行。
+- `package_exe.ps1` 核对 PE x64、工程/文件/产品版本、应用输入时间及复制摘要；新目录仅一个 `release-artifacts/v1.0.4-dual-protocol-stream-beta1/Model-IQ-Radar-v1.0.4-Dual-Protocol-Stream-Beta.1-Windows-x64.exe`，版本 1.0.4，16,693,760 字节，SHA-256 `fc242ae924abe6ceab1d50ec483b934d99c302c0d42473ff85daed6451276948`。此前传输诊断及 Responses 流式 Beta 的摘要未改变；未启动本轮 EXE，Chat 实际流式结果和卡片切换交互待人工验收。
+
+## Responses 流式对照 Beta（2026-10-27，历史出包记录，已收到成功日志）
+
+- 已读取用户新日志：关闭回退的单次 Responses 在 165,570 毫秒发生 TLS `UnexpectedEof`，未收到响应头或正文，未触发 600 秒应用期限。此前两协议尝试也出现同类错误；这些证据不能定位断链节点或证明固定时限。原 Beta 仍为非流式，本轮增加主动流式对照，不宣称根因已经修复。
+- `Cargo.toml` 新增默认关闭的 `responses-stream-beta` feature；`api.rs` 在带此 feature 的构建中仅对 Responses 发送 `stream: true`，日志复用同一值。正式手动/自动测试与复用适配器的连接测试适用，不改持久配置；连接测试仍不采集日志。`response_diagnostics.rs` 的传输格式 2 增加 `request_stream`/`build_variant`，旧文件不改写，原 Responses 原文诊断格式不变。
+- 沿用既有 JSON/SSE 解析、完整 EOF、唯一 `response.completed`、最终助手正文、2 MiB、取消和共享总期限；不追加请求、不开启回退、不关闭 TLS 校验、不改降智规则。已用 OpenAI 官方流式文档核对 `stream: true` 和结束事件；不能据此保证第三方中转遵循同样行为。README、使用手册和未发布日志同步；已有 SSE 请求回归只同步 feature 断言，未执行。
+- 本轮仅必要源码复核、受影响文件格式化及出包必需的类型检查和 Windows 编译；不运行前端/Rust 测试、Clippy、桌面/浏览器自动化、真实模型/SMTP 或交付程序。不提交、推送或变更 Tag/Release；保留既有未提交改动及旧 EXE。Java/JVM/MyBatis 专属条款不适用于本项目 Rust/Vue 技术栈。
+- 实际执行受影响 Rust 文件的 `rustfmt --edition 2021 --config skip_children=true`、四份 Markdown 的 Prettier、`git diff --check` 和八个修改文件的 UTF-8 无 BOM/LF/替换字符核对。`npm run tauri -- build --no-bundle --features responses-stream-beta` 完成 `vue-tsc --noEmit`、Vite 和 Windows x64 release 编译；仅保留既有 chunk 体积与 MSVC 导入库 stdout 提示，无编译错误。Cargo 最新构建指纹包含 `responses-stream-beta`，编译成功不代表真实服务断连已修复或测试通过。
+- `package_exe.ps1` 校验版本、PE x64、应用输入时间与复制摘要，随后在全新目录重命名；目录仅一份 `release-artifacts/v1.0.4-responses-stream-beta1/Model-IQ-Radar-v1.0.4-Responses-Stream-Beta.1-Windows-x64.exe`，工程/文件/产品版本 1.0.4，16,679,424 字节，SHA-256 `c03aa9e643b5318770f371418e91262a7ad3a5d1322da92ca54c87b171f3fdb6`。未启动交付程序，原非流式诊断 Beta 保留；待用户关闭回退、手动请求并提供格式 2 日志。
+
+## 本地传输诊断 Beta（2026-10-27，已收到人工取证）
+
+- 本轮用户授权仅补本地诊断并快速提供单个 Windows x64 Beta。最新限制覆盖历史测试授权：不运行前端/Rust 测试、Clippy、桌面或浏览器自动化、真实模型/SMTP 请求；只做必要代码检查、受影响文件格式化及出包类型检查/编译。不提交、推送、修改 Tag/Release，不覆盖之前 EXE。
+- `api.rs` 为两种协议的每次正式请求记录发送/等待响应头、收到响应头、读取正文与解析阶段，记录实际时间线、完整性和 reqwest 错误链；应用总期限与网络库超时区分，回退逐次关联，原提示、判定、请求参数和重试边界保持。`response_diagnostics.rs` 新增独立有界 transport 子目录，失败前没有响应头也能保存纯元数据；成功保存对照，不保存请求体或回答，不额外请求，不伪造状态码或正文。
+- 同步 README、使用手册及未发布变更说明；旧 Responses 原始诊断格式/留存、数据库与配置备份保持。现有请求回归仅调整新子目录计数和后台完成等待，未执行这些用例，不宣称测试通过。Java/JVM/MyBatis 专属语法和工具不适用于 Rust 模块，日志脱敏和异常隔离沿用项目规范。
+- 实际执行受影响 Rust 文件 `rustfmt --edition 2021 --config skip_children=true`、四份 Markdown 的 Prettier、`git diff --check` 及 UTF-8 无 BOM/LF、README/使用手册本地链接和锚点检查；均通过。`run-build.ps1 -Action build` 完成 `vue-tsc --noEmit`、Vite 和 Windows x64 `tauri build --no-bundle`；仅保留既有 chunk 体积与 MSVC 导入库 stdout 提示，没有编译错误。未运行任何测试或交付程序，编译不等于故障已修复或诊断已人工验证。
+- `package_exe.ps1` 校验 PE x64、工程/文件/产品版本及应用输入时间，复制后核对 SHA-256，并在新目录按诊断 Beta 命名。唯一交付物为 `release-artifacts/v1.0.4-transport-diagnostic-beta1/Model-IQ-Radar-v1.0.4-Transport-Diagnostic-Beta.1-Windows-x64.exe`，版本 1.0.4，16,678,912 字节，SHA-256 `84c3296a87484a4e2d108d7c1291f73ea1efe11211826aa875136e851d6fb3e5`；此前 EXE 保留，没有 ZIP、安装包或附带文件。后续已收到人工日志，传输证据及下一步对照见上方记录；仍未确认中转内部断链原因。
 
 ## v1.0.4 发布前全面复核（2026-10-27）
 
@@ -119,7 +169,7 @@
 - 通过 `scripts/package_exe.ps1` 核对 PE x64、文件版本和 SHA-256，将唯一的 EXE 复制到 `release-artifacts/v1.0.3/`；EXE SHA-256 为 `bf120d658d16a76107b3af9a5854cdfacd1904edab2a6fac39114a35a05f3f54`。后续 Tag/Release 同样只上传该 EXE，不生成 ZIP。旧版 ZIP 仅作为历史交付物保留，不代表 v1.0.3 构建。
 - 本地测试沿用正式应用标识，首次运行前应退出旧版并备份完整 `%APPDATA%\com.ahui.model-probe` 数据目录；schema v3 升级后不能直接切回旧版 EXE。
 
-以下保留 v1.0.2 及更早的历史验证记录，旧格式说明和数字仅对当时版本成立；当前兼容边界以 v1.0.4 使用手册为准。
+以下保留 v1.0.2 及更早的历史验证记录，旧格式说明和数字仅对当时版本成立；当前兼容边界以 v1.0.5 使用手册为准。
 
 ## v1.0.2 发布核验（2026-10-26）
 

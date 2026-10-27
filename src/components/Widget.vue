@@ -236,9 +236,11 @@ const resultLabel = computed(() =>
           : stateLabels[state.value],
 );
 watch(
-    () => latest.value?.id,
+    () => latestRecord.value?.id,
     () => {
         previewError.value = '';
+        copied.value = false;
+        clearTimeout(copiedTimer);
     },
 );
 /** 两种布局共用主按钮文案：任何已完成/失败/取消记录均允许重新测试。 */
@@ -267,7 +269,9 @@ const testTimeTitle = computed(() =>
         : compactTestTime.value,
 );
 const requestDuration = computed(() => {
-    if (!busy.value) return latest.value ? `${(latest.value.durationMs / 1000).toFixed(2)}s` : '暂无数据';
+    // 条件变化撤销当前判定，不删除历史事实；耗时与下方展示的同一条回答保持对应。
+    if (!busy.value)
+        return latestRecord.value ? `${(latestRecord.value.durationMs / 1000).toFixed(2)}s` : '暂无数据';
     const started = Date.parse(testStartedAt.value ?? '');
     return Number.isFinite(started)
         ? `${(Math.max(0, uiNow.value.wall - started) / 1000).toFixed(1)}s`
@@ -336,12 +340,25 @@ const autoCountdown = computed(() => {
 });
 const hint = computed(() => {
     if (busy.value) return cancelling.value ? '正在取消请求…' : '正在等待模型完整回答…';
-    if (stale.value) return '测试条件已变更，待重新测试';
+    if (stale.value) return '展示上次回答；当前条件待重新测试';
     if (!latest.value) return '配置好接口后，即可开始第一次测试';
     if (latest.value.status === 'passed') return '命中连续字符串：';
     if (latest.value.status === 'failed') return '未命中连续字符串：';
     if (latest.value.status === 'html') return '回答已识别为 HTML，可查看实际效果';
     return latest.value.error || '本次未产生判定结果';
+});
+
+/** 同分组历史可继续查看，但不能把旧协议结果当作当前协议已测试；旧记录不补猜协议。 */
+const answerCaption = computed(() => {
+    if (!stale.value || busy.value) return '完整正文';
+    const protocol = latestRecord.value?.interfaceMode;
+    const label =
+        protocol === 'responses'
+            ? 'Responses'
+            : protocol === 'chat_completions'
+              ? 'Chat Completions'
+              : '协议未记录';
+    return `上次回答 · ${label}`;
 });
 
 /** 保持窗口外框与内容尺寸一致，失败时撤回展开状态并提供可见提示。 */
@@ -531,15 +548,20 @@ async function selectEffort(id: string): Promise<void> {
 
 /** 复制完整正文，剪贴板权限失败时给出可读错误，保留原结果。 */
 async function copyAnswer(): Promise<void> {
+    const record = latestRecord.value;
+    if (busy.value || !record?.answer) return;
     try {
-        await navigator.clipboard.writeText(latest.value?.answer ?? '');
+        // 复制与屏幕展示同一条历史原文；切换记录或卸载后，迟到的结果不能回写提示。
+        await navigator.clipboard.writeText(record.answer);
+        if (disposed || latestRecord.value?.id !== record.id) return;
         copied.value = true;
         clearTimeout(copiedTimer);
         copiedTimer = setTimeout(() => {
             copied.value = false;
         }, 1800);
     } catch {
-        error.value = '复制失败，请在回答区域手动选择并复制。';
+        if (!disposed && latestRecord.value?.id === record.id)
+            error.value = '复制失败，请在回答区域手动选择并复制。';
     }
 }
 
@@ -721,10 +743,12 @@ watch(error, (value) => {
             </div>
 
             <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
-            <div class="answer-label"><span>模型回答</span><span class="eyebrow">完整正文</span></div>
+            <div class="answer-label">
+                <span>模型回答</span><span class="eyebrow">{{ answerCaption }}</span>
+            </div>
             <div
                 class="answer-box"
-                :class="{ 'answer-box-html': latest?.answerType === 'html' && !busy }"
+                :class="{ 'answer-box-html': latestRecord?.answerType === 'html' && !busy }"
                 tabindex="0"
                 :aria-busy="busy"
             >
@@ -732,10 +756,10 @@ watch(error, (value) => {
                     <LoaderCircle :size="18" class="spin" />等待模型回答
                 </div>
                 <AnswerContent
-                    v-else-if="latest?.answer"
-                    :source="latest.answer"
-                    :answer-type="latest.answerType"
-                    :executable="latest.status !== 'error' && latest.status !== 'cancelled'"
+                    v-else-if="latestRecord?.answer"
+                    :source="latestRecord.answer"
+                    :answer-type="latestRecord.answerType"
+                    :executable="latestRecord.status !== 'error' && latestRecord.status !== 'cancelled'"
                     @failure="previewError = $event"
                     @expanded-change="previewExpandedChanged"
                 />
@@ -762,7 +786,11 @@ watch(error, (value) => {
                 </div>
             </div>
             <div class="expanded-actions">
-                <button class="button secondary" :disabled="busy || !latest?.answer" @click="copyAnswer">
+                <button
+                    class="button secondary"
+                    :disabled="busy || !latestRecord?.answer"
+                    @click="copyAnswer"
+                >
                     <Check v-if="copied" :size="15" /><Copy v-else :size="15" />{{
                         copied ? '已复制' : '复制回答'
                     }}
@@ -773,7 +801,7 @@ watch(error, (value) => {
                     :disabled="cancelling || selecting || (busy && !snapshot?.running)"
                     @click="primaryAction"
                 >
-                    <X v-if="busy" :size="15" /><RotateCw v-else-if="latest" :size="15" /><Play
+                    <X v-if="busy" :size="15" /><RotateCw v-else-if="latestRecord" :size="15" /><Play
                         v-else
                         :size="15"
                     />
@@ -799,10 +827,10 @@ watch(error, (value) => {
             <div class="compact-timing" :title="`测试时间：${testTimeTitle}；请求耗时：${requestDuration}`">
                 <!-- 标签必须直接可见，不能仅藏在悬停说明中；日期仍与耗时、倒计时分行。 -->
                 <span class="compact-test-time">测试时间 {{ compactTestTime }}</span>
-                <span v-if="busy || latest || autoTestEnabled" class="compact-request-details">
-                    <span v-if="busy || latest">耗时 {{ requestDuration }}</span>
+                <span v-if="busy || latestRecord || autoTestEnabled" class="compact-request-details">
+                    <span v-if="busy || latestRecord">耗时 {{ requestDuration }}</span>
                     <span v-if="autoTestEnabled" class="auto-countdown"
-                        >{{ busy || latest ? ' · ' : '' }}下次 {{ autoCountdown }}</span
+                        >{{ busy || latestRecord ? ' · ' : '' }}下次 {{ autoCountdown }}</span
                     >
                 </span>
             </div>
@@ -812,7 +840,7 @@ watch(error, (value) => {
                 :disabled="cancelling || selecting || (busy && !snapshot?.running)"
                 @click="primaryAction"
             >
-                <X v-if="busy" :size="13" /><RotateCw v-else-if="latest" :size="13" /><Play
+                <X v-if="busy" :size="13" /><RotateCw v-else-if="latestRecord" :size="13" /><Play
                     v-else
                     :size="13"
                 />

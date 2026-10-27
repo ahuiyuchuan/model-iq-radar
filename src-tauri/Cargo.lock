@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "model-probe"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "keyring",

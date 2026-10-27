@@ -1,11 +1,15 @@
 //! Chat Completions 与 Responses 适配器。只提交一个独立题目，不提交答案、历史或工具。
 //! HTTP 错误只映射状态码，不展示服务商响应体或包含鉴权信息的底层错误。
-//! 正式 Responses 测试的 JSON/读取异常可独立落盘本次响应取证，不参与判定或历史正文。
+//! 正式 Responses 异常可落盘原始响应；两种协议另保存有界传输时间线，不参与判定或历史正文。
 //! 作者：ahui。
 
 use crate::{
+    chat_sse,
     model::{validate_timeout_seconds, ModelProfile, TestRule},
-    response_diagnostics::{self, JsonParseError, ResponseDiagnostic, BODY_LIMIT_BYTES},
+    response_diagnostics::{
+        self, JsonParseError, ResponseDiagnostic, TransportDiagnostic, TransportFailure,
+        BODY_LIMIT_BYTES,
+    },
     responses_sse,
 };
 use reqwest::{header::HeaderMap, redirect::Policy, Client};
@@ -303,9 +307,9 @@ pub async fn complete(
     complete_with_diagnostics(profile, rule, key, timeout, token, None).await
 }
 
-/// 正式测试的可选本地响应取证入口；None 不写文件，已有调用方沿用 complete。
-/// 仅 Responses 的 JSON/SSE/正文读取异常保存已收到字节；不额外请求、不启用回退、不改变成功标准。
-/// 文件后台写入不计入网络预算、不等待磁盘；读取到 EOF 才可标记完整，超限只保留有界前缀。
+/// 正式测试的可选本地取证入口；None 不写文件，已有调用方沿用 complete。
+/// Responses 异常保留原始字节；两种协议逐次保存纯元数据，以本地 UUID 关联回退，不增加请求头。
+/// 不额外请求、不启用回退、不改变成功标准；后台写入不等待磁盘，EOF/2 MiB 边界保持不变。
 pub async fn complete_with_diagnostics(
     profile: &ModelProfile,
     rule: &TestRule,
@@ -326,6 +330,7 @@ pub async fn complete_with_diagnostics(
             "超时超过系统计时器可表示的范围，请减小秒数。",
         );
     };
+    let trace_id = uuid::Uuid::new_v4().to_string();
     let mut result = complete_once(
         profile,
         rule,
@@ -333,7 +338,11 @@ pub async fn complete_with_diagnostics(
         timeout,
         token,
         deadline,
-        diagnostic_directory,
+        diagnostic_directory.map(|directory| AttemptDiagnostics {
+            directory,
+            trace_id: &trace_id,
+            attempt_index: 1,
+        }),
     )
     .await;
     if result.error_kind.as_deref() == Some("configuration") {
@@ -362,12 +371,24 @@ pub async fn complete_with_diagnostics(
         timeout,
         token,
         deadline,
-        diagnostic_directory,
+        diagnostic_directory.map(|directory| AttemptDiagnostics {
+            directory,
+            trace_id: &trace_id,
+            attempt_index: 2,
+        }),
     )
     .await;
     result.attempted_modes.push(fallback.interface_mode);
     retried.attempted_modes = result.attempted_modes;
     retried
+}
+
+/// 仅存在于本次调用栈的诊断上下文；不包含凭据，不改变请求参数或协议尝试次数。
+#[derive(Clone, Copy)]
+struct AttemptDiagnostics<'a> {
+    directory: &'a Path,
+    trace_id: &'a str,
+    attempt_index: u8,
 }
 
 /// 仅执行所选协议一次，不递归回退；总超时包含响应读取，单次正文上限 2 MiB。
@@ -378,7 +399,7 @@ async fn complete_once(
     timeout: u64,
     token: &CancellationToken,
     deadline: tokio::time::Instant,
-    diagnostic_directory: Option<&Path>,
+    diagnostic_context: Option<AttemptDiagnostics<'_>>,
 ) -> Completion {
     if !matches!(
         profile.interface_mode.as_str(),
@@ -402,6 +423,28 @@ async fn complete_once(
         Ok(value) => value,
         Err(_) => return Completion::failure("configuration", "无法初始化 HTTPS 客户端。"),
     };
+    let diagnostic_directory = diagnostic_context.map(|context| context.directory);
+    // 同一个值同时写入请求和取证，避免只根据服务商后台标记推断客户端是否请求流式。
+    // 两种协议均主动请求流式，减少长推理请求等待首字节的静默期；不保证网关实时转发。
+    // 连接测试复用本适配器，也请求流式，但不新增其诊断文件或额外请求。
+    let request_stream = true;
+    let attempt_started = std::time::Instant::now();
+    let mut transport = diagnostic_context.map(|context| {
+        let mut trace = TransportDiagnostic::new(
+            context.trace_id,
+            context.attempt_index,
+            &profile.interface_mode,
+            &profile.model,
+            profile.reasoning_effort.as_deref(),
+            timeout,
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64,
+        );
+        trace.request_stream = request_stream;
+        trace.build_variant = "dual_protocol_stream".into();
+        trace
+    });
     // 正文缓冲在 select 外持有，取消/超时丢弃网络 future 后仍能保存已经收到的部分。
     // 不为诊断读取更多字节；与原来一样，超过既有 2 MiB 限制即停止并返回原错误类型。
     let mut bytes = Vec::new();
@@ -410,6 +453,7 @@ async fn complete_once(
     let mut body_truncated = false;
     let mut json_error = None;
     let mut response_metadata = None;
+    // 原文落盘仍仅限既有 Responses 范围；两种协议另有独立的纯元数据时间线。
     let mut sse_response = false;
     let started_at_utc = chrono::Utc::now().to_rfc3339();
     let work = async {
@@ -417,13 +461,13 @@ async fn complete_once(
             json!({
                 "model": profile.model,
                 "input": rule.prompt,
-                "stream": false
+                "stream": request_stream
             })
         } else {
             json!({
                 "model": profile.model,
                 "messages": [{"role": "user", "content": rule.prompt}],
-                "stream": false
+                "stream": request_stream
             })
         };
         if let Some(effort) = profile
@@ -441,21 +485,42 @@ async fn complete_once(
         if !key.is_empty() {
             request = request.bearer_auth(key);
         }
+        if let Some(trace) = transport.as_mut() {
+            // send future 覆盖建连、发送和等待响应头；不能把进入此阶段当作服务端已收到请求。
+            trace.stage = "sending_or_waiting_response_headers".into();
+            trace.send_started_after_ms = Some(attempt_started.elapsed().as_millis() as u64);
+        }
         let mut response = match request.send().await {
             Ok(value) => value,
             Err(error) => {
+                let is_timeout = error.is_timeout();
+                if let Some(trace) = transport.as_mut() {
+                    if is_timeout {
+                        trace.timeout_source = Some("transport".into());
+                    }
+                    trace.transport_error = Some(TransportFailure::from_error(error, key));
+                }
                 return Completion::failure(
-                    if error.is_timeout() {
-                        "timeout"
-                    } else {
-                        "connection"
-                    },
+                    if is_timeout { "timeout" } else { "connection" },
                     "请求失败，请检查接口地址、网络、代理和 TLS 证书。",
-                )
+                );
             }
         };
         let status = response.status().as_u16();
         let request_id = safe_request_id(response.headers(), key);
+        if let Some(trace) = transport.as_mut() {
+            trace.stage = "response_headers".into();
+            trace.response_headers_after_ms = Some(attempt_started.elapsed().as_millis() as u64);
+            trace.http_status = Some(status);
+            trace.http_version = Some(format!("{:?}", response.version()));
+            trace.request_id = request_id.clone();
+            trace.content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| value.len() <= 256 && (key.is_empty() || !value.contains(key)))
+                .map(str::to_owned);
+        }
         let with_metadata = |mut result: Completion| {
             result.http_status = Some(status);
             result.request_id = request_id.clone();
@@ -475,8 +540,8 @@ async fn complete_once(
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        sse_response = profile.interface_mode == "responses"
-            && responses_sse::is_event_stream(content_type, &[]);
+        let event_stream = responses_sse::is_event_stream(content_type, &[]);
+        sse_response = profile.interface_mode == "responses" && event_stream;
         // 只保留所需的响应头；不复制请求对象、鉴权头、请求体、URL 或其他响应头。
         if diagnostic_directory.is_some() && profile.interface_mode == "responses" {
             let content_type = content_type
@@ -484,9 +549,19 @@ async fn complete_once(
                 .map(str::to_owned);
             response_metadata = Some((status, content_type, request_id.clone()));
         }
+        if let Some(trace) = transport.as_mut() {
+            trace.stage = "reading_response_body".into();
+        }
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
+                    if !chunk.is_empty() {
+                        if let Some(trace) = transport.as_mut() {
+                            trace.first_body_after_ms.get_or_insert_with(|| {
+                                attempt_started.elapsed().as_millis() as u64
+                            });
+                        }
+                    }
                     received_body_bytes = received_body_bytes.saturating_add(chunk.len() as u64);
                     let remaining = BODY_LIMIT_BYTES.saturating_sub(bytes.len());
                     bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
@@ -502,23 +577,43 @@ async fn complete_once(
                     body_complete = true;
                     break;
                 }
-                Err(_) => {
+                Err(error) => {
+                    if let Some(trace) = transport.as_mut() {
+                        if error.is_timeout() {
+                            trace.timeout_source = Some("transport".into());
+                        }
+                        trace.transport_error = Some(TransportFailure::from_error(error, key));
+                    }
                     return with_metadata(Completion::failure(
                         "read_interrupted",
                         "响应读取中断，未执行判定。",
-                    ))
+                    ));
                 }
             }
         }
+        if let Some(trace) = transport.as_mut() {
+            trace.stage = "parsing_response".into();
+        }
         // 仍先读取到 EOF：中断、超时或超限不能靠已收到的增量/结束片段绕过完整性检查。
-        // 有些中转即使收到 stream:false 也返回 SSE；只改变本次正文解析，不重发请求。
-        sse_response = profile.interface_mode == "responses"
-            && (sse_response || responses_sse::is_event_stream(None, &bytes));
+        // 网关忽略 stream:true 返回完整 JSON 时继续兼容；不改用非流式重发请求。
+        let event_stream = event_stream || responses_sse::is_event_stream(None, &bytes);
+        sse_response = profile.interface_mode == "responses" && event_stream;
         // 完整 JSON 始终保留原兼容路径，即使网关误标 Content-Type 也不无故破坏旧行为。
         let parsed_json = serde_json::from_slice::<Value>(&bytes);
-        if sse_response && parsed_json.is_err() {
-            return with_metadata(match responses_sse::parse(&bytes) {
-                Ok(value) => parse_response(&value),
+        if event_stream && parsed_json.is_err() {
+            let parsed_stream = if profile.interface_mode == "responses" {
+                responses_sse::parse(&bytes)
+            } else {
+                chat_sse::parse(&bytes)
+            };
+            return with_metadata(match parsed_stream {
+                Ok(value) => {
+                    if profile.interface_mode == "responses" {
+                        parse_response(&value)
+                    } else {
+                        parse_completion(&value)
+                    }
+                }
                 Err(failure) => {
                     if let Some(error) = failure.json_error {
                         json_error = Some(JsonParseError {
@@ -553,13 +648,40 @@ async fn complete_once(
             }
         })
     };
+    let mut application_deadline_reached = false;
     let result = tokio::select! {
         biased;
         _ = token.cancelled() => { let mut result=Completion::failure("cancelled", "用户已取消。本地停止等待，服务商仍可能已处理请求并计费。"); result.cancelled=true; result },
-        _ = tokio::time::sleep_until(deadline) => Completion::failure("timeout", &format!("请求超过 {timeout} 秒，已停止等待，未执行判定。")),
+        _ = tokio::time::sleep_until(deadline) => {
+            application_deadline_reached = true;
+            Completion::failure("timeout", &format!("请求超过 {timeout} 秒，已停止等待，未执行判定。"))
+        },
         result = work => result,
     };
-    // SSE 解析或最终协议验证失败同样保留原始事件流；正常成功不新增诊断文件。
+    // 先从已结束/已丢弃的网络 future 取快照；即使没有任何响应头，也能留下连接失败证据。
+    // 成功仅保存时间线作对照，不记录正文。诊断失败不会覆盖 Completion 或增加回退请求。
+    if let (Some(directory), Some(mut trace)) = (diagnostic_directory, transport) {
+        trace.finished_at_utc = chrono::Utc::now().to_rfc3339();
+        trace.elapsed_ms = attempt_started.elapsed().as_millis() as u64;
+        trace.received_body_bytes = received_body_bytes;
+        trace.body_complete = body_complete;
+        trace.body_truncated = body_truncated;
+        trace.error_kind = result.error_kind.clone();
+        trace.outcome = if result.cancelled {
+            "cancelled"
+        } else if result.error.is_some() {
+            "failure"
+        } else {
+            trace.stage = "completed".into();
+            "success"
+        }
+        .into();
+        if application_deadline_reached {
+            trace.timeout_source = Some("application_total_deadline".into());
+        }
+        response_diagnostics::save_transport_in_background(directory, trace, key);
+    }
+    // SSE 解析或最终协议验证失败同样保留原始事件流；正常成功不新增原始正文文件。
     if (sse_response && result.error.is_some())
         || matches!(
             result.error_kind.as_deref(),

@@ -292,7 +292,7 @@ mod tests {
                             payload["messages"],
                             serde_json::json!([{"role":"user","content":"请只回复 OK。"}])
                         );
-                        assert_eq!(payload["stream"], false);
+                        assert_eq!(payload["stream"], true);
                         break;
                     }
                 }

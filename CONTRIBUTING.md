@@ -34,7 +34,7 @@ npm run tauri -- build --no-bundle
 
 HTML 预览采用页面内 iframe。组件回归在 `tests/html-answer.test.ts`；桌面验收必须用独立 identifier、虚构数据库和模型，避免读取正式数据。验证有界画布缩放、无滚动条、HTML 悬停、收起裁剪、页内放大、Escape/焦点恢复，以及列表实时动画不弹出额外窗口。
 
-桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，逐文件复核见 `docs/FILE_AUDIT-v1.0.4.md`。
+桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，逐文件复核见 `docs/FILE_AUDIT-v1.0.5.md`。
 
 ## 目录职责
 

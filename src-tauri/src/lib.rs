@@ -4,6 +4,7 @@
 pub mod api;
 mod autostart;
 pub mod backup;
+mod chat_sse;
 pub mod conditions;
 mod discovery;
 mod html;

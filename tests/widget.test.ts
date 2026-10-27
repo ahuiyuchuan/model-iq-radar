@@ -589,6 +589,13 @@ it('条件指纹变化后不沿用旧绿色，重测期间优先显示测试中�
     expect(wrapper.get('.compact-test-time').text()).toBe(`测试时间 ${formatTime('2026-10-23T00:00:00Z')}`);
     expect(wrapper.get('.compact-timing').text()).toContain(formatTime('2026-10-23T00:00:00Z'));
     expect(wrapper.get('.compact-timing').text()).not.toContain('尚未测试');
+    expect(wrapper.get('.compact-timing').text()).toContain('0.02s');
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('.answer-box').text()).toBe('答案');
+    expect(wrapper.get('.expanded-actions .button.secondary').attributes('disabled')).toBeUndefined();
+    await wrapper.get('[aria-label="收起结果"]').trigger('click');
+    await flushPromises();
     fake.snapshot.running = {
         id: 'run',
         profileName: '新名称',
@@ -641,6 +648,17 @@ it('切回已有条件时恢复对应回答、状态、时间和耗时，不自�
     await flushPromises();
     expect(wrapper.get('h1').text()).toBe('已生成 HTML');
     expect(wrapper.find('iframe').exists()).toBe(true);
+    // 切换到尚无记录的协议时，保留上次 HTML 会话与耗时，但不沿用旧协议的有效状态。
+    const previousFrame = wrapper.get('iframe').element;
+    fake.snapshot.history[0].interfaceMode = 'responses';
+    fake.snapshot.config.profiles[0].interfaceMode = 'chat_completions';
+    fake.snapshot.conditionFingerprints = { one: 'untested-chat-conditions' };
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get('h1').text()).toBe('待重新测试');
+    expect(wrapper.get('.answer-label').text()).toContain('上次回答 · Responses');
+    expect(wrapper.get('iframe').element).toBe(previousFrame);
+    expect(wrapper.get('.metadata').text()).toContain('1.25s');
     fake.snapshot.conditionFingerprints = { one: 'candy-conditions' };
     fake.subscribe.mock.calls[0][0]();
     await flushPromises();
