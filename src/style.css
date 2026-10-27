@@ -2367,7 +2367,7 @@ textarea {
     }
 }
 
-/* 桌面画布首帧后按页面实际尺寸有界扩展，再等比适配；小预览与放大共用完整画面。 */
+/* 保持桌面排版，首帧按实际内容去除外围留白后等比居中；三处预览与放大共用同一内容范围。 */
 .html-preview-host {
     min-width: 0;
 }
@@ -2394,6 +2394,7 @@ textarea {
 }
 .html-preview-canvas {
     position: relative;
+    overflow: hidden;
 }
 .html-preview-canvas iframe {
     position: absolute;
@@ -2577,11 +2578,13 @@ textarea {
     padding: 0;
     border: 0;
     background: transparent;
+    max-height: none;
 }
 .history-answer-preview .html-preview-host,
 .history-answer-preview .html-preview:not(.html-preview-expanded) {
     width: 100%;
-    height: 84px;
+    /* HTML 比文字摘要多留空间，配合内容边界缩放，避免动画成为难以辨认的小图。 */
+    height: 120px;
 }
 .history-answer-preview .html-preview:not(.html-preview-expanded) .html-preview-stage {
     height: 100%;

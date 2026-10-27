@@ -10,6 +10,7 @@ import {
     preparePreview,
     previewMessage,
     type PreparedPreview,
+    type PreviewContentBounds,
 } from '../htmlSandbox';
 
 const props = withDefaults(
@@ -35,12 +36,13 @@ const stage = ref<HTMLElement>();
 const dialog = ref<HTMLDialogElement>();
 const scale = ref(0);
 const viewport = ref<{ width: number; height: number }>({ ...HTML_VIEWPORT });
+const content = ref<PreviewContentBounds>({ x: 0, y: 0, ...HTML_VIEWPORT });
 const candidate = computed(() => props.candidates[index.value] ?? props.candidates[0]);
 // 失败/取消的部分回答和不完整候选只显示源码，原文仍由调用方负责完整复制。
 const sourceOnly = computed(() => !props.executable || Boolean(candidate.value?.issue));
 const canvasStyle = computed(() => ({
-    width: `${viewport.value.width * scale.value}px`,
-    height: `${viewport.value.height * scale.value}px`,
+    width: `${content.value.width * scale.value}px`,
+    height: `${content.value.height * scale.value}px`,
 }));
 let session: PreparedPreview | undefined;
 let generation = 0;
@@ -89,6 +91,7 @@ async function start(): Promise<void> {
     message.value = '';
     background.value = '';
     viewport.value = { ...HTML_VIEWPORT };
+    content.value = { x: 0, y: 0, ...HTML_VIEWPORT };
     layout();
     if (disposed) return;
     if (sourceOnly.value) {
@@ -126,11 +129,11 @@ function frameLoaded(): void {
     deadline = setTimeout(() => fail('HTML 加载超时'), 12000);
 }
 
-/** 完整桌面画布按宽高共同适配并居中；容器变大只改变缩放，避免裁掉正文底部或窄屏重排。 */
+/** 实际内容按宽高共同适配并居中，剔除页面外围留白；保留原视口排版，保证上下留边一致。 */
 function layout(): void {
     const box = stage.value?.getBoundingClientRect();
     scale.value = box
-        ? Math.max(0, Math.min(box.width / viewport.value.width, box.height / viewport.value.height))
+        ? Math.max(0, Math.min(box.width / content.value.width, box.height / content.value.height))
         : 0;
 }
 
@@ -200,6 +203,18 @@ function receive(event: MessageEvent): void {
             return;
         }
         viewport.value = { width, height };
+        content.value = { x: 0, y: 0, width, height };
+        layout();
+        return;
+    }
+    if (event.data.type === 'content') {
+        const bounds = event.data.value;
+        // 作品脚本同样能发消息；仅接受视口内整数，拒绝负坐标、精度/范围溢出和样式字符串。
+        if (!bounds || !['x', 'y', 'width', 'height'].every((key) => Number.isInteger(bounds[key]))) return;
+        const { x, y, width, height } = bounds;
+        if (x < 0 || y < 0 || width <= 0 || height <= 0) return;
+        if (x + width > viewport.value.width || y + height > viewport.value.height) return;
+        content.value = { x, y, width, height };
         layout();
         return;
     }
@@ -318,7 +333,7 @@ onBeforeUnmount(() => {
                             :style="{
                                 width: `${viewport.width}px`,
                                 height: `${viewport.height}px`,
-                                transform: `scale(${scale})`,
+                                transform: `scale(${scale}) translate(${-content.x}px, ${-content.y}px)`,
                                 pointerEvents: expanded ? 'auto' : 'none',
                             }"
                         />

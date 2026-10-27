@@ -1,6 +1,6 @@
 # Third-party notices
 
-测智雷达 v1.0.3。整理：ahui。
+测智雷达 v1.0.4。整理：ahui。
 
 本项目采用 GPL-3.0-only。第三方依赖保留各自许可证；本文件由 scripts/generate_notices.mjs 从锁定版本的依赖声明生成，收录生产前端和 Windows Cargo 依赖（含构建依赖）的 LICENSE / NOTICE 原文。未修改第三方许可证内容。
 

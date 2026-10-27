@@ -6,7 +6,7 @@ import { classifyAnswer, isHtmlRecord, previewAllowed } from '../src/htmlAnswer'
 import HtmlPreview from '../src/components/HtmlPreview.vue';
 import AnswerContent from '../src/components/AnswerContent.vue';
 import HistoryAnswerPreview from '../src/components/HistoryAnswerPreview.vue';
-import { preparePreview, previewMessage } from '../src/htmlSandbox';
+import { measurePreviewContent, preparePreview, previewMessage } from '../src/htmlSandbox';
 import type { TestRecord } from '../src/types';
 
 const fake = vi.hoisted(() => ({ call: vi.fn() }));
@@ -35,7 +35,45 @@ beforeEach(() => {
 afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     document.body.innerHTML = '';
+});
+it('测量居中作品并保留阴影余量，脚本和隐藏元素不扩大外围留白', () => {
+    document.body.innerHTML = '<main>动画作品</main><script></script><div hidden>隐藏内容</div>';
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(1440);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(1000);
+    vi.spyOn(document.querySelector('main')!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(240, 200, 960, 600),
+    );
+    expect(measurePreviewContent()).toEqual({ x: 224, y: 184, width: 992, height: 632 });
+});
+it('内容测量保留所有并列元素及正文，满屏作品不被裁去边缘', () => {
+    document.body.innerHTML = '<header>标题</header>正文<svg></svg>';
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(1440);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(1000);
+    vi.spyOn(document.querySelector('header')!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(200, 120, 1040, 40),
+    );
+    vi.spyOn(document.querySelector('svg')!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(240, 200, 960, 600),
+    );
+    vi.spyOn(document, 'createRange').mockReturnValue({
+        selectNode: vi.fn(),
+        getBoundingClientRect: () => new DOMRect(220, 170, 300, 20),
+    } as unknown as Range);
+    expect(measurePreviewContent()).toEqual({ x: 184, y: 104, width: 1072, height: 712 });
+    document.body.innerHTML = '<main>全屏作品</main>';
+    vi.spyOn(document.querySelector('main')!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 1440, 1000),
+    );
+    expect(measurePreviewContent()).toEqual({ x: 0, y: 0, width: 1440, height: 1000 });
+});
+it('空白、不可测量或一级节点过多时保留完整画布，不猜测裁剪范围', () => {
+    expect(measurePreviewContent()).toBeNull();
+    document.body.innerHTML = '<div>不可测量</div>';
+    expect(measurePreviewContent()).toBeNull();
+    document.body.innerHTML = '<div></div>'.repeat(257);
+    expect(measurePreviewContent()).toBeNull();
 });
 it.each(cases)('$name 识别为 $kind', ({ answer, kind }) => {
     expect(classifyAnswer(answer).kind).toBe(kind);
@@ -248,6 +286,52 @@ it('加载在 ready 前保持动画，合法尺寸整体缩放，伪造尺寸和
     await flushPromises();
     expect(wrapper.find('iframe').exists()).toBe(false);
     expect(wrapper.text()).toContain('超过预览上限');
+    wrapper.unmount();
+});
+it('实际内容放大并等比居中，非法范围无效，放大后仍使用同一内容坐标', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('html-preview-stage') ? new DOMRect(0, 0, 360, 180) : new DOMRect();
+    });
+    const wrapper = mount(HtmlPreview, {
+        attachTo: document.body,
+        props: { candidates: classifyAnswer('<div>scene</div>').candidates },
+    });
+    await flushPromises();
+    const token = fake.call.mock.calls
+        .find(([cmd]) => cmd === 'prepare_html_preview')![1]
+        .document.match(/const token = "([^"]+)"/)![1];
+    const send = (value: unknown) =>
+        window.dispatchEvent(
+            new MessageEvent('message', {
+                source: document.querySelector('iframe')!.contentWindow,
+                data: { token, type: 'content', value },
+            }),
+        );
+    send({ x: 224, y: 184, width: 992, height: 632 });
+    await flushPromises();
+    const canvas = wrapper.get('.html-preview-canvas').element as HTMLElement;
+    expect(parseFloat(canvas.style.width)).toBeCloseTo((992 * 180) / 632);
+    expect(parseFloat(canvas.style.height)).toBeCloseTo(180);
+    expect(wrapper.get('iframe').element.style.transform).toContain('translate(-224px, -184px)');
+    const originalStyle = canvas.getAttribute('style');
+    for (const value of [
+        null,
+        { x: -1, y: 0, width: 100, height: 100 },
+        { x: 1.5, y: 0, width: 100, height: 100 },
+        { x: 0, y: 0, width: 0, height: 100 },
+        { x: 1000, y: 0, width: 500, height: 100 },
+        { x: 0, y: 900, width: 100, height: 200 },
+        { x: '0', y: 0, width: 100, height: 100 },
+    ]) {
+        send(value);
+        await flushPromises();
+        expect(canvas.getAttribute('style')).toBe(originalStyle);
+    }
+    await wrapper.get('.html-preview-stage').trigger('click');
+    await flushPromises();
+    expect(document.querySelector('dialog[open] iframe')?.getAttribute('style')).toContain(
+        'translate(-224px, -184px)',
+    );
     wrapper.unmount();
 });
 it.each([0, 100, 500])('页面在 %dms 就绪时，动画至少 300ms 且慢加载不另加延时', async (readyAt) => {

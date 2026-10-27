@@ -1,11 +1,16 @@
 //! Chat Completions 与 Responses 适配器。只提交一个独立题目，不提交答案、历史或工具。
 //! HTTP 错误只映射状态码，不展示服务商响应体或包含鉴权信息的底层错误。
+//! 正式 Responses 测试的 JSON/读取异常可独立落盘本次响应取证，不参与判定或历史正文。
 //! 作者：ahui。
 
-use crate::model::{validate_timeout_seconds, ModelProfile, TestRule};
+use crate::{
+    model::{validate_timeout_seconds, ModelProfile, TestRule},
+    response_diagnostics::{self, JsonParseError, ResponseDiagnostic, BODY_LIMIT_BYTES},
+    responses_sse,
+};
 use reqwest::{header::HeaderMap, redirect::Policy, Client};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -14,7 +19,7 @@ pub struct Completion {
     pub answer: String,
     pub error: Option<String>,
     pub cancelled: bool,
-    /// 诊断只保留安全元数据，不保存服务商错误体或鉴权头。
+    /// 历史/UI 只保留安全元数据；独立响应诊断不写入历史，不保存请求鉴权头。
     pub error_kind: Option<String>,
     pub http_status: Option<u16>,
     pub request_id: Option<String>,
@@ -295,6 +300,20 @@ pub async fn complete(
     timeout: u64,
     token: &CancellationToken,
 ) -> Completion {
+    complete_with_diagnostics(profile, rule, key, timeout, token, None).await
+}
+
+/// 正式测试的可选本地响应取证入口；None 不写文件，已有调用方沿用 complete。
+/// 仅 Responses 的 JSON/SSE/正文读取异常保存已收到字节；不额外请求、不启用回退、不改变成功标准。
+/// 文件后台写入不计入网络预算、不等待磁盘；读取到 EOF 才可标记完整，超限只保留有界前缀。
+pub async fn complete_with_diagnostics(
+    profile: &ModelProfile,
+    rule: &TestRule,
+    key: &str,
+    timeout: u64,
+    token: &CancellationToken,
+    diagnostic_directory: Option<&Path>,
+) -> Completion {
     if let Err(message) = validate_timeout_seconds(timeout) {
         return Completion::failure("configuration", &message);
     }
@@ -307,7 +326,16 @@ pub async fn complete(
             "超时超过系统计时器可表示的范围，请减小秒数。",
         );
     };
-    let mut result = complete_once(profile, rule, key, timeout, token, deadline).await;
+    let mut result = complete_once(
+        profile,
+        rule,
+        key,
+        timeout,
+        token,
+        deadline,
+        diagnostic_directory,
+    )
+    .await;
     if result.error_kind.as_deref() == Some("configuration") {
         return result;
     }
@@ -327,7 +355,16 @@ pub async fn complete(
         "responses"
     }
     .into();
-    let mut retried = complete_once(&fallback, rule, key, timeout, token, deadline).await;
+    let mut retried = complete_once(
+        &fallback,
+        rule,
+        key,
+        timeout,
+        token,
+        deadline,
+        diagnostic_directory,
+    )
+    .await;
     result.attempted_modes.push(fallback.interface_mode);
     retried.attempted_modes = result.attempted_modes;
     retried
@@ -341,6 +378,7 @@ async fn complete_once(
     timeout: u64,
     token: &CancellationToken,
     deadline: tokio::time::Instant,
+    diagnostic_directory: Option<&Path>,
 ) -> Completion {
     if !matches!(
         profile.interface_mode.as_str(),
@@ -364,6 +402,16 @@ async fn complete_once(
         Ok(value) => value,
         Err(_) => return Completion::failure("configuration", "无法初始化 HTTPS 客户端。"),
     };
+    // 正文缓冲在 select 外持有，取消/超时丢弃网络 future 后仍能保存已经收到的部分。
+    // 不为诊断读取更多字节；与原来一样，超过既有 2 MiB 限制即停止并返回原错误类型。
+    let mut bytes = Vec::new();
+    let mut received_body_bytes = 0_u64;
+    let mut body_complete = false;
+    let mut body_truncated = false;
+    let mut json_error = None;
+    let mut response_metadata = None;
+    let mut sse_response = false;
+    let started_at_utc = chrono::Utc::now().to_rfc3339();
     let work = async {
         let mut payload = if profile.interface_mode == "responses" {
             json!({
@@ -423,19 +471,37 @@ async fn complete_once(
             };
             return with_metadata(Completion::failure(kind, &message));
         }
-        let mut bytes = Vec::new();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        sse_response = profile.interface_mode == "responses"
+            && responses_sse::is_event_stream(content_type, &[]);
+        // 只保留所需的响应头；不复制请求对象、鉴权头、请求体、URL 或其他响应头。
+        if diagnostic_directory.is_some() && profile.interface_mode == "responses" {
+            let content_type = content_type
+                .filter(|value| value.len() <= 256 && (key.is_empty() || !value.contains(key)))
+                .map(str::to_owned);
+            response_metadata = Some((status, content_type, request_id.clone()));
+        }
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
-                    if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
+                    received_body_bytes = received_body_bytes.saturating_add(chunk.len() as u64);
+                    let remaining = BODY_LIMIT_BYTES.saturating_sub(bytes.len());
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    if chunk.len() > remaining {
+                        body_truncated = true;
                         return with_metadata(Completion::failure(
                             "response_too_large",
                             "响应超过 2 MiB，已停止读取，未执行判定。",
                         ));
                     }
-                    bytes.extend_from_slice(&chunk);
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    body_complete = true;
+                    break;
+                }
                 Err(_) => {
                     return with_metadata(Completion::failure(
                         "read_interrupted",
@@ -444,7 +510,30 @@ async fn complete_once(
                 }
             }
         }
-        with_metadata(match serde_json::from_slice::<Value>(&bytes) {
+        // 仍先读取到 EOF：中断、超时或超限不能靠已收到的增量/结束片段绕过完整性检查。
+        // 有些中转即使收到 stream:false 也返回 SSE；只改变本次正文解析，不重发请求。
+        sse_response = profile.interface_mode == "responses"
+            && (sse_response || responses_sse::is_event_stream(None, &bytes));
+        // 完整 JSON 始终保留原兼容路径，即使网关误标 Content-Type 也不无故破坏旧行为。
+        let parsed_json = serde_json::from_slice::<Value>(&bytes);
+        if sse_response && parsed_json.is_err() {
+            return with_metadata(match responses_sse::parse(&bytes) {
+                Ok(value) => parse_response(&value),
+                Err(failure) => {
+                    if let Some(error) = failure.json_error {
+                        json_error = Some(JsonParseError {
+                            message: error.to_string(),
+                            line: error.line(),
+                            column: error.column(),
+                            scope: "sse_event_data",
+                            event_index: Some(failure.event_index),
+                        });
+                    }
+                    Completion::failure(failure.kind, failure.message)
+                }
+            });
+        }
+        with_metadata(match parsed_json {
             Ok(value) => {
                 if profile.interface_mode == "responses" {
                     parse_response(&value)
@@ -452,15 +541,66 @@ async fn complete_once(
                     parse_completion(&value)
                 }
             }
-            Err(_) => Completion::failure("invalid_json", "响应不是有效的 JSON，未执行判定。"),
+            Err(error) => {
+                json_error = Some(JsonParseError {
+                    message: error.to_string(),
+                    line: error.line(),
+                    column: error.column(),
+                    scope: "response_body",
+                    event_index: None,
+                });
+                Completion::failure("invalid_json", "响应不是有效的 JSON，未执行判定。")
+            }
         })
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         _ = token.cancelled() => { let mut result=Completion::failure("cancelled", "用户已取消。本地停止等待，服务商仍可能已处理请求并计费。"); result.cancelled=true; result },
         _ = tokio::time::sleep_until(deadline) => Completion::failure("timeout", &format!("请求超过 {timeout} 秒，已停止等待，未执行判定。")),
         result = work => result,
+    };
+    // SSE 解析或最终协议验证失败同样保留原始事件流；正常成功不新增诊断文件。
+    if (sse_response && result.error.is_some())
+        || matches!(
+            result.error_kind.as_deref(),
+            Some(
+                "invalid_json"
+                    | "response_too_large"
+                    | "read_interrupted"
+                    | "timeout"
+                    | "cancelled"
+            )
+        )
+    {
+        if let (Some(directory), Some((status, content_type, request_id))) =
+            (diagnostic_directory, response_metadata)
+        {
+            response_diagnostics::save_in_background(
+                directory,
+                ResponseDiagnostic {
+                    format_version: 2,
+                    started_at_utc,
+                    finished_at_utc: chrono::Utc::now().to_rfc3339(),
+                    protocol: "responses",
+                    http_status: status,
+                    content_type,
+                    request_id,
+                    error_kind: result.error_kind.clone().unwrap_or_default(),
+                    received_body_bytes,
+                    saved_body_bytes: bytes.len(),
+                    body_limit_bytes: BODY_LIMIT_BYTES,
+                    body_complete,
+                    body_truncated,
+                    json_error,
+                    body_file: None,
+                    body_omission_reason: None,
+                    body: bytes,
+                },
+                key,
+            );
+        }
     }
+    result
 }
 
 #[cfg(test)]

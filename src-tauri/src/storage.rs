@@ -415,6 +415,42 @@ impl Store {
             .map_err(|_| "最近测试记录格式无效；请先备份数据库。".into())
     }
 
+    /// 优先返回当前有效请求条件的最近保留记录；没有匹配项时回退分组最近记录，由 UI 标记待重测。
+    /// 摘要覆盖接口、模型、凭据修订、题答、协议、强度及有效超时，不按展示名称猜测或重判。
+    /// 通常命中既有分组索引；仅切换条件且最新记录不匹配时扫描最多 5000 条保留历史，返回单条原文。
+    pub fn latest_record_for_conditions(
+        &self,
+        profile_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<Option<TestRecord>, String> {
+        let latest = self.latest_record_for_profile(profile_id)?;
+        let Some(fingerprint) = fingerprint else {
+            return Ok(latest);
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|record| record.condition_fingerprint.as_deref() == Some(fingerprint))
+        {
+            return Ok(latest);
+        }
+        // 顺序按落盘 sequence 而非可回拨的系统时间；失败/取消同样是当次条件的实际最近记录。
+        let payload = match self.connection.query_row(
+            "SELECT payload FROM test_record
+             WHERE json_extract(payload, '$.profileId') = ?1
+               AND json_extract(payload, '$.conditionFingerprint') = ?2
+             ORDER BY sequence DESC LIMIT 1",
+            params![profile_id, fingerprint],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(payload) => payload,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(latest),
+            Err(_) => return Err("无法读取当前测试条件的最近记录。".into()),
+        };
+        serde_json::from_str(&payload)
+            .map(Some)
+            .map_err(|_| "最近测试记录格式无效；请先备份数据库。".into())
+    }
+
     /// 插入与 count/day/128MiB 清理同事务，按完整原文保存，不重新判定旧回答。
     pub fn save_record(&mut self, record: &TestRecord) -> Result<(), String> {
         let payload = serde_json::to_string(record).map_err(|_| "结果序列化失败。")?;
@@ -1059,6 +1095,146 @@ mod tests {
         let records = store.history().unwrap();
         assert_eq!(records[0].id, "new");
         assert_eq!(records[0].answer, " 原文\n");
+    }
+
+    #[test]
+    fn current_conditions_restore_retained_result_without_rewriting_history_or_notifications() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut candy = record("candy", "2026-10-25T12:00:00Z");
+        candy.condition_fingerprint = Some("candy-conditions".into());
+        candy.answer = "21颗".into();
+        let mut pelican = record("pelican", "2026-10-25T12:01:00Z");
+        pelican.condition_fingerprint = Some("pelican-conditions".into());
+        pelican.status = "html".into();
+        pelican.answer = "<svg></svg>".into();
+        store.save_record(&candy).unwrap();
+        store.save_record(&pelican).unwrap();
+        let before = serde_json::to_value(store.history().unwrap()).unwrap();
+        let state = r#"{"states":{}}"#;
+        store.save_notification_state(state).unwrap();
+        for expected in [&candy, &pelican] {
+            let restored = store
+                .latest_record_for_conditions("profile", expected.condition_fingerprint.as_deref())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(restored).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(store.history().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            store.read_notification_state().unwrap().as_deref(),
+            Some(state)
+        );
+    }
+
+    /// 使用落盘顺序，不能跳过同条件失败/取消去找旧通过，也不能串用其他接口分组。
+    #[test]
+    fn condition_lookup_uses_latest_sequence_including_error_and_cancelled() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut item = record("passed", "2026-10-25T12:00:00Z");
+        item.condition_fingerprint = Some("same".into());
+        store.save_record(&item).unwrap();
+        for status in ["error", "cancelled"] {
+            item.id = status.into();
+            item.status = status.into();
+            item.started_at = "2026-10-25T11:00:00Z".into();
+            store.save_record(&item).unwrap();
+            let mut other = item.clone();
+            other.id = format!("{status}-other-profile");
+            other.profile_id = "other-profile".into();
+            store.save_record(&other).unwrap();
+            other.id = format!("{status}-other-rule");
+            other.profile_id = "profile".into();
+            other.condition_fingerprint = Some("other".into());
+            store.save_record(&other).unwrap();
+            let result = store
+                .latest_record_for_conditions("profile", Some("same"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.id, status);
+            assert_eq!(result.status, status);
+        }
+    }
+
+    /// 精确历史已删除后不得凭索引复活；重启不增加数据，未知/旧指纹只回退供 UI 显示时间。
+    #[test]
+    fn condition_lookup_respects_retention_clear_restart_and_unknown_fingerprint() {
+        let path = std::env::temp_dir().join(format!(
+            "model-probe-conditions-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let mut store = Store::open(&path).unwrap();
+            let mut candy = record("candy", "2026-10-25T12:00:00Z");
+            candy.condition_fingerprint = Some("candy".into());
+            store.save_record(&candy).unwrap();
+            let legacy = record("legacy", "2026-10-25T12:01:00Z");
+            store.save_record(&legacy).unwrap();
+            assert_eq!(
+                store
+                    .latest_record_for_conditions("profile", Some("candy"))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                "candy"
+            );
+            for fingerprint in [None, Some("never-tested")] {
+                assert_eq!(
+                    store
+                        .latest_record_for_conditions("profile", fingerprint)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    "legacy"
+                );
+            }
+            assert!(store
+                .latest_record_for_conditions("missing-profile", Some("candy"))
+                .unwrap()
+                .is_none());
+        }
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .latest_record_for_conditions("profile", Some("candy"))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                "candy"
+            );
+            let mut config = store.config.clone();
+            config.preferences.history_max_records = Some(1);
+            store.save_config_with_retention(config, true).unwrap();
+            assert_eq!(
+                store
+                    .latest_record_for_conditions("profile", Some("candy"))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                "legacy"
+            );
+            store.clear_history().unwrap();
+            assert!(store
+                .latest_record_for_conditions("profile", Some("candy"))
+                .unwrap()
+                .is_none());
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(store
+                .latest_record_for_conditions("profile", Some("candy"))
+                .unwrap()
+                .is_none());
+        }
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
     #[test]

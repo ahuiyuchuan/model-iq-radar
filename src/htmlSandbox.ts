@@ -8,6 +8,46 @@ import { call } from './bridge';
 // 使用足够容纳桌面作品的基准视口；实际页面更高/更宽时在首帧后有界扩展，再整体适配。
 export const HTML_VIEWPORT = { width: 1440, height: 1000 } as const;
 export const HTML_MAX_VIEWPORT = { width: 4096, height: 8192 } as const;
+/** 在原文档坐标中的可见内容边界；仅裁去外围页面留白，不改变 SVG viewBox 或作品内部布局。 */
+export interface PreviewContentBounds {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+/**
+ * 在沙箱自己的文档中测量一级可见内容，函数源码注入 iframe，不跨源读取模型 DOM。
+ * 保留全部并列内容及 16px 阴影余量；全屏作品不裁剪，复杂/空页面返回 null 后沿用完整画布。
+ * @returns 文档内有界矩形；null 表示无法可靠确定内容范围，不能据此隐藏或猜测作品内容。
+ */
+export function measurePreviewContent(): PreviewContentBounds | null {
+    if (!document.body || document.body.childNodes.length > 256) return null;
+    const rects: DOMRect[] = [];
+    for (const node of document.body.childNodes) {
+        if (node instanceof Element) {
+            if (/^(SCRIPT|STYLE|META|LINK|TITLE|TEMPLATE|NOSCRIPT)$/.test(node.tagName)) continue;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = node.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) rects.push(rect);
+        } else if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+            const range = document.createRange();
+            range.selectNode(node);
+            if (typeof range.getBoundingClientRect !== 'function') return null;
+            const rect = range.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) rects.push(rect);
+        }
+    }
+    if (!rects.length) return null;
+    const width = document.documentElement.clientWidth;
+    const height = document.documentElement.clientHeight;
+    const x = Math.max(0, Math.floor(Math.min(...rects.map((rect) => rect.left)) - 16));
+    const y = Math.max(0, Math.floor(Math.min(...rects.map((rect) => rect.top)) - 16));
+    const right = Math.min(width, Math.ceil(Math.max(...rects.map((rect) => rect.right)) + 16));
+    const bottom = Math.min(height, Math.ceil(Math.max(...rects.map((rect) => rect.bottom)) + 16));
+    return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
 export interface PreparedPreview {
     url: string;
     token: string;
@@ -28,6 +68,7 @@ export async function preparePreview(source: string): Promise<PreparedPreview> {
     const bootstrap = `(() => {
         const token = ${JSON.stringify(token)};
         const send = (type, value = '') => parent.postMessage({ token, type, value }, '*');
+        const measureContent = ${measurePreviewContent.toString()};
         // 不跨源读取 DOM；只回传 body/html 的计算背景色，让固定画布两侧沿用作品背景。
         const background = () => {
             for (const node of [document.body, document.documentElement]) {
@@ -51,8 +92,11 @@ export async function preparePreview(source: string): Promise<PreparedPreview> {
                     width: Math.ceil(Math.max(${HTML_VIEWPORT.width}, root.scrollWidth, body?.scrollWidth || 0)),
                     height: Math.ceil(Math.max(${HTML_VIEWPORT.height}, root.scrollHeight, body?.scrollHeight || 0))
                 });
-                // 宿主接收尺寸后还需更新缩放；等待绘制再就绪，三处预览共用同一加载结束边界。
-                requestAnimationFrame(() => requestAnimationFrame(() => send('ready', background())));
+                // 先让宿主更新有界视口再测内容位置，避免居中布局在扩展前后产生坐标偏移。
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    send('content', measureContent());
+                    requestAnimationFrame(() => requestAnimationFrame(() => send('ready', background())));
+                }));
             }));
             if (document.fonts?.ready) document.fonts.ready.then(measure, measure);
             else measure();

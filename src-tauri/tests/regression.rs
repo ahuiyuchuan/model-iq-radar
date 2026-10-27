@@ -26,12 +26,19 @@ fn fixture(status: &str, response: String, delay: Duration) -> (String, mpsc::Re
 fn sequence_fixture(
     responses: Vec<(String, String, Duration)>,
 ) -> (String, mpsc::Receiver<String>) {
+    wire_fixture(responses.into_iter().map(|(status, response, delay)| {
+        (format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()), delay, Duration::ZERO)
+    }).collect())
+}
+
+/// 原始 HTTP 模拟可指定响应头、错误长度和延迟 EOF；验证传输完整性，不复制客户端解析器。
+fn wire_fixture(responses: Vec<(String, Duration, Duration)>) -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = format!("http://{}/v1", listener.local_addr().unwrap());
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        for (status, response, delay) in responses {
+        for (response, delay, hold_open) in responses {
             // 未发生预期回退（例如取消/超时）时也应回收服务线程，不永久阻塞 accept。
             let until = std::time::Instant::now() + Duration::from_secs(5);
             let mut stream = loop {
@@ -76,11 +83,245 @@ fn sequence_fixture(
             }
             let _ = sender.send(String::from_utf8(bytes).unwrap());
             thread::sleep(delay);
-            let text = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len());
-            let _ = stream.write_all(text.as_bytes());
+            let _ = stream.write_all(response.as_bytes());
+            thread::sleep(hold_open);
         }
     });
     (address, receiver)
+}
+
+/// 合成 Responses SSE，最终正文与增量故意不同，确保不能拼接增量替代终态。
+fn synthetic_sse() -> String {
+    format!(": keepalive\r\n\r\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"错误增量\"}}\r\n\r\nevent: response.completed\r\ndata: {}\r\n\r\n", json!({
+        "type":"response.completed", "response":{"id":"resp_fixture", "status":"completed", "output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"21颗"}]}]}
+    }))
+}
+
+fn http_body(body: &str, mime: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nx-request-id: fixture-request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+}
+
+/// 仅测试等待后台元数据写完；最多三秒，不把文件延迟计入生产测试的请求期限。
+async fn wait_for_diagnostic(directory: &std::path::Path) -> serde_json::Value {
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Ok(entries) = std::fs::read_dir(directory) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.extension().is_some_and(|v| v == "json") {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        if let Ok(metadata) = serde_json::from_slice(&bytes) {
+                            return metadata;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(std::time::Instant::now() < until, "诊断文件未及时完成");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 正确/错误 MIME 均兼容一次 SSE 响应；开着回退也不能因解析方式多发一次请求。
+#[tokio::test]
+async fn responses_sse_single_request_preserves_stream_false_and_protocol_choice() {
+    for mime in ["text/event-stream; charset=utf-8", "application/json"] {
+        let (base, requests) = wire_fixture(vec![(
+            http_body(&synthetic_sse(), mime),
+            Duration::ZERO,
+            Duration::ZERO,
+        )]);
+        let mut selected = profile(base);
+        selected.interface_mode = "responses".into();
+        selected.protocol_fallback_enabled = true;
+        let result = api::complete(
+            &selected,
+            &TestRule::default(),
+            "",
+            10,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.answer, "21颗");
+        assert_eq!(result.attempted_modes, ["responses"]);
+        assert_eq!(result.http_status, Some(200));
+        assert_eq!(result.request_id.as_deref(), Some("fixture-request"));
+        let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["stream"], false);
+        assert!(request.starts_with("POST /v1/responses "));
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn valid_json_wins_wrong_sse_mime_and_chat_never_parses_sse() {
+    let body = json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"原始 JSON"}]}]}).to_string();
+    let (base, _) = wire_fixture(vec![(
+        http_body(&body, "text/event-stream"),
+        Duration::ZERO,
+        Duration::ZERO,
+    )]);
+    let mut selected = profile(base);
+    selected.interface_mode = "responses".into();
+    let result = api::complete(
+        &selected,
+        &TestRule::default(),
+        "",
+        10,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(result.answer, "原始 JSON");
+    let (base, _) = wire_fixture(vec![(
+        http_body(&synthetic_sse(), "text/event-stream"),
+        Duration::ZERO,
+        Duration::ZERO,
+    )]);
+    let result = api::complete(
+        &profile(base),
+        &TestRule::default(),
+        "",
+        10,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(result.error_kind.as_deref(), Some("invalid_json"));
+}
+
+/// 即使正文含 completed，也必须读完本次 HTTP；错误长度、超限、超时与取消不能成功。
+#[tokio::test]
+async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
+    let stream = synthetic_sse();
+    let interrupted = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len() + 100);
+    let oversized = format!("{stream}:{}\n\n", "x".repeat(2 * 1024 * 1024));
+    for (wire, hold_open, timeout, cancel, expected) in [
+        (interrupted, Duration::ZERO, 10, false, "read_interrupted"),
+        (http_body(&oversized, "text/event-stream"), Duration::ZERO, 10, false, "response_too_large"),
+        (format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"), Duration::from_secs(2), 1, false, "timeout"),
+        (format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"), Duration::from_secs(2), 10, true, "cancelled"),
+    ] {
+        let (base, _) = wire_fixture(vec![(wire, Duration::ZERO, hold_open)]);
+        let mut selected = profile(base);
+        selected.interface_mode = "responses".into();
+        let token = CancellationToken::new();
+        if cancel {
+            let canceller = token.clone();
+            tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(100)).await; canceller.cancel(); });
+        }
+        let result = api::complete(&selected, &TestRule::default(), "", timeout, &token).await;
+        assert_eq!(result.error_kind.as_deref(), Some(expected));
+        assert!(result.answer.is_empty());
+        assert_eq!(result.attempted_modes, ["responses"]);
+    }
+}
+
+/// 独立临时目录验证真实请求到后台文件的连接；既不访问用户日志，也不请求真实服务。
+#[tokio::test]
+async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_request() {
+    let directory = std::env::temp_dir().join(format!("probe-http-diagnostics-{}", Uuid::new_v4()));
+    let body = "data: {\r\ndata: \"type\":\r\n\r\n";
+    let (base, requests) = wire_fixture(vec![
+        (
+            http_body(body, "text/event-stream"),
+            Duration::ZERO,
+            Duration::ZERO,
+        ),
+        (
+            http_body(&synthetic_sse(), "text/event-stream"),
+            Duration::ZERO,
+            Duration::ZERO,
+        ),
+    ]);
+    let mut selected = profile(base);
+    selected.interface_mode = "responses".into();
+    let result = api::complete_with_diagnostics(
+        &selected,
+        &TestRule::default(),
+        "fixture-key",
+        10,
+        &CancellationToken::new(),
+        Some(&directory),
+    )
+    .await;
+    assert_eq!(result.error_kind.as_deref(), Some("invalid_json"));
+    assert_eq!(result.attempted_modes, ["responses"]);
+    assert!(result.answer.is_empty());
+    let metadata = wait_for_diagnostic(&directory).await;
+    assert_eq!(metadata["http_status"], 200);
+    assert_eq!(metadata["request_id"], "fixture-request");
+    assert_eq!(metadata["body_complete"], true);
+    assert_eq!(metadata["body_truncated"], false);
+    assert_eq!(metadata["received_body_bytes"], body.len());
+    assert_eq!(metadata["json_error"]["scope"], "sse_event_data");
+    assert_eq!(metadata["json_error"]["event_index"], 1);
+    assert_eq!(
+        std::fs::read(directory.join(metadata["body_file"].as_str().unwrap())).unwrap(),
+        body.as_bytes()
+    );
+    let result = api::complete_with_diagnostics(
+        &selected,
+        &TestRule::default(),
+        "fixture-key",
+        10,
+        &CancellationToken::new(),
+        Some(&directory),
+    )
+    .await;
+    assert!(result.error.is_none());
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+    assert_eq!(requests.try_iter().count(), 2);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// 完整语法错误、短读与超限的标志必须不同；保存量与原始字节均可核对，不能伪装完整正文。
+#[tokio::test]
+async fn diagnostic_limits_and_read_completeness_are_explicit() {
+    let large = "x".repeat(2 * 1024 * 1024 + 1);
+    for (body, declared_length, expected, complete, truncated) in [
+        ("{broken".to_owned(), 7, "invalid_json", true, false),
+        ("{partial".to_owned(), 100, "read_interrupted", false, false),
+        (
+            large.clone(),
+            large.len(),
+            "response_too_large",
+            false,
+            true,
+        ),
+    ] {
+        let directory = std::env::temp_dir().join(format!("probe-http-limit-{}", Uuid::new_v4()));
+        let wire = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}");
+        let (base, requests) = wire_fixture(vec![(wire, Duration::ZERO, Duration::ZERO)]);
+        let mut selected = profile(base);
+        selected.interface_mode = "responses".into();
+        let result = api::complete_with_diagnostics(
+            &selected,
+            &TestRule::default(),
+            "",
+            10,
+            &CancellationToken::new(),
+            Some(&directory),
+        )
+        .await;
+        assert_eq!(result.error_kind.as_deref(), Some(expected));
+        assert!(result.answer.is_empty());
+        let metadata = wait_for_diagnostic(&directory).await;
+        assert_eq!(metadata["body_complete"], complete);
+        assert_eq!(metadata["body_truncated"], truncated);
+        let saved = std::fs::read(directory.join(metadata["body_file"].as_str().unwrap())).unwrap();
+        assert_eq!(saved, body.as_bytes()[..body.len().min(2 * 1024 * 1024)]);
+        assert_eq!(metadata["saved_body_bytes"], saved.len());
+        if expected == "invalid_json" {
+            assert_eq!(metadata["json_error"]["scope"], "response_body");
+            assert_eq!(metadata["json_error"]["line"], 1);
+        } else {
+            assert!(metadata["json_error"].is_null());
+        }
+        assert_eq!(requests.try_iter().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 fn profile(base_url: String) -> ModelProfile {

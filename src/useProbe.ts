@@ -8,7 +8,7 @@ import type { AppSnapshot, TestRecord } from './types';
 
 /**
  * 为当前窗口建立快照订阅，监听注册完成后再加载，避免丢失启动期更新。
- * @param options 快照范围；includeHistory 默认 false，只读取当前模型最近一条记录，设置页传 true 读取全部保留历史。
+ * @param options 快照范围；includeHistory 默认 false，只读取当前条件优先匹配的一条记录，设置页传 true 读取全部保留历史。
  * @returns 快照、加载状态、当前结果和手动测试入口。
  */
 export function useProbe(options: { includeHistory?: boolean } = {}) {
@@ -61,9 +61,20 @@ export function useProbe(options: { includeHistory?: boolean } = {}) {
     const profile = computed(() =>
         snapshot.value?.config.profiles.find((item) => item.id === snapshot.value?.config.selectedProfileId),
     );
-    const latestRecord = computed<TestRecord | null>(
-        () => snapshot.value?.history.find((item) => item.profileId === profile.value?.id) ?? null,
-    );
+    const latestRecord = computed<TestRecord | null>(() => {
+        const id = profile.value?.id;
+        if (!id) return null;
+        const records = snapshot.value?.history ?? [];
+        const fingerprint = snapshot.value?.conditionFingerprints?.[id];
+        // 桌面精简快照由后端查找，完整历史/测试快照在这里采用相同优先级；旧记录不猜测条件。
+        return (
+            records.find(
+                (item) => item.profileId === id && fingerprint && item.conditionFingerprint === fingerprint,
+            ) ??
+            records.find((item) => item.profileId === id) ??
+            null
+        );
+    });
     const latest = computed<TestRecord | null>(() => {
         const record = latestRecord.value;
         const currentProfile = profile.value;

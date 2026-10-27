@@ -63,9 +63,13 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
         // 预览也遵循桌面读取范围，不能让布局调试无意依赖悬浮窗全量历史。
         const snapshot = structuredClone(preview);
         if (args.includeHistory !== true) {
-            const latest = snapshot.history.find(
-                (record) => record.profileId === snapshot.config.selectedProfileId,
-            );
+            const id = snapshot.config.selectedProfileId;
+            const fingerprint = id ? snapshot.conditionFingerprints?.[id] : undefined;
+            const latest =
+                snapshot.history.find(
+                    (record) =>
+                        record.profileId === id && fingerprint && record.conditionFingerprint === fingerprint,
+                ) ?? snapshot.history.find((record) => record.profileId === id);
             snapshot.history = latest ? [latest] : [];
         }
         return snapshot as T;

@@ -1,6 +1,43 @@
-# 测智雷达 v1.0.3 本地复核记录
+# 测智雷达 v1.0.4 本地复核记录
 
 作者：ahui。日期：2026-10-27。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+
+## v1.0.4 发布前全面复核（2026-10-27）
+
+- 用户已确认 SSE 修复不再报错，并授权复核全部未提交改动、提交、推送、Tag 与 Release；相对基准 `34d3c52` 核对全部 27 个修改/新增文本，索引见 [FILE_AUDIT-v1.0.4.md](docs/FILE_AUDIT-v1.0.4.md)。未重置或覆盖原有预览、历史和诊断改动。以下 Beta 的“暂不测试/不发布”仅记录当时约束，本轮以此次明确授权为准；用户禁止桌面操控的要求继续遵守。
+- `npm test -- --reporter=json --outputFile=<仓库外报告>`：9 个文件、191 项通过，0 失败。覆盖实际内容测量/回退、非法坐标与放大一致、HTML 切回文字恢复原回答/状态/时间/耗时、分组及旧指纹隔离，并沿用 300ms 加载、生命周期和现有交互回归。关于页版本断言改为读取工程版本。
+- `run-build.ps1 test`（`cargo test --locked --manifest-path src-tauri/Cargo.toml`）：115 项通过，0 失败（79 单元、17 数据完整性、19 请求回归）。新增合成 SSE 的终态、换行/BOM/多行 data、损坏位置、矛盾 ID/事件、失败/重复终态及元数据尾部；本机 HTTP 验证 SSE 一次请求/stream:false、错误 MIME 下 JSON 优先、Chat 不套用 SSE，以及中断、超限、取消、超时不误判成功。
+- 诊断回归验证原始字节/CRLF/非 UTF-8 保真、语法行列和事件范围、完整与超限标志、二十组及孤立文件留存、无关文件保留、并发唯一文件、已知密钥省略、磁盘故障/队列满隔离与后续请求正常。首轮两个用例因测试自身同时占用全局信号量而失败，增加仅测试用的互斥后重跑全套通过；不修改生产队列的非阻塞语义。复核另收紧清理匹配为完整 UTC 时间戳/UUID，避免碰到无关文件。
+- `run-build.ps1 clippy`：全目标 `-D warnings` 通过；`npm run format:check`、`npm exec -- prettier --check docs`、`cargo-fmt fmt --manifest-path src-tauri/Cargo.toml -- --check`、`git diff --check` 通过。仓库外只读核对脚本确认 27 文件严格 UTF-8/无 BOM/LF/无替换字符、24 个相对 Markdown 目标存在、六处工程版本一致、逐文件索引无遗漏，明显令牌格式扫描无命中。
+- `npm version 1.0.4 --no-git-tag-version --ignore-scripts`、Cargo Windows 目标离线元数据更新本项目锁文件版本；`node scripts/generate_notices.mjs` 离线生成 37 个前端包/315 个 Windows crate 声明。锁文件及第三方声明与基准相比仅本项目版本标识变化，无依赖升级。README、使用手册、变更日志、发布说明和相关注释已同步；Java/JVM/MyBatis 专属工具及语法不适用于 Vue/TypeScript/Rust。
+- `run-build.ps1 build` 完成 `vue-tsc --noEmit`、Vite 和 Windows x64 `tauri build --no-bundle`；生产构建成功，保留既有 Vite chunk 体积提示（526.47 kB，gzip 188.54 kB）及 MSVC 导入库 stdout 提示，无构建错误。`scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.4` 校验 PE x64、工程/文件/产品版本、应用输入时间与复制摘要；目录仅一个 `Model-IQ-Radar-v1.0.4-Windows-x64.exe`，16,644,096 字节，SHA-256 `25b510cfea4695d222f13797403c9d8997613e1724483cae3645b4df90c198e2`，此前 Beta 均保留。
+- 数据库 schema/备份均保持 v3，诊断格式为 2，旧格式 1 文件不迁移或重写；当前协议及回退设置保持。回退到 v1.0.3 不需数据迁移，诊断不参与结果恢复；历史或诊断已经清理的内容不可恢复。诊断只是有界后台取证，队列满或程序退出可能缺文件，不自动重试或补发。
+- 本轮不操控桌面、不启动正式程序，不访问真实模型/SMTP；只用 jsdom 组件、临时数据库及本机随机端口模拟 HTTP。用户确认“不再报错”不等同于全部真实服务均通过。物理 DPI/多屏、真实邮件投递和服务商差异未遍历；HTML 首帧测量和共享 iframe 资源边界保持。未发现尚未处理的阻塞问题，编译和模拟回归不作真实服务兼容性保证。
+
+## Responses SSE 兼容 Beta（2026-10-27，历史出包记录，用户已确认不再报错）
+
+- 用户提供的诊断证明该次 HTTP 200 实际为 `text/event-stream`，正文 23,356 字节、已读到 EOF、未截断，包含明确 `response.completed` 与完整最终助手文本“21颗”；旧客户端将保活注释开头的整段 SSE 当作 JSON 导致 `invalid_json`。不能据此确定是哪层忽略 `stream:false`，也不能替代此前其他请求的原始证据。
+- 新增 `responses_sse.rs`；普通 JSON 保留优先路径，Responses 才增加 MIME/正文前缀识别和 SSE 事件解析。只传完整结束事件中的原 response 给既有 `parse_response`，不拼 delta、不执行推理/中间说明、不修改判定规则；读取 EOF、2 MiB、取消/超时和用户回退开关保持。缺终态、失败、损坏、重复/矛盾事件均报错，无额外请求或重连。
+- `response_diagnostics.rs` 与 `api.rs` 将异常 SSE 原文纳入原诊断留存；格式 2 增加 JSON 错误范围及事件序号，原文件不修改，留存/凭据过滤/失败隔离不变。使用手册和未发布日志同步，数据库、配置备份及工程版本仍沿用现有值；撤销本轮解析入口/模块即可回退，不需要数据迁移。
+- 遵循最新用户限制：本轮仅必要代码检查、受影响文件格式化及出包编译，不运行前端/Rust 测试、Clippy、样例执行、界面自动化或真实模型/SMTP 验证；不使用桌面操控。尚未运行实际 SSE 解析回归，编译成功不能当作测试通过，等待用户用关闭回退的实际请求人工复测。保护此前全部未提交改动，不提交、推送或发布；Java 专属工具/语法条款不适用于本项目 Rust 模块。
+- `run-build.ps1 build` 完成 TypeScript/Vite 和 Windows x64 `tauri build --no-bundle`；保留既有 chunk 大小与 MSVC 导入库提示，无编译错误。本轮 7 个文本确认 UTF-8 无 BOM/LF，必要差异检查完成。`package_exe.ps1` 核对版本、PE x64、输入时间及复制摘要，交付目录仅含 `release-artifacts/v1.0.3-responses-sse-beta1/Model-IQ-Radar-v1.0.3-Responses-SSE-Beta.1-Windows-x64.exe`；工程/文件版本 1.0.3，16,616,448 字节，SHA-256 `5af9c3459c3ed807939404b4aba5c568834ef26bc2ccd0fc8f835fae0fd1aa6c`。未启动交付程序，不覆盖此前诊断 Beta。
+
+## Responses 原始响应诊断 Beta（2026-10-27，历史出包记录，已收到人工取证）
+
+- 用户最新要求覆盖此前测试授权。本轮不运行前端/Rust 测试、全量测试、Clippy、界面自动化或真实模型/SMTP 验证；仅做代码检查、受影响文件格式化和出包必需的类型检查/编译。保留全部既有未提交预览/历史改动，不提交、推送或修改 Tag/Release。
+- 已核对 `api.rs`：两种协议仍发送 `stream: false`，Responses 当前按完整 JSON 解析；JSON 失败原先丢弃原始正文。后台“流式”标记不能确认实际响应类型，此 Beta 不修复猜测中的根因、不实现 SSE、不放宽成功条件、不切换用户协议或回退开关。
+- 新增 `response_diagnostics.rs`；`api.rs` 在原读取缓冲上采集已收到字节，`lib.rs` 仅为正式测试传入应用数据目录。语法失败及 2xx 正文未完整读取的异常尽力后台落盘；最多 2 MiB/组、20 组、四个在途写任务，失败不改变测试结果。时间/协议/HTTP/Content-Type/请求编号/字节数/JSON 行列与原始正文分开保存；不复制请求对象或凭据，正文命中已知请求密钥时明确省略，不静默改写原文。schema、备份与工程版本保持原样。
+- 准确目录、命名、完整性字段及取证步骤见使用手册“Responses 诊断 Beta”；新目录属于本地运行数据，不打入 EXE。尚未人工复现或验证文件写入，不把编译成功写成测试通过；收到实际响应文件后再区分证据与猜测，未经明确允许不开始后续测试。
+- `run-build.ps1 build` 完成 `vue-tsc --noEmit`、Vite 与 Windows x64 `tauri build --no-bundle`；仅有既有 chunk 大小及 MSVC 导入库提示。受影响 Rust/Markdown 已格式化，必要差异与 UTF-8 无 BOM/LF 文件核对完成；未运行任何测试或启动交付程序。单 EXE 位于 `release-artifacts/v1.0.3-responses-diagnostic-beta1/Model-IQ-Radar-v1.0.3-Responses-Diagnostic-Beta.1-Windows-x64.exe`，工程/文件版本 1.0.3，16,604,672 字节，SHA-256 `bbbaa036538344215f19c0084bc390b7d754dadacca27efbadf00ac26606b9ce`；独立新目录未覆盖以前交付。
+
+## 发布后本地 Beta：预览大小与切换历史（2026-10-27，历史出包记录）
+
+- 本轮仅本地修改，不覆盖正式提交、Tag 或 Release。三处 HTML 共用可见正文范围的等比缩放，保留源页面阴影余量，无法测量时回退完整画布；历史列表预览增高到 120px，最少 300ms 加载反馈保持。
+- 悬浮快照优先查询同一接口分组、完整条件指纹相同的最近保留记录，前端完整快照采用相同优先级。无匹配回退分组最近时间并提示重测；失败/取消不被跳过，清理或缺指纹的旧历史不恢复结论。查询不写历史或通知状态，不新增请求；schema v3、备份格式及凭据不变，回滚本轮源码即可撤销这两项改动。
+- 用户要求停止测试之前，已运行前端 191 项及 Rust 95 项（64 单元、17 数据完整性、14 请求回归），均通过；新增内容覆盖留白测量及范围校验、HTML 切回文字、恢复原时间/耗时、分组隔离、失败/取消、保留清理及重启。类型检查发现测试 Mock 的 `this` 缺少显式类型，已补齐并重新编译；这些数字不表示后续 Beta 已完成人工验收。
+- 使用独立虚构数据与用户提供 HTML 曾查看卡片和放大效果；Computer Use 被用户物理 Escape 中止，随后用户明确要求今后不使用桌面操控测试，并要求 Beta 先人工验收。本轮未继续桌面操作，未验证历史列表/详情和规则切换的最终桌面效果，不将组件回归当作人工验收；隔离程序已退出。
+- 按最新要求暂停后续测试及全面复核，只进行格式整理、出包必需的 TypeScript/Vite/Windows 编译及单 EXE 文件核对。不执行新一轮自动化测试、Clippy、真实模型或 SMTP；后续测试等待用户明确允许，且不使用桌面操控。README、使用手册与未发布变更日志已同步；Java/JVM/MyBatis 专属规范不适用于本项目。
+- `run-build.ps1 build` 已完成 TypeScript/Vite 和 Windows x64 生产编译，仅有既有 chunk 大小及 MSVC 导入库提示。`package_exe.ps1` 核对 PE、版本、应用输入时间和复制摘要；交付目录仅一个 `release-artifacts/v1.0.3-beta5-content-history/Model-IQ-Radar-v1.0.3-beta.5-Windows-x64.exe`，文件/产品版本 1.0.3，16,539,648 字节，SHA-256 `54ecfc2e917e1ae703a95208c4951b08395e9df7a37c560e17ff7f6925f7b1ed`。未启动交付 EXE，等待用户人工预览。
 
 ## v1.0.3 发布追加修复：清空与快捷键移除（2026-10-27）
 
@@ -82,7 +119,7 @@
 - 通过 `scripts/package_exe.ps1` 核对 PE x64、文件版本和 SHA-256，将唯一的 EXE 复制到 `release-artifacts/v1.0.3/`；EXE SHA-256 为 `bf120d658d16a76107b3af9a5854cdfacd1904edab2a6fac39114a35a05f3f54`。后续 Tag/Release 同样只上传该 EXE，不生成 ZIP。旧版 ZIP 仅作为历史交付物保留，不代表 v1.0.3 构建。
 - 本地测试沿用正式应用标识，首次运行前应退出旧版并备份完整 `%APPDATA%\com.ahui.model-probe` 数据目录；schema v3 升级后不能直接切回旧版 EXE。
 
-以下保留 v1.0.2 及更早的历史验证记录，旧格式说明和数字仅对当时版本成立；当前兼容边界以 v1.0.3 使用手册为准。
+以下保留 v1.0.2 及更早的历史验证记录，旧格式说明和数字仅对当时版本成立；当前兼容边界以 v1.0.4 使用手册为准。
 
 ## v1.0.2 发布核验（2026-10-26）
 

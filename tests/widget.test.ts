@@ -601,6 +601,91 @@ it('条件指纹变化后不沿用旧绿色，重测期间优先显示测试中�
     wrapper.unmount();
 });
 
+it('切回已有条件时恢复对应回答、状态、时间和耗时，不自动请求模型', async () => {
+    const candy = {
+        id: 'candy',
+        profileId: 'one',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: '2026-10-27T00:00:00Z',
+        durationMs: 1250,
+        status: 'passed' as const,
+        answer: '21颗',
+        error: null,
+        prompt: '糖果问题',
+        keyword: '21颗',
+        ruleVersion: 'literal-contains-v1',
+        conditionFingerprint: 'candy-conditions',
+    };
+    fake.snapshot.history = [
+        {
+            ...candy,
+            id: 'pelican',
+            startedAt: '2026-10-27T01:00:00Z',
+            status: 'html',
+            answer: '<svg></svg>',
+            answerType: 'html',
+            conditionFingerprint: 'pelican-conditions',
+        },
+        candy,
+    ];
+    fake.snapshot.conditionFingerprints = { one: 'pelican-conditions' };
+    fake.call.mockImplementation(async (command: string) =>
+        command === 'prepare_html_preview'
+            ? 'http://html-preview.localhost/switch-fixture'
+            : structuredClone(fake.snapshot),
+    );
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('h1').text()).toBe('已生成 HTML');
+    expect(wrapper.find('iframe').exists()).toBe(true);
+    fake.snapshot.conditionFingerprints = { one: 'candy-conditions' };
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get('h1').text()).toBe('不降智');
+    expect(wrapper.get('.answer-box').text()).toBe('21颗');
+    expect(wrapper.get('.metadata').text()).toContain(formatTime(candy.startedAt));
+    expect(wrapper.get('.metadata').text()).toContain('1.25s');
+    expect(wrapper.find('iframe').exists()).toBe(false);
+    expect(fake.call.mock.calls.some(([command]) => command === 'start_test')).toBe(false);
+    expect(fake.call.mock.calls.filter(([command]) => command === 'release_html_preview')).toHaveLength(1);
+    wrapper.unmount();
+});
+it('同条件最近失败覆盖旧通过，其他分组或缺失条件的旧记录不参与恢复', async () => {
+    const record = {
+        id: 'passed',
+        profileId: 'one',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: '2026-10-27T00:00:00Z',
+        durationMs: 2000,
+        status: 'passed' as const,
+        answer: '答案',
+        error: null,
+        prompt: '问题',
+        keyword: '答案',
+        ruleVersion: 'literal-contains-v1',
+        conditionFingerprint: 'fixture-v1',
+    };
+    fake.snapshot.history = [
+        { ...record, id: 'other-profile', profileId: 'two' },
+        { ...record, id: 'other-rule', conditionFingerprint: 'other' },
+        { ...record, id: 'failure', status: 'error', answer: '', error: '本次失败' },
+        record,
+    ];
+    const wrapper = mount(Widget);
+    await flushPromises();
+    expect(wrapper.get('.compact-status').text()).toBe('测试失败');
+    fake.snapshot.history = [{ ...record, conditionFingerprint: undefined }];
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get('.compact-status').text()).toBe('待重新测试');
+    expect(wrapper.get('.compact-test-time').text()).toContain(formatTime(record.startedAt));
+    wrapper.unmount();
+});
+
 it('自动测试开关阻止重复提交并等待快照刷新，边缘图标没有悬停提示卡', async () => {
     let release: (() => void) | undefined;
     fake.call.mockImplementation(async (command: string) => {

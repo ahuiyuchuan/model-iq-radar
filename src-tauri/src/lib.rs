@@ -10,6 +10,8 @@ mod html;
 pub mod model;
 pub mod notifications;
 pub mod preview;
+mod response_diagnostics;
+mod responses_sse;
 pub mod storage;
 mod updates;
 
@@ -151,8 +153,20 @@ fn get_snapshot(
 ) -> Result<AppSnapshot, String> {
     let running = lock(&state.running)?;
     let store = lock(&state.store)?;
-    // 悬浮窗只需要当前模型的一条最新记录来显示结果。设置页显式请求完整历史，
+    // 悬浮窗优先读取当前条件匹配的一条最近记录；无匹配项时保留分组最近时间并提示重测。
+    // 设置页显式请求完整历史，
     // 避免自动测试每次广播时反复序列化最多 128 MiB 的原始回答。
+    let condition_fingerprints: std::collections::HashMap<_, _> = store
+        .config
+        .profiles
+        .iter()
+        .filter_map(|profile| {
+            // 单个历史配置不再合法时只撤销其结论，不阻断设置页读取和修复。
+            conditions::condition_fingerprint(&store.config, profile)
+                .ok()
+                .map(|fingerprint| (profile.id.clone(), fingerprint))
+        })
+        .collect();
     let history = if include_history.unwrap_or(false) {
         store.history()?
     } else {
@@ -160,7 +174,12 @@ fn get_snapshot(
             .config
             .selected_profile_id
             .as_deref()
-            .map(|profile_id| store.latest_record_for_profile(profile_id))
+            .map(|profile_id| {
+                store.latest_record_for_conditions(
+                    profile_id,
+                    condition_fingerprints.get(profile_id).map(String::as_str),
+                )
+            })
             .transpose()?
             .into_iter()
             .flatten()
@@ -168,17 +187,7 @@ fn get_snapshot(
     };
     Ok(AppSnapshot {
         config: store.config.clone(),
-        condition_fingerprints: store
-            .config
-            .profiles
-            .iter()
-            .filter_map(|profile| {
-                // 单个历史配置不再合法时只撤销其结论，不阻断设置页读取和修复。
-                conditions::condition_fingerprint(&store.config, profile)
-                    .ok()
-                    .map(|fingerprint| (profile.id.clone(), fingerprint))
-            })
-            .collect(),
+        condition_fingerprints,
         history,
         email_notification_error: lock(&state.notification_error)?.clone(),
         running: running.as_ref().map(|run| run.info.clone()),
@@ -994,8 +1003,24 @@ async fn run_test(
     } else {
         Ok(String::new())
     };
+    // 诊断只使用本次网络读取，目录定位失败也不能阻止原测试结算；不改变协议/回退配置。
+    let diagnostic_directory = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|directory| directory.join("response-diagnostics"));
     let completion = match key_result {
-        Ok(key) => api::complete(&profile, &rule, &key, timeout, &token).await,
+        Ok(key) => {
+            api::complete_with_diagnostics(
+                &profile,
+                &rule,
+                &key,
+                timeout,
+                &token,
+                diagnostic_directory.as_deref(),
+            )
+            .await
+        }
         Err(message) => api::Completion::failure("credentials", &message),
     };
     // 在协议错误返回到历史结算之间收到取消也必须优先记为取消，防止发出失败邮件。
