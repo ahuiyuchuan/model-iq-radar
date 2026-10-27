@@ -19,6 +19,192 @@ const fake = vi.hoisted(() => ({
     snapshot: {} as AppSnapshot,
 }));
 
+/** 五类选择、二次确认与提交等待必须属于同一流程；两个入口始终具有相同语义。 */
+it.each(['恢复所有设置', '清除所有数据'])('%s 空选禁用、取消保留、双击和提交中去重', async (label) => {
+    let finishReset!: () => void;
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'get_autostart') return false;
+        if (command === 'reset_selected_data')
+            return new Promise<void>((resolve) => {
+                finishReset = resolve;
+            });
+    });
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[2].trigger('click');
+    await flushPromises();
+    const entry = wrapper.findAll('button').find((button) => button.text().trim() === label)!;
+    await Promise.all([entry.trigger('click'), entry.trigger('click')]);
+    await flushPromises();
+    expect(wrapper.findAll('[role="dialog"]')).toHaveLength(1);
+    expect(wrapper.findAll('[role="dialog"] input:checked')).toHaveLength(0);
+    const next = () => wrapper.findAll('[role="dialog"] button').find((button) => button.text() === '继续')!;
+    expect(next().attributes('disabled')).toBeDefined();
+    await wrapper.findAll('.reset-option input')[1].setValue(true);
+    await next().trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="dialog"]').text()).toContain('测试规则');
+    expect(wrapper.get('[role="dialog"]').text()).toContain('糖果测试');
+    const confirm = wrapper
+        .findAll('[role="dialog"] button')
+        .find((button) => button.text() === '确认清空并恢复初始状态')!;
+    await Promise.all([confirm.trigger('click'), confirm.trigger('click')]);
+    await flushPromises();
+    expect(fake.call.mock.calls.filter(([command]) => command === 'reset_selected_data')).toHaveLength(1);
+    expect(fake.call).toHaveBeenCalledWith('reset_selected_data', {
+        selection: { api: false, rules: true, widget: false, history: false, mail: false },
+    });
+    expect(entry.attributes('disabled')).toBeDefined();
+    finishReset();
+    await flushPromises();
+    expect(wrapper.get('.success-message').text()).toContain('测试规则');
+    await entry.trigger('click');
+    await flushPromises();
+    await wrapper.get('.reset-select-all input').setValue(true);
+    expect(wrapper.findAll('.reset-option input:checked')).toHaveLength(5);
+    await wrapper.findAll('[role="dialog"] button')[0].trigger('click');
+    expect(fake.call.mock.calls.filter(([command]) => command === 'reset_selected_data')).toHaveLength(1);
+    wrapper.unmount();
+});
+
+/** 移除全局快捷键后，两入口只重置桌面偏好；不要求释放系统组合键或操作其他分类。 */
+it.each(['恢复所有设置', '清除所有数据'])('%s 可单独清空悬浮设置且不再显示快捷键选项', async (label) => {
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[2].trigger('click');
+    await flushPromises();
+    expect(wrapper.find('#shortcut').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Ctrl + Alt + P');
+    await wrapper
+        .findAll('button')
+        .find((button) => button.text().trim() === label)!
+        .trigger('click');
+    await flushPromises();
+    await wrapper.findAll('.reset-option input')[2].setValue(true);
+    await wrapper
+        .findAll('[role="dialog"] button')
+        .find((button) => button.text() === '继续')!
+        .trigger('click');
+    await flushPromises();
+    await wrapper
+        .findAll('[role="dialog"] button')
+        .find((button) => button.text() === '确认清空并恢复初始状态')!
+        .trigger('click');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith('reset_selected_data', {
+        selection: { api: false, rules: false, widget: true, history: false, mail: false },
+    });
+    expect(wrapper.get('.success-message').text()).toContain('悬浮设置');
+    expect(wrapper.find('.inline-error').exists()).toBe(false);
+    wrapper.unmount();
+});
+
+it('新建默认选择现存糖果，已有绑定与被删除预设保持原意', async () => {
+    fake.snapshot.config.rulePresets = [
+        { id: 'builtin-candy-test', name: '糖果测试', prompt: '糖果题', keyword: '21颗' },
+    ];
+    const wrapper = mount(Settings);
+    await flushPromises();
+    expect(wrapper.get('[aria-label="绑定规则预设"]').text()).not.toBe('糖果测试');
+    await wrapper.get('[aria-label="新增接口配置"]').trigger('click');
+    expect(wrapper.get('[aria-label="绑定规则预设"]').text()).toBe('糖果测试');
+    await wrapper.findAll('nav button')[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[aria-label="编辑测试规则"]').text()).toBe('糖果测试');
+    expect(wrapper.get<HTMLTextAreaElement>('#test-prompt').element.value).toBe('糖果题');
+    wrapper.unmount();
+    fake.snapshot.config.rulePresets = [];
+    const deleted = mount(Settings);
+    await flushPromises();
+    await deleted.get('[aria-label="新增接口配置"]').trigger('click');
+    expect(deleted.get('[aria-label="绑定规则预设"]').text()).not.toBe('糖果测试');
+    deleted.unmount();
+});
+
+it('历史四项筛选按 AND 组合，保留已删项并把缺失强度与不指定分开', async () => {
+    const base = {
+        id: 'a',
+        profileId: 'deleted',
+        profileName: '已删除分组',
+        model: 'model-a',
+        ruleName: '规则甲',
+        status: 'passed' as const,
+        reasoningEffort: 'high' as const,
+        startedAt: '2026-10-27T00:00:00Z',
+        durationMs: 12,
+        answer: '正文',
+        error: null,
+        prompt: '题',
+        keyword: '正文',
+        ruleVersion: 'literal-contains-v1',
+    };
+    const history = [
+        base,
+        { ...base, id: 'b', model: 'model-b' },
+        { ...base, id: 'c', ruleName: '规则乙' },
+        { ...base, id: 'd', reasoningEffort: null },
+        { ...base, id: 'e', reasoningEffort: null, conditionFingerprint: 'saved' },
+    ];
+    const wrapper = mount(HistoryPanel, { props: { history, profiles: [], modelValue: null } });
+    await choose(wrapper, '按分组筛选历史', '已删除分组5 条记录');
+    await choose(wrapper, '按模型筛选历史', 'model-a');
+    await choose(wrapper, '按规则预设筛选历史', '规则甲');
+    await choose(wrapper, '按思考强度筛选历史', 'high');
+    expect(wrapper.findAll('.history-item')).toHaveLength(1);
+    expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([base]);
+    await choose(wrapper, '按思考强度筛选历史', '未记录');
+    expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([history[3]]);
+    await choose(wrapper, '按思考强度筛选历史', '不指定');
+    expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([history[4]]);
+    wrapper.unmount();
+});
+
+it.each([false, true])('详情复制迟到结果在返回并重进同记录后不回写：失败=%s', async (failure) => {
+    fake.snapshot.history = [
+        {
+            id: 'copy',
+            profileId: 'one',
+            profileName: '测试模型',
+            model: 'model',
+            status: 'passed',
+            startedAt: '2026-10-27T00:00:00Z',
+            durationMs: 12,
+            answer: '原文',
+            error: null,
+            prompt: '题',
+            keyword: '原文',
+            ruleVersion: 'literal-contains-v1',
+        },
+    ];
+    let complete!: () => void;
+    const writeText = vi.fn(
+        () =>
+            new Promise<void>((resolve, reject) => {
+                complete = () => (failure ? reject(new Error('fixture')) : resolve());
+            }),
+    );
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[3].trigger('click');
+    await wrapper.get('.history-record-info').trigger('click');
+    await wrapper
+        .findAll('.settings-actions button')
+        .find((button) => button.text().includes('复制测试记录'))!
+        .trigger('click');
+    await wrapper
+        .findAll('.settings-actions button')
+        .find((button) => button.text().includes('返回记录'))!
+        .trigger('click');
+    await wrapper.get('.history-record-info').trigger('click');
+    complete();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('已复制本条测试记录');
+    expect(wrapper.text()).not.toContain('复制失败');
+    wrapper.unmount();
+});
+
 it('默认规则可改名，恢复内置题答保留名称与单答案，并不立即保存', async () => {
     const wrapper = mount(Settings);
     await flushPromises();
@@ -40,7 +226,7 @@ it('默认规则可改名，恢复内置题答保留名称与单答案，并不�
     await flushPromises();
     expect(fake.call).toHaveBeenCalledWith('save_rule', {
         name: '日本首相测试',
-        rule: { prompt: '默认问题', keyword: '高市早苗' },
+        rule: { prompt: '默认问题', keyword: '高市早苗', timeoutSeconds: null },
     });
     wrapper.unmount();
 });
@@ -212,7 +398,6 @@ it('悬浮设置DOM按常用测试、外观交互、自启、历史顺序排列'
         'timeout',
         'always-top',
         'snap-edge',
-        'shortcut',
         'opacity',
         'autostart',
         'history-max-records',
@@ -288,6 +473,7 @@ it('已保存列表无需重新拉取，更新失败仍能搜索选择缓存模�
 });
 vi.mock('../src/bridge', () => ({
     desktop: true,
+    CANDY_RULE_ID: 'builtin-candy-test',
     DEFAULT_PROMPT: '默认问题',
     call: fake.call,
     subscribe: fake.subscribe,
@@ -320,7 +506,6 @@ beforeEach(() => {
                 snapToEdge: true,
                 opacity: 97,
                 timeoutSeconds: 60,
-                shortcutEnabled: true,
                 autoTestEnabled: true,
                 autoTestIntervalMinutes: 3,
             },
@@ -364,7 +549,7 @@ it('设置中的全部二值选项共用滑动开关及可访问名称，不残�
             expect(input.element.labels?.length).toBeGreaterThan(0);
         }
     }
-    expect(total).toBe(12);
+    expect(total).toBe(11);
     expect(fake.call.mock.calls.some(([command]) => command.startsWith('save_'))).toBe(false);
     wrapper.unmount();
 });
@@ -567,7 +752,7 @@ it('历史分组与关键词组合筛选，删除的配置仍可筛选，复制�
     await filter.trigger('click');
     await wrapper.findAll('[role="option"]')[1].trigger('click');
     await flushPromises();
-    await wrapper.get('.history-item').trigger('click');
+    await wrapper.get('.history-record-info').trigger('click');
     expect(wrapper.get('.history-answer strong').text()).toBe('高市');
     expect(wrapper.get('.result-pill').text()).toBe('降智');
     await wrapper.findAll('.settings-actions button')[1].trigger('click');
@@ -596,7 +781,7 @@ it('更新只读后台缓存，在关于入口显示新版本，切页不检查�
         .find((button) => button.text().includes('关于'))!
         .trigger('click');
     expect(wrapper.text()).toContain('免安装版');
-    expect(wrapper.text()).toContain('v1.0.2');
+    expect(wrapper.text()).toContain('v1.0.3');
     expect(fake.call.mock.calls.some(([command]) => command === 'check_updates')).toBe(false);
     expect(wrapper.find('.about-update [role="alert"]').exists()).toBe(false);
     expect(wrapper.get('.settings-actions').text()).toContain('前往下载 v1.1.0');
@@ -904,7 +1089,7 @@ describe('自定义测试规则', () => {
         await wrapper.get('form').trigger('submit');
         await flushPromises();
         expect(fake.call).toHaveBeenCalledWith('save_rule', {
-            rule: { prompt: '新问题\n请只按记忆回答。', keyword: ' Answer\nNext ' },
+            rule: { prompt: '新问题\n请只按记忆回答。', keyword: ' Answer\nNext ', timeoutSeconds: null },
             name: '默认规则',
         });
         expect(wrapper.text()).toContain('已保存');
@@ -957,18 +1142,21 @@ async function choose(wrapper: ReturnType<typeof mount>, label: string, text: st
     await flushPromises();
 }
 
-it('不指定思考强度不会被默认 low 覆盖，清空配置超时提交 null', async () => {
+it('不指定思考强度仍保留，旧接口超时不展示、不提交且不影响诊断超时', async () => {
     fake.snapshot.config.profiles[0].reasoningEffort = null;
     fake.snapshot.config.profiles[0].timeoutSeconds = 30;
     const wrapper = mount(Settings);
     await flushPromises();
     expect(wrapper.get('[aria-label="思考强度"]').text()).toContain('不指定');
-    await wrapper.get('#profile-timeout').setValue('');
+    expect(wrapper.find('#profile-timeout').exists()).toBe(false);
+    expect(wrapper.get('.connection-actions').element.parentElement?.textContent).toContain('60');
     await wrapper.get('#profile-settings').trigger('submit');
     await flushPromises();
     expect(fake.call).toHaveBeenCalledWith('save_profile', {
-        input: expect.objectContaining({ reasoningEffort: null, timeoutSeconds: null }),
+        input: expect.objectContaining({ reasoningEffort: null }),
     });
+    const input = fake.call.mock.calls.find(([command]) => command === 'save_profile')![1].input;
+    expect(input).not.toHaveProperty('timeoutSeconds');
     wrapper.unmount();
 });
 
@@ -1198,7 +1386,7 @@ it('已有规则预设保存保持 ID，引用规则删除必须明确确认原�
     await wrapper.get('#rule-settings').trigger('submit');
     await flushPromises();
     expect(fake.call).toHaveBeenCalledWith('save_rule_preset', {
-        preset: { id: 'preset-a', name: '预设 A', prompt: '新题目', keyword: '旧答案' },
+        preset: { id: 'preset-a', name: '预设 A', prompt: '新题目', keyword: '旧答案', timeoutSeconds: null },
     });
     await wrapper
         .findAll('button')
@@ -1406,14 +1594,14 @@ it('旧历史 null 强度显示未记录，新协议快照的 null 才显示不�
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.findAll('nav button')[3].trigger('click');
-    await wrapper.findAll('.history-item')[0].trigger('click');
+    await wrapper.findAll('.history-record-info')[0].trigger('click');
     expect(wrapper.get('.history-detail').text()).not.toContain('不指定');
     expect(wrapper.get('.history-detail').text()).toContain('未记录');
     await wrapper
         .findAll('.settings-actions button')
         .find((button) => button.text().includes('返回记录'))!
         .trigger('click');
-    await wrapper.findAll('.history-item')[1].trigger('click');
+    await wrapper.findAll('.history-record-info')[1].trigger('click');
     expect(wrapper.get('.history-detail').text()).toContain('不指定');
     wrapper.unmount();
 });
@@ -1800,5 +1988,95 @@ it('邮件已保存但读取失败进入只重读恢复态，不能离页回填�
     expect(wrapper.find('.snapshot-recovery').exists()).toBe(false);
     expect(wrapper.get<HTMLInputElement>('#smtp-host').element.value).toBe('smtp.saved.example');
     expect(wrapper.get<HTMLInputElement>('#smtp-password').element.value).toBe('');
+    wrapper.unmount();
+});
+
+/** 规则超时是可空的独立草稿，保存/还原/切换必须清除旧题残值。 */
+it('规则超时按题保存，清空继承且切换题目不残留覆盖值', async () => {
+    fake.snapshot.config.rule.timeoutSeconds = 80;
+    fake.snapshot.config.rulePresets = [
+        { id: 'timed', name: '限时题', prompt: '题', keyword: '答', timeoutSeconds: 120 },
+    ];
+    fake.call.mockImplementation(async (command: string, args?: Record<string, any>) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'save_rule') fake.snapshot.config.rule = structuredClone(args!.rule);
+    });
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[1].trigger('click');
+    expect(wrapper.get<HTMLInputElement>('#rule-timeout').element.value).toBe('80');
+    expect(wrapper.get('#rule-timeout').attributes('min')).toBe('1');
+    expect(wrapper.get('#rule-timeout').attributes('max')).toBeUndefined();
+    for (const invalid of ['0', '-1', '1.5', '9007199254740992']) {
+        await wrapper.get('#rule-timeout').setValue(invalid);
+        await wrapper.get('#rule-settings').trigger('submit');
+        expect(fake.call.mock.calls.some(([command]) => command === 'save_rule')).toBe(false);
+        expect(wrapper.text()).toContain('正整数秒');
+    }
+    for (const timeout of [1, 9, 600, 3600]) {
+        await wrapper.get('#rule-timeout').setValue(String(timeout));
+        await wrapper.get('#rule-settings').trigger('submit');
+        await flushPromises();
+        const saved = fake.call.mock.calls.filter(([command]) => command === 'save_rule');
+        expect(saved.at(-1)![1].rule.timeoutSeconds).toBe(timeout);
+    }
+    await wrapper.get('#rule-timeout').setValue('');
+    await wrapper.get('#rule-settings').trigger('submit');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith('save_rule', {
+        rule: expect.objectContaining({ timeoutSeconds: null }),
+        name: '默认规则',
+    });
+    await choose(wrapper, '编辑测试规则', '限时题');
+    expect(wrapper.get<HTMLInputElement>('#rule-timeout').element.value).toBe('120');
+    await choose(wrapper, '编辑测试规则', '默认规则');
+    expect(wrapper.get<HTMLInputElement>('#rule-timeout').element.value).toBe('');
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+    wrapper.unmount();
+});
+
+/** 全局值同样不能沿用旧上限，且空输入不具有规则超时的继承语义。 */
+it('全局超时接受正整数秒，拒绝零、空值、小数和不安全整数', async () => {
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[2].trigger('click');
+    expect(wrapper.get('#timeout').attributes('min')).toBe('1');
+    expect(wrapper.get('#timeout').attributes('max')).toBeUndefined();
+    for (const invalid of ['', '0', '-1', '1.5', '9007199254740992']) {
+        await wrapper.get('#timeout').setValue(invalid);
+        await wrapper.get('#widget-settings').trigger('submit');
+        expect(fake.call.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
+    }
+    for (const timeout of [1, 600, 3600]) {
+        await wrapper.get('#timeout').setValue(String(timeout));
+        await wrapper.get('#widget-settings').trigger('submit');
+        await flushPromises();
+        const saved = fake.call.mock.calls.filter(([command]) => command === 'save_preferences');
+        expect(saved.at(-1)![1].preferences.timeoutSeconds).toBe(timeout);
+    }
+    wrapper.unmount();
+});
+
+it('连接诊断取草稿绑定的已保存规则超时，卡片换模型只合并未编辑模型字段', async () => {
+    fake.snapshot.config.rule.timeoutSeconds = 90;
+    fake.snapshot.config.rulePresets = [
+        { id: 'timed', name: '限时题', prompt: '题', keyword: '答', timeoutSeconds: 120 },
+    ];
+    const wrapper = mount(Settings);
+    await flushPromises();
+    expect(wrapper.text()).toContain('90');
+    await wrapper.get('#profile-name').setValue('名称草稿');
+    fake.snapshot.config.profiles[0].model = 'from-widget';
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get<HTMLInputElement>('#model-name').element.value).toBe('from-widget');
+    expect(wrapper.get<HTMLInputElement>('#profile-name').element.value).toBe('名称草稿');
+    await choose(wrapper, '绑定规则预设', '限时题');
+    expect(wrapper.text()).toContain('120');
+    await wrapper.get('#model-name').setValue('model-draft');
+    fake.snapshot.config.profiles[0].model = 'later-widget';
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get<HTMLInputElement>('#model-name').element.value).toBe('model-draft');
     wrapper.unmount();
 });

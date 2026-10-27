@@ -194,6 +194,7 @@ pub async fn test_connection(
         prompt: "请只回复 OK。".into(),
         keyword: "OK".into(),
         alternative_keywords: Vec::new(),
+        timeout_seconds: None,
     };
     let result = api::complete(
         &profile,

@@ -18,7 +18,7 @@ const props = defineProps<{
 const emit = defineEmits<{ dirty: [value: boolean] }>();
 const defaults = (): EmailNotificationSettings => ({
     enabled: false,
-    smtpHost: '',
+    smtpHost: 'smtp.qq.com',
     smtpPort: 465,
     security: 'tls',
     sender: '',
@@ -49,6 +49,8 @@ watch(dirty, (value) => emit('dirty', value));
 /** 后台刷新不能覆盖未保存密码或邮件设置；保存成功后才清空敏感草稿。 */
 function discard(): void {
     Object.assign(form, defaults(), props.settings ?? {});
+    // 兼容旧版空表单，仅填充草稿的默认主机；已有自定义地址不覆盖、不静默写回数据库。
+    if (!form.smtpHost.trim()) form.smtpHost = defaults().smtpHost;
     recipientsText.value = form.recipients.join('; ');
     password.value = '';
     removePassword.value = false;
@@ -141,10 +143,10 @@ defineExpose({ save, discard, dirty, isWorking });
                         id="smtp-host"
                         v-model="form.smtpHost"
                         maxlength="253"
-                        placeholder="smtp.example.com"
+                        placeholder="smtp.qq.com"
                         autocomplete="off"
                     />
-                    <p>只填域名或 IP，不带协议和路径。</p>
+                    <p>默认 smtp.qq.com，可修改；只填域名或 IP，不带协议和路径。</p>
                 </div>
             </div>
             <div class="field-row">

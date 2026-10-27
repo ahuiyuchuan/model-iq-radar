@@ -3,7 +3,7 @@
 
 use crate::{
     conditions::{validate_preferences, validate_stored_config},
-    model::{AppConfig, Preferences, TestRecord},
+    model::{AppConfig, DataResetSelection, Preferences, TestRecord, BUILTIN_RULES_VERSION},
     notifications::NotificationTracker,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -180,7 +180,7 @@ pub fn retention_tightened(previous: &Preferences, next: &Preferences) -> bool {
 }
 
 impl Store {
-    /// 读取首版配置并升级至 schema v2；旧程序拒绝新版本，防止多答案被忽略。
+    /// 读取旧配置并升级至 schema v3；旧程序拒绝新版本，防止多答案或规则超时被忽略。
     /// 启动时执行已经保存的保留策略，因此长期未测试也不会把过期历史继续展示出来。
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut connection =
@@ -191,7 +191,7 @@ impl Store {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| "无法读取数据库版本。")?;
-        if version > 2 {
+        if version > 3 {
             return Err("数据库来自更新版本，请使用对应版本应用。".into());
         }
         connection.execute_batch(
@@ -216,8 +216,9 @@ impl Store {
         // 自动期限到达后每秒重新尝试本地校验，既制造无意义工作，也不能给用户明确修复路径。
         // 校验失败不写回配置正文、不清理历史；前面仅初始化兼容附加表和 WAL，
         // 保留原始业务数据供用户备份或使用兼容版本修复。
-        // 在内存补入一次性预设，下一次显式保存时持久化标记；不改写原题答或原数据库 payload。
-        // 旧库已有同 ID 时视为已补入，不能覆盖其自定义内容；容量为 100 自定义 + 1 自带规则。
+        // 内置规则迁移与启动历史检查同事务保存，避免仅留在内存、重启后重复补入。
+        // 同 ID 的用户内容保留；仅完全匹配旧内置正文时替换，容量为 100 自定义 + 2 自带规则。
+        let upgrade_builtins = config.builtin_rules_version < BUILTIN_RULES_VERSION;
         config.upgrade_builtin_rules();
         validate_stored_config(&config)
             .map_err(|message| format!("本地配置无效，请先备份数据库后修复：{message}"))?;
@@ -228,12 +229,17 @@ impl Store {
         apply_cleanup(&transaction, &plan)?;
         // 旧 schema 的 history 只有 JSON 正文，没有可索引的 profile_id 列。启动时已经
         // 逐条校验正文并执行保留策略，因此在同一事务中重建一个本地派生索引，不改变
-        // 历史内容；本轮格式升级单独记录为版本 2。悬浮窗只需读取当前模型的一条记录。
+        // 历史内容；派生索引沿用 v2 结构。悬浮窗只需读取当前模型的一条记录。
         rebuild_latest_record_index(&transaction)?;
-        // 多答案改变判定语义，旧程序必须拒绝新数据库，不能忽略额外答案后静默降级判定。
+        if upgrade_builtins {
+            let payload = serde_json::to_string(&config).map_err(|_| "内置规则迁移序列化失败。")?;
+            transaction.execute("INSERT INTO app_config(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [payload])
+                .map_err(|_| "内置规则迁移保存失败，原配置保留。")?;
+        }
+        // v3 规则超时改变请求预算，旧程序必须拒绝新库，不能忽略覆盖值后静默使用旧超时。
         // 仅完整验证/历史整理成功后随事务升级；回退旧程序须恢复升级前数据库备份。
         transaction
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", 3)
             .map_err(|_| "数据库版本更新失败。")?;
         transaction.commit().map_err(|_| "历史整理提交失败。")?;
         Ok(Self { connection, config })
@@ -245,6 +251,39 @@ impl Store {
         self.connection.execute("INSERT INTO app_config(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", params![payload]).map_err(|_| "配置保存失败，请检查磁盘空间和权限。")?;
         self.config = config;
         Ok(())
+    }
+
+    /// 仅保存模型 ID，不覆盖分组凭据、规则或强度；目录须仍属于当前地址/凭据版本。
+    /// 拒绝迟到选择及无效/超长 ID；数据库失败保持原配置，不自动测试或重置周期。
+    pub fn set_profile_model(&mut self, profile_id: &str, model: &str) -> Result<(), String> {
+        if model.trim().is_empty()
+            || model.chars().count() > 200
+            || model.chars().any(char::is_control)
+        {
+            return Err("模型名称必须为 1—200 个字符，不能包含控制字符。".into());
+        }
+        let mut config = self.config.clone();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .ok_or("模型配置已不存在，请刷新后重试。")?;
+        let endpoint = crate::discovery::models_endpoint(&profile.base_url)?.to_string();
+        let catalog = self.model_catalog(
+            profile
+                .catalog_token
+                .as_deref()
+                .ok_or("模型目录已失效，请重新拉取后选择。")?,
+            &endpoint,
+        )?;
+        if !catalog.iter().any(|item| item.id == model) {
+            return Err("所选模型不在当前目录中，请刷新后重新选择。".into());
+        }
+        if profile.model == model {
+            return Ok(());
+        }
+        profile.model = model.to_owned();
+        self.save_config(config)
     }
 
     /// 成功列表才原子更新，失败事务保留旧缓存；最多 100 份、总正文 16 MiB。
@@ -422,6 +461,48 @@ impl Store {
         Ok(())
     }
 
+    /// 分类清空的数据库部分一次提交；失败保留配置、历史、目录和通知状态，不做部分清空。
+    /// 未勾选历史时不立即执行新偏好的历史裁剪；后续测试/启动仍按已保存保留策略整理。
+    /// 空的有版本通知状态必须写入而非删除，否则重启会从保留历史复建已明确清除的依据。
+    pub(crate) fn reset_selected_data(
+        &mut self,
+        config: AppConfig,
+        selection: &DataResetSelection,
+    ) -> Result<(), String> {
+        validate_stored_config(&config)?;
+        let payload = serde_json::to_string(&config).map_err(|_| "配置序列化失败。")?;
+        let notification_payload = serde_json::to_string(&NotificationTracker::default())
+            .map_err(|_| "通知状态序列化失败。")?;
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|_| "无法开始分类清空事务。")?;
+        transaction.execute("INSERT INTO app_config(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [payload])
+            .map_err(|_| "配置重置失败，操作已回滚。")?;
+        if selection.api {
+            transaction
+                .execute("DELETE FROM model_catalog", [])
+                .map_err(|_| "模型目录清空失败，操作已回滚。")?;
+        }
+        if selection.history {
+            transaction
+                .execute("DELETE FROM test_record", [])
+                .map_err(|_| "测试历史清空失败，操作已回滚。")?;
+            transaction
+                .execute("DELETE FROM latest_test_record", [])
+                .map_err(|_| "最近结果清空失败，操作已回滚。")?;
+        }
+        if selection.resets_notification_state() {
+            transaction.execute("INSERT INTO notification_state(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [notification_payload])
+                .map_err(|_| "通知依据清空失败，操作已回滚。")?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| "分类清空提交失败，操作已回滚。")?;
+        self.config = config;
+        Ok(())
+    }
+
     /// 启动时恢复并立即保存通知状态；旧格式或尚无状态时才读取保留历史进行重建。
     /// 必须在开放清空历史/测试入口前完成，避免迁移只留在内存，重启后丢失恢复依据。
     /// 只写独立状态，不发信或补发旧事件；读取、解析或保存失败均报错并保留原 payload。
@@ -465,7 +546,261 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{CANDY_RULE_ID, PELICAN_RULE_ID};
     use serde_json::json;
+
+    /// 全部组合均只改变显式选择的分类；规则恢复改绑糖果，空选和未知字段不能触发清空。
+    #[test]
+    fn reset_categories_preserve_unselected_config_and_rebind_initial_rule() {
+        let mut current = AppConfig::default();
+        current.profiles.push(serde_json::from_value(json!({
+            "id":"one", "name":"fixture", "model":"model", "baseUrl":"https://example.com/v1", "hasKey":true,
+            "rulePresetId":"builtin-pelican-test"
+        })).unwrap());
+        current.selected_profile_id = Some("one".into());
+        current.rule.keyword = "custom".into();
+        current.preferences.opacity = 88;
+        current.widget_position = Some((10, 20));
+        current.email_notifications.smtp_host = "smtp.example.com".into();
+        let original = serde_json::to_value(&current).unwrap();
+        for mask in 0..32 {
+            let selection = DataResetSelection {
+                api: mask & 1 != 0,
+                rules: mask & 2 != 0,
+                widget: mask & 4 != 0,
+                history: mask & 8 != 0,
+                mail: mask & 16 != 0,
+            };
+            if mask == 0 {
+                assert!(selection.reset_config(&current).is_err());
+                continue;
+            }
+            let reset = selection.reset_config(&current).unwrap();
+            let value = serde_json::to_value(&reset).unwrap();
+            assert_eq!(
+                selection.resets_notification_state(),
+                selection.api || selection.history || selection.mail
+            );
+            if selection.api {
+                assert!(reset.profiles.is_empty());
+                assert!(reset.selected_profile_id.is_none());
+            } else {
+                assert_eq!(reset.profiles[0].model, "model");
+                assert_eq!(reset.profiles[0].has_key, current.profiles[0].has_key);
+                assert_eq!(
+                    reset.profiles[0].rule_preset_id.as_deref(),
+                    Some(if selection.rules {
+                        CANDY_RULE_ID
+                    } else {
+                        PELICAN_RULE_ID
+                    })
+                );
+            }
+            if !selection.rules {
+                assert_eq!(value["rule"], original["rule"]);
+                assert_eq!(value["rulePresets"], original["rulePresets"]);
+            } else {
+                assert_eq!(reset.rule_presets.len(), 2);
+                assert_eq!(reset.builtin_rules_version, BUILTIN_RULES_VERSION);
+            }
+            if !selection.widget {
+                assert_eq!(value["preferences"], original["preferences"]);
+                assert_eq!(value["widgetPosition"], original["widgetPosition"]);
+            } else {
+                assert_eq!(reset.preferences.timeout_seconds, 300);
+                assert_eq!(reset.preferences.history_max_records, Some(500));
+                assert!(reset.widget_position.is_none());
+            }
+            if !selection.mail {
+                assert_eq!(value["emailNotifications"], original["emailNotifications"]);
+            } else {
+                assert_eq!(reset.email_notifications.smtp_host, "smtp.qq.com");
+                assert!(!reset.email_notifications.enabled);
+            }
+        }
+        assert_eq!(serde_json::to_value(&current).unwrap(), original);
+        assert!(serde_json::from_value::<DataResetSelection>(json!({"api":true,"rules":false,"widget":false,"history":false,"mail":false,"extra":true})).is_err());
+    }
+
+    /// 旧快捷键开关无论启用/关闭都不再写回；单独恢复悬浮设置及全选清空后重启均保持初始状态。
+    #[test]
+    fn legacy_shortcut_flags_do_not_survive_widget_or_full_reset() {
+        for enabled in [false, true] {
+            for all in [false, true] {
+                let path = std::env::temp_dir().join(format!(
+                    "model-probe-reset-shortcut-{}.db",
+                    uuid::Uuid::new_v4()
+                ));
+                {
+                    let mut store = Store::open(&path).unwrap();
+                    store.save_config(store.config.clone()).unwrap();
+                    let mut legacy = serde_json::to_value(&store.config).unwrap();
+                    legacy["preferences"]["shortcutEnabled"] = json!(enabled);
+                    legacy["preferences"]["opacity"] = json!(88);
+                    // 直接写旧格式夹具，确保实际启动读取路径覆盖未知字段兼容，而非只测内存反序列化。
+                    let updated = store
+                        .connection
+                        .execute(
+                            "UPDATE app_config SET payload=?1 WHERE id=1",
+                            [serde_json::to_string(&legacy).unwrap()],
+                        )
+                        .unwrap();
+                    assert_eq!(updated, 1);
+                }
+                {
+                    let mut store = Store::open(&path).unwrap();
+                    assert_eq!(store.config.preferences.opacity, 88);
+                    let selection = DataResetSelection {
+                        api: all,
+                        rules: all,
+                        widget: true,
+                        history: all,
+                        mail: all,
+                    };
+                    let next = selection.reset_config(&store.config).unwrap();
+                    store.reset_selected_data(next, &selection).unwrap();
+                    let payload: String = store
+                        .connection
+                        .query_row("SELECT payload FROM app_config WHERE id=1", [], |row| {
+                            row.get(0)
+                        })
+                        .unwrap();
+                    assert!(!payload.contains("shortcutEnabled"));
+                }
+                {
+                    let store = Store::open(&path).unwrap();
+                    assert_eq!(store.config.preferences.opacity, 97);
+                    assert_eq!(store.config.preferences.timeout_seconds, 300);
+                    assert!(serde_json::to_value(&store.config.preferences)
+                        .unwrap()
+                        .get("shortcutEnabled")
+                        .is_none());
+                }
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    /// 模拟历史删除失败，配置、目录、通知依据和正文必须整体回滚；成功后同时清空派生索引。
+    #[test]
+    fn category_reset_is_atomic_and_history_reset_clears_notification_basis() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut config = store.config.clone();
+        config.rule.keyword = "custom".into();
+        store.save_config(config).unwrap();
+        store
+            .save_model_catalog("catalog", "https://example.com/v1/models", &[])
+            .unwrap();
+        let mut snapshot = record("fixture", "2026-10-27T00:00:00Z");
+        snapshot.status = "failed".into();
+        store.save_record(&snapshot).unwrap();
+        let mut tracker = NotificationTracker::default();
+        tracker.consider(&snapshot);
+        let notification_before = serde_json::to_string(&tracker).unwrap();
+        store.save_notification_state(&notification_before).unwrap();
+        let before = serde_json::to_value(&store.config).unwrap();
+        let selection = DataResetSelection {
+            api: true,
+            rules: true,
+            widget: true,
+            history: true,
+            mail: true,
+        };
+        store.connection.execute_batch("CREATE TRIGGER fail_reset BEFORE DELETE ON test_record BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+        let next = selection.reset_config(&store.config).unwrap();
+        assert!(store.reset_selected_data(next, &selection).is_err());
+        assert_eq!(serde_json::to_value(&store.config).unwrap(), before);
+        let saved: String = store
+            .connection
+            .query_row("SELECT payload FROM app_config WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap(),
+            before
+        );
+        assert_eq!(store.history().unwrap().len(), 1);
+        assert_eq!(
+            store.read_notification_state().unwrap().unwrap(),
+            notification_before
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM model_catalog", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_reset;")
+            .unwrap();
+        let next = selection.reset_config(&store.config).unwrap();
+        store.reset_selected_data(next, &selection).unwrap();
+        assert!(store.history().unwrap().is_empty());
+        assert!(store
+            .latest_record_for_profile(&snapshot.profile_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM model_catalog", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store.read_notification_state().unwrap().unwrap(),
+            serde_json::to_string(&NotificationTracker::default()).unwrap()
+        );
+    }
+
+    /// 快捷换模型必须只改 model；过期目录、非法 ID 和写入失败均保留原有配置。
+    #[test]
+    fn model_selection_validates_catalog_and_rolls_back_failed_save() {
+        let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let mut config = store.config.clone();
+        config.profiles.push(
+            serde_json::from_value(json!({
+                "id":"profile", "name":"分组", "baseUrl":"https://example.com/v1",
+                "model":"original", "hasKey":true, "credentialRevision":"revision",
+                "reasoningEffort":"high", "catalogToken":"catalog"
+            }))
+            .unwrap(),
+        );
+        config.selected_profile_id = Some("profile".into());
+        store.save_config(config).unwrap();
+        let models = vec![crate::discovery::FetchedModel {
+            id: "candidate".into(),
+            owned_by: None,
+        }];
+        store
+            .save_model_catalog("catalog", "https://example.com/v1/models", &models)
+            .unwrap();
+        let before = serde_json::to_value(&store.config).unwrap();
+        for invalid in ["", "missing", "candidate\n"] {
+            assert!(store.set_profile_model("profile", invalid).is_err());
+        }
+        assert!(store.set_profile_model("deleted", "candidate").is_err());
+        assert_eq!(before, serde_json::to_value(&store.config).unwrap());
+        store.connection.execute_batch("CREATE TRIGGER fail_config BEFORE UPDATE ON app_config BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+        assert!(store.set_profile_model("profile", "candidate").is_err());
+        assert_eq!(before, serde_json::to_value(&store.config).unwrap());
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_config;")
+            .unwrap();
+        store.set_profile_model("profile", "candidate").unwrap();
+        let mut expected = before;
+        expected["profiles"][0]["model"] = json!("candidate");
+        assert_eq!(expected, serde_json::to_value(&store.config).unwrap());
+        // 当前地址变化后即使旧句柄仍在，端点绑定也必须拒绝旧目录选择。
+        store.config.profiles[0].base_url = "https://other.example/v1".into();
+        assert!(store.set_profile_model("profile", "candidate").is_err());
+    }
 
     fn record(id: &str, time: &str) -> TestRecord {
         serde_json::from_value(json!({

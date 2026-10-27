@@ -34,6 +34,30 @@ fn protocol_fallback_defaults_off_invalidates_conditions_and_roundtrips_backup()
     assert!(!roundtrip.config.profiles[0].has_key);
 }
 
+/// 兼容旧备份中的快捷键字段；忽略旧开关但保留其他偏好，再导出不携带已删除功能。
+#[test]
+fn legacy_shortcut_backup_is_ignored_without_changing_other_preferences() {
+    for version in [1, 2, 3] {
+        for enabled in [false, true] {
+            let mut current = config();
+            current.preferences.opacity = 88;
+            let mut document =
+                serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
+            document["version"] = json!(version);
+            document["config"]["preferences"]["shortcutEnabled"] = json!(enabled);
+            let imported =
+                backup::prepare_import(&AppConfig::default(), &document, "replace").unwrap();
+            assert_eq!(imported.config.preferences.opacity, 88);
+            let exported =
+                serde_json::to_value(backup::export_backup(&imported.config).unwrap()).unwrap();
+            assert!(exported["config"]["preferences"]
+                .get("shortcutEnabled")
+                .is_none());
+            assert_eq!(exported["version"], 3);
+        }
+    }
+}
+
 /// 多答案使用原文 OR，不发送或拼接判定答案；旧多行 keyword 无损保留。
 #[test]
 fn multiple_answers_preserve_literal_semantics_and_reject_invalid_items() {
@@ -70,7 +94,7 @@ fn multi_answer_fingerprint_backup_and_default_name_roundtrip() {
         conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
     );
     let document = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
-    assert_eq!(document["version"], 2);
+    assert_eq!(document["version"], 3);
     let imported = backup::prepare_import(&AppConfig::default(), &document, "replace").unwrap();
     assert_eq!(imported.config.default_rule_name, "默认改名");
     assert_eq!(
@@ -136,6 +160,75 @@ fn builtin_rules_upgrade_once_without_overwriting_user_changes() {
     assert!(current.rule_presets.is_empty());
 }
 
+/// 一次性规则迁移必须在启动事务内落盘；之后用户删除/修改和重复启动都不能重新补入。
+#[test]
+fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
+    use model_probe_lib::model::{BUILTIN_RULES_VERSION, DEFAULT_PROMPT, PELICAN_RULE_ID};
+    let path =
+        std::env::temp_dir().join(format!("model-probe-builtin-{}.db", uuid::Uuid::new_v4()));
+    let mut legacy = AppConfig {
+        builtin_rules_version: 1,
+        ..AppConfig::default()
+    };
+    legacy
+        .rule_presets
+        .retain(|rule| rule.id != PELICAN_RULE_ID);
+    legacy.rule.prompt = "仅依据你的记忆，你所知道的最新一位日本首相是谁？".into();
+    // 自定义题目并不等于旧内置全文，升级不能替用户重写。
+    let custom_prompt = legacy.rule.prompt.clone();
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.save_config(legacy.clone()).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_builtin_migration BEFORE UPDATE ON app_config BEGIN SELECT RAISE(FAIL, 'fixture'); END;").unwrap();
+    assert!(Store::open(&path)
+        .err()
+        .unwrap()
+        .contains("内置规则迁移保存失败"));
+    let payload: String = connection
+        .query_row("SELECT payload FROM app_config WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let unchanged: AppConfig = serde_json::from_str(&payload).unwrap();
+    assert_eq!(unchanged.builtin_rules_version, 1);
+    assert!(!unchanged
+        .rule_presets
+        .iter()
+        .any(|rule| rule.id == PELICAN_RULE_ID));
+    connection
+        .execute_batch("DROP TRIGGER reject_builtin_migration;")
+        .unwrap();
+    {
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.config.builtin_rules_version, BUILTIN_RULES_VERSION);
+        assert_eq!(store.config.rule.prompt, custom_prompt);
+        assert_ne!(store.config.rule.prompt, DEFAULT_PROMPT);
+        assert!(store
+            .config
+            .rule_presets
+            .iter()
+            .any(|rule| rule.id == PELICAN_RULE_ID));
+    }
+    {
+        let mut store = Store::open(&path).unwrap();
+        let mut deleted = store.config.clone();
+        deleted
+            .rule_presets
+            .retain(|rule| rule.id != PELICAN_RULE_ID);
+        store.save_config(deleted).unwrap();
+    }
+    assert!(!Store::open(&path)
+        .unwrap()
+        .config
+        .rule_presets
+        .iter()
+        .any(|rule| rule.id == PELICAN_RULE_ID));
+    drop(connection);
+    std::fs::remove_file(path).unwrap();
+}
+
 /// 使用隔离 SQLite 文件验证重启缓存、端点隔离与更新替换，绝不访问真实凭据或服务商。
 #[test]
 fn model_catalog_persists_isolates_endpoints_and_updates_atomically() {
@@ -191,7 +284,7 @@ fn model_catalog_persists_isolates_endpoints_and_updates_atomically() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     drop(connection);
     std::fs::remove_file(&path).unwrap();
@@ -222,6 +315,7 @@ fn config() -> AppConfig {
             prompt: " 问题\n".into(),
             keyword: " 高市早苗 ".into(),
             alternative_keywords: Vec::new(),
+            timeout_seconds: None,
         }],
         ..AppConfig::default()
     }
@@ -460,6 +554,7 @@ fn export_rejects_oversized_document_instead_of_creating_unimportable_backup() {
             prompt: "题".repeat(20_000),
             keyword: "答案".into(),
             alternative_keywords: Vec::new(),
+            timeout_seconds: None,
         });
     }
     conditions::validate_config(&large).unwrap();
@@ -468,5 +563,112 @@ fn export_rejects_oversized_document_instead_of_creating_unimportable_backup() {
         Err(error) => error,
     };
     assert!(error.contains("4 MiB"));
-    assert_eq!(large.rule_presets.len(), 101);
+    assert_eq!(large.rule_presets.len(), 102);
+}
+
+/// 同题共享覆盖值；旧接口值彻底忽略，等效超时相同不使历史无故失效。
+#[test]
+fn rule_timeout_inherits_global_ignores_legacy_profiles_and_roundtrips() {
+    let mut current = config();
+    current.preferences.timeout_seconds = 60;
+    let original = conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap();
+    current.profiles[0].timeout_seconds = Some(10);
+    assert_eq!(
+        original,
+        conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
+    );
+    current.rule_presets[0].timeout_seconds = Some(60);
+    assert_eq!(
+        original,
+        conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
+    );
+    current.rule_presets[0].timeout_seconds = Some(120);
+    assert_eq!(
+        conditions::effective_rule(&current, &current.profiles[0])
+            .unwrap()
+            .timeout_seconds,
+        Some(120)
+    );
+    let overridden = conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap();
+    assert_ne!(original, overridden);
+    current.preferences.timeout_seconds = 300;
+    assert_eq!(
+        overridden,
+        conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
+    );
+    current.rule.timeout_seconds = Some(90);
+    let document = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
+    assert_eq!(document["version"], 3);
+    assert!(document["config"]["profiles"][0]
+        .get("timeoutSeconds")
+        .is_none());
+    let imported = backup::prepare_import(&AppConfig::default(), &document, "replace").unwrap();
+    assert_eq!(imported.config.rule.timeout_seconds, Some(90));
+    assert_eq!(
+        conditions::effective_rule(&imported.config, &imported.config.profiles[0])
+            .unwrap()
+            .timeout_seconds,
+        Some(120)
+    );
+    // v1/v2 备份缺新字段：保留显式全局值，接口旧覆盖不迁移、不再导出。
+    for version in [1, 2] {
+        let mut legacy = document.clone();
+        legacy["version"] = json!(version);
+        legacy["config"]["preferences"]["timeoutSeconds"] = json!(60);
+        legacy["config"]["rule"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeoutSeconds");
+        legacy["config"]["rulePresets"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeoutSeconds");
+        legacy["config"]["profiles"][0]["timeoutSeconds"] = json!(20);
+        let migrated = backup::prepare_import(&AppConfig::default(), &legacy, "replace").unwrap();
+        assert_eq!(migrated.config.preferences.timeout_seconds, 60);
+        assert_eq!(
+            conditions::effective_rule(&migrated.config, &migrated.config.profiles[0])
+                .unwrap()
+                .timeout_seconds,
+            None
+        );
+        assert!(
+            serde_json::to_value(backup::export_backup(&migrated.config).unwrap()).unwrap()
+                ["config"]["profiles"][0]
+                .get("timeoutSeconds")
+                .is_none()
+        );
+    }
+    // 只拒绝非正数和无法通过 IPC 精确往返的整数，不再采用 10—300 的业务范围。
+    for value in [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(9_007_199_254_740_992_u64),
+        json!(u64::MAX),
+    ] {
+        let mut invalid = document.clone();
+        invalid["config"]["rulePresets"][0]["timeoutSeconds"] = value.clone();
+        assert!(backup::prepare_import(&AppConfig::default(), &invalid, "replace").is_err());
+        invalid = document.clone();
+        invalid["config"]["preferences"]["timeoutSeconds"] = value;
+        assert!(backup::prepare_import(&AppConfig::default(), &invalid, "replace").is_err());
+    }
+    for value in [1, 9, 300, 301, 600, 3600, 9_007_199_254_740_991] {
+        current.rule.timeout_seconds = Some(value);
+        current.rule_presets[0].timeout_seconds = Some(value);
+        current.preferences.timeout_seconds = value;
+        assert!(current.rule.validate().is_ok());
+        let exported = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
+        let imported = backup::prepare_import(&AppConfig::default(), &exported, "replace").unwrap();
+        assert_eq!(imported.config.rule.timeout_seconds, Some(value));
+        // 导入保留目标库的自带预设顺序，须按绑定核对目标题目，不能假设它位于首项。
+        assert_eq!(
+            conditions::effective_rule(&imported.config, &imported.config.profiles[0])
+                .unwrap()
+                .timeout_seconds,
+            Some(value)
+        );
+        assert_eq!(imported.config.preferences.timeout_seconds, value);
+    }
 }

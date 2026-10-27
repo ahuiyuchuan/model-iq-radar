@@ -36,6 +36,7 @@ import { version } from '../../package.json';
 import {
     call,
     DEFAULT_PROMPT,
+    CANDY_RULE_ID,
     desktop,
     dragWindow,
     windowAction,
@@ -57,6 +58,7 @@ import type {
     FetchedModel,
     ModelCatalog,
     ConnectionResult,
+    DataResetSelection,
 } from '../types';
 import ModelPicker from './ModelPicker.vue';
 import HistoryPanel from './HistoryPanel.vue';
@@ -89,13 +91,16 @@ const form = reactive<ProfileInput>({
     interfaceMode: 'responses',
     protocolFallbackEnabled: true,
     reasoningEffort: 'low',
-    timeoutSeconds: null,
-    rulePresetId: null,
+    rulePresetId: CANDY_RULE_ID,
     catalogToken: null,
 });
 const rule = reactive<TestRule>({ prompt: DEFAULT_PROMPT, keyword: '高市早苗' });
 const presetName = ref('');
 const ruleTargetId = ref('default');
+// 用户删除糖果预设后不自动复建；新草稿回退现存默认规则，避免提交失效引用。
+const initialRulePresetId = computed(() =>
+    snapshot.value?.config.rulePresets?.some((item) => item.id === CANDY_RULE_ID) ? CANDY_RULE_ID : null,
+);
 const mailPanel = ref<InstanceType<typeof MailSettings>>();
 const mailDirty = ref(false);
 const exportScope = ref('filtered');
@@ -105,7 +110,7 @@ const importStrategy = ref('skip');
 const dialog = ref<{
     title: string;
     message: string;
-    actions: { id: string; label: string; primary?: boolean; danger?: boolean }[];
+    actions: { id: string; label: string; primary?: boolean; danger?: boolean; disabled?: boolean }[];
     kind?: string;
 } | null>(null);
 let dialogResolve: ((choice: string) => void) | null = null;
@@ -115,8 +120,7 @@ const preferences = reactive<Preferences>({
     alwaysOnTop: true,
     snapToEdge: true,
     opacity: 97,
-    timeoutSeconds: 60,
-    shortcutEnabled: true,
+    timeoutSeconds: 300,
     autoTestEnabled: true,
     autoTestIntervalMinutes: 3,
     historyMaxRecords: 500,
@@ -130,6 +134,8 @@ const diagnosticError = ref('');
 const diagnosticMessage = ref('');
 let diagnosticGeneration = 0;
 const selectedRecord = ref<TestRecord | null>(null);
+// 复制仅反馈给发起时的详情；离开再进入同一记录，也不能接受上次异步写剪贴板的迟到结果。
+let historyFeedbackGeneration = 0;
 const confirmDelete = ref(false);
 const confirmClear = ref(false);
 const restoredMessage = ref('');
@@ -150,6 +156,58 @@ const updateCheckedAt = ref('');
 let updateRevision = 0;
 let updateCleanup: (() => void) | undefined;
 const importInput = ref<HTMLInputElement>();
+// 两个管理入口同义；初次打开不预选任何分类，避免把按钮名称中的“所有”当成默认授权。
+const resetSelection = reactive<DataResetSelection>({
+    api: false,
+    rules: false,
+    widget: false,
+    history: false,
+    mail: false,
+});
+const resetSections: { id: keyof DataResetSelection; label: string; description: string }[] = [
+    {
+        id: 'api',
+        label: '接口配置',
+        description: '删除全部接口分组、API Key、模型目录缓存和通知恢复判断依据；历史记录保留。',
+    },
+    {
+        id: 'rules',
+        label: '测试规则',
+        description: '删除自定义规则，恢复日本首相、糖果、鹈鹕测试；所有保留接口改用糖果测试。',
+    },
+    {
+        id: 'widget',
+        label: '悬浮设置',
+        description:
+            '恢复默认外观、位置、300 秒超时、3 分钟自动测试和 500 条保留上限，关闭系统自启；历史后续按新策略清理。',
+    },
+    { id: 'history', label: '测试历史', description: '删除全部测试记录、最近结果和通知恢复判断依据。' },
+    {
+        id: 'mail',
+        label: '邮箱通知',
+        description:
+            'SMTP 恢复为 smtp.qq.com，清空收件人、授权码和通知恢复判断依据，关闭通知；已发出的邮件无法撤回。',
+    },
+];
+const resetSelectedCount = computed(() => resetSections.filter((item) => resetSelection[item.id]).length);
+const resetAllSelected = computed(() => resetSelectedCount.value === resetSections.length);
+// 草稿确认本身会 await；必须在确认之前占位，防止同一轮双击打开两个清空流程并提前解锁背景。
+let resetPending = false;
+const dialogActions = computed(
+    () =>
+        dialog.value?.actions.map((action) => ({
+            ...action,
+            disabled:
+                action.disabled ||
+                (dialog.value?.kind === 'reset' && action.id === 'next' && resetSelectedCount.value === 0),
+        })) ?? [],
+);
+
+/** 全选/取消全选只改变弹窗草稿，实际删除必须经过下一步的范围确认。 */
+function toggleResetAll(event: Event): void {
+    const checked = (event.target as HTMLInputElement).checked;
+    for (const item of resetSections) resetSelection[item.id] = checked;
+}
 
 // “关于”固定放在最后；后续功能入口插在它之前，保持首版的导航惯例。
 const nav = [
@@ -165,11 +223,14 @@ const selectedProfile = computed(() =>
 );
 /** 仅限制已核实的精确型号；未知代理别名不猜测，不自动改变用户当前档位。 */
 const reasoning = computed(() => reasoningSupport(form.model, form.interfaceMode, form.reasoningEffort));
-const draftEffectiveTimeout = computed(() =>
-    form.timeoutSeconds === null || String(form.timeoutSeconds) === ''
-        ? (snapshot.value?.config.preferences.timeoutSeconds ?? 60)
-        : form.timeoutSeconds,
-);
+// 连接诊断沿用草稿绑定的已保存规则；规则页未保存的超时不影响正式请求。
+const draftEffectiveTimeout = computed(() => {
+    const config = snapshot.value?.config;
+    const boundRule = form.rulePresetId
+        ? config?.rulePresets?.find((item) => item.id === form.rulePresetId)
+        : config?.rule;
+    return boundRule?.timeoutSeconds ?? config?.preferences.timeoutSeconds ?? 300;
+});
 const matching = computed(
     () => !ruleError(rule) && ruleAnswers(rule).some((answer) => sampleAnswer.value.includes(answer)),
 );
@@ -226,18 +287,31 @@ watch(snapshot, (value, previous) => {
     if (!value) return;
     if (!init.value) {
         init.value = true;
-        assignRule(value.config.rule);
-        presetName.value = value.config.defaultRuleName ?? '默认规则';
+        loadRuleTarget(initialRulePresetId.value ?? 'default');
         Object.assign(preferences, value.config.preferences);
         editProfile(value.config.profiles.find((item) => item.id === value.config.selectedProfileId) ?? null);
         ruleBaseline.value = ruleDraft();
         preferencesBaseline.value = JSON.stringify(preferences);
         return;
     }
-    // 卡片快捷切换只同步未编辑的规则/强度字段，不覆盖其他草稿或用户主动选择的值。
+    // 卡片快捷切换只同步未编辑的模型/规则/强度字段，不覆盖其他草稿或用户主动选择的值。
     const baseline = profileBaseline.value ? (JSON.parse(profileBaseline.value) as ProfileInput) : null;
     const liveProfile = value.config.profiles.find((item) => item.id === editingId.value);
     if (baseline && liveProfile) {
+        if (form.model === baseline.model) {
+            form.model = liveProfile.model;
+            baseline.model = form.model;
+        }
+        // 目录句柄只有在草稿仍使用同一地址/凭据时合并；不能恢复用户主动失效的旧目录。
+        if (
+            form.catalogToken === baseline.catalogToken &&
+            form.baseUrl === liveProfile.baseUrl &&
+            !form.apiKey &&
+            !form.removeKey
+        ) {
+            form.catalogToken = liveProfile.catalogToken ?? null;
+            baseline.catalogToken = form.catalogToken;
+        }
         if (form.rulePresetId === baseline.rulePresetId) {
             form.rulePresetId = liveProfile.rulePresetId ?? null;
             baseline.rulePresetId = form.rulePresetId;
@@ -258,6 +332,7 @@ watch(snapshot, (value, previous) => {
     }
 });
 watch(page, () => {
+    historyFeedbackGeneration++;
     error.value = '';
     savedMessage.value = '';
     confirmDelete.value = false;
@@ -265,9 +340,21 @@ watch(page, () => {
     if (contentScroll.value) contentScroll.value.scrollTop = 0;
     if (page.value === 'widget') void syncAutostart();
 });
+watch(
+    () => selectedRecord.value?.id,
+    () => {
+        historyFeedbackGeneration++;
+        if (page.value === 'history') {
+            savedMessage.value = '';
+            error.value = '';
+        }
+    },
+    // 同步失效，保证返回列表与剪贴板 Promise 在同一轮完成时也不会恢复旧提示。
+    { flush: 'sync' },
+);
 // 用户从任务管理器返回时重新读取，避免缓存的开关与系统状态不一致。
 function refreshAutostartOnFocus(): void {
-    if (page.value === 'widget') void syncAutostart();
+    if (page.value === 'widget' && !preparing.value && !saving.value) void syncAutostart();
 }
 onMounted(() => window.addEventListener('focus', refreshAutostartOnFocus));
 onUnmounted(() => window.removeEventListener('focus', refreshAutostartOnFocus));
@@ -367,8 +454,8 @@ function editProfile(profile: ModelProfile | null): void {
             profile && Object.prototype.hasOwnProperty.call(profile, 'reasoningEffort')
                 ? (profile.reasoningEffort ?? null)
                 : 'low',
-        timeoutSeconds: profile?.timeoutSeconds ?? null,
-        rulePresetId: profile?.rulePresetId ?? null,
+        // 只为新建草稿预选糖果；已有 null 表示明确沿用原默认题，编辑时不能偷偷改绑。
+        rulePresetId: profile ? (profile.rulePresetId ?? null) : initialRulePresetId.value,
         catalogToken: profile?.catalogToken ?? null,
     });
     showKey.value = false;
@@ -472,7 +559,7 @@ async function recoverSavedState(): Promise<void> {
         if (!(await refresh()) || !snapshot.value) return;
         Object.assign(preferences, snapshot.value.config.preferences);
         preferencesBaseline.value = JSON.stringify(preferences);
-        loadRuleTarget('default');
+        loadRuleTarget(initialRulePresetId.value ?? 'default');
         editProfile(
             snapshot.value.config.profiles.find(
                 (item) => item.id === snapshot.value?.config.selectedProfileId,
@@ -544,14 +631,7 @@ async function saveProfile(): Promise<void> {
         error.value = '请填写配置名称、接口地址和模型名称。';
         return;
     }
-    const timeout = normalizeNullableNumber(form.timeoutSeconds);
-    if (timeout !== null && (!Number.isInteger(timeout) || timeout < 10 || timeout > 300)) {
-        error.value = '配置超时应为 10—300 秒的整数，或留空继承全局设置。';
-        return;
-    }
-    await save('save_profile', {
-        input: { ...form, timeoutSeconds: timeout },
-    });
+    await save('save_profile', { input: { ...form } });
 }
 
 /** HTML number 输入清空会产生空串，IPC 前显式还原 null，禁止将空串变为 0。 */
@@ -560,6 +640,12 @@ function normalizeNullableNumber(value: unknown): number | null {
 }
 /** 严格保留有意义空白；全局规则与命名预设分别存储，编辑已有预设保持稳定 ID。 */
 async function saveRule(): Promise<void> {
+    const timeout = normalizeNullableNumber(rule.timeoutSeconds);
+    // 只保留正整数与精确表示校验；300 是默认值，不能再作为可配置上限。
+    if (timeout !== null && (!Number.isSafeInteger(timeout) || timeout < 1)) {
+        error.value = '规则超时请填写可精确保存的正整数秒，或留空继承悬浮设置。';
+        return;
+    }
     const validation = ruleError(rule);
     if (validation) {
         error.value = validation;
@@ -569,6 +655,8 @@ async function saveRule(): Promise<void> {
         error.value = '规则名称必须为 1—80 个字符。';
         return;
     }
+    // 清空的 number 输入在 IPC 前归一为 null；基线和提交使用相同语义。
+    rule.timeoutSeconds = timeout;
     if (ruleTargetId.value !== 'default') {
         const id = ruleTargetId.value === 'new' ? crypto.randomUUID() : ruleTargetId.value;
         const saved = await save('save_rule_preset', {
@@ -582,6 +670,7 @@ async function saveRule(): Promise<void> {
 function assignRule(value: TestRule): void {
     rule.prompt = value.prompt;
     rule.keyword = value.keyword;
+    rule.timeoutSeconds = value.timeoutSeconds ?? null;
     if (value.alternativeKeywords?.length) rule.alternativeKeywords = [...value.alternativeKeywords];
     else delete rule.alternativeKeywords;
 }
@@ -647,12 +736,13 @@ async function savePreferences(): Promise<void> {
     // 未明确编辑定时开关时，让后端在持锁写入时保留权威值，覆盖尚未送达的托盘事件竞态。
     let preserveAutoTest = input.autoTestEnabled === savedAutoState;
     const values = [
-        [input.timeoutSeconds, 10, 300],
         [input.autoTestIntervalMinutes, 1, 1440],
         [input.historyMaxRecords, 1, 5000],
         [input.historyRetentionDays, 1, 3650],
     ];
     if (
+        !Number.isSafeInteger(input.timeoutSeconds) ||
+        input.timeoutSeconds < 1 ||
         values.some(
             ([value, min, max]) =>
                 value !== null &&
@@ -703,12 +793,12 @@ async function savePreferences(): Promise<void> {
         preparing.value = false;
     }
 }
-/** 默认规则恢复内置题答但保留名称；自定义预设还原自身保存内容，绝不套入其他规则。 */
+/** 默认规则恢复内置题答和继承超时但保留名称；自定义预设还原自身保存内容，绝不套入其他规则。 */
 function restoreRule(): void {
     if (saving.value || preparing.value || busy.value) return;
     if (ruleTargetId.value === 'default') {
         assignRule({ prompt: DEFAULT_PROMPT, keyword: '高市早苗' });
-        restoredMessage.value = '已恢复内置题答草稿，规则名称保留；保存后生效。';
+        restoredMessage.value = '已恢复内置题答及继承超时草稿，规则名称保留；保存后生效。';
     } else {
         const preset = snapshot.value?.config.rulePresets?.find((item) => item.id === ruleTargetId.value);
         if (!preset) return;
@@ -751,10 +841,13 @@ async function control(action: 'close' | 'minimize' | 'maximize'): Promise<void>
     }
 }
 
-/** 历史详情复制包含规则快照，方便复核；不包含接口密钥。 */
+/** 历史详情复制包含规则快照，不含密钥；成功/失败反馈仅在当前详情有效，离开后静默收尾。 */
 async function copyRecord(): Promise<void> {
     const record = selectedRecord.value;
-    if (!record) return;
+    if (!record || page.value !== 'history') return;
+    const turn = ++historyFeedbackGeneration;
+    savedMessage.value = '';
+    error.value = '';
     try {
         await navigator.clipboard.writeText(
             `模型：${record.model}\n时间：${record.startedAt}\n判定：${statusText[record.status]}\n规则：${record.ruleName ?? '未记录'}\n判定答案（任一命中）：\n${ruleAnswers(
@@ -763,16 +856,21 @@ async function copyRecord(): Promise<void> {
                 .map((answer, index) => `${index + 1}. ${answer}`)
                 .join('\n')}\n题目：\n${record.prompt}\n\n回答：\n${record.answer}\n${record.error ?? ''}`,
         );
-        savedMessage.value = '已复制本条测试记录';
+        if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
+            savedMessage.value = '已复制本条测试记录';
     } catch {
-        error.value = '复制失败，请手动选择详情中的文本。';
+        if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
+            error.value = '复制失败，请手动选择详情中的文本。';
     }
 }
 
-/** 复制脱敏诊断摘要；仅包含版本、时间、错误和非敏感请求设置，不包含题目、回答或密钥。 */
+/** 复制脱敏诊断摘要，不含题目、回答或密钥；与记录复制共用页面世代，避免跨页或乱序反馈。 */
 async function copyDiagnostic(): Promise<void> {
     const record = selectedRecord.value;
-    if (!record) return;
+    if (!record || page.value !== 'history') return;
+    const turn = ++historyFeedbackGeneration;
+    savedMessage.value = '';
+    error.value = '';
     const summary = [
         '测智雷达诊断信息',
         `版本：v${version}`,
@@ -790,9 +888,11 @@ async function copyDiagnostic(): Promise<void> {
     ].join('\n');
     try {
         await navigator.clipboard.writeText(summary);
-        savedMessage.value = '已复制脱敏诊断信息';
+        if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
+            savedMessage.value = '已复制脱敏诊断信息';
     } catch {
-        error.value = '复制失败，请手动选择错误详情。';
+        if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
+            error.value = '复制失败，请手动选择错误详情。';
     }
 }
 
@@ -827,6 +927,80 @@ async function exportConfig(): Promise<void> {
 }
 async function chooseConfigImport(): Promise<void> {
     if (await mayLeave()) importInput.value?.click();
+}
+/**
+ * 先保护当前未保存草稿，再选择分类并二次确认；等待期间锁住背景，阻止重复提交。
+ * 已提交但刷新失败只允许重新读取，不能把同一次清空当成失败而重新执行。
+ * @param title 用户点击的入口名称；两个入口都清空所选分类并恢复初始状态。
+ */
+async function resetData(title: string): Promise<void> {
+    if (
+        resetPending ||
+        saving.value ||
+        preparing.value ||
+        busy.value ||
+        autostartBusy.value ||
+        diagnostic.value
+    )
+        return;
+    resetPending = true;
+    try {
+        if (!(await mayLeave()) || disposed) return;
+        preparing.value = true;
+        error.value = '';
+        savedMessage.value = '';
+        for (const section of resetSections) resetSelection[section.id] = false;
+        const choice = await ask(
+            title,
+            '选择需要清空并恢复初始状态的分类。两个入口执行相同操作；未勾选分类保留。',
+            [
+                { id: 'cancel', label: '取消' },
+                { id: 'next', label: '继续', primary: true },
+            ],
+            'reset',
+        );
+        if (choice !== 'next' || resetSelectedCount.value === 0) return;
+        const selection = { ...resetSelection };
+        const sections = resetSections.filter((section) => selection[section.id]);
+        const confirmation = await ask(
+            '确认清空所选分类',
+            `即将清空：${sections.map((section) => section.label).join('、')}。\n\n${sections.map((section) => `${section.label}：${section.description}`).join('\n')}\n\n此操作立即生效，无法撤销。配置备份不包含密钥、授权码和测试历史；需要保留时请先分别备份。`,
+            [
+                { id: 'cancel', label: '取消' },
+                { id: 'reset', label: '确认清空并恢复初始状态', danger: true, primary: true },
+            ],
+        );
+        if (confirmation !== 'reset') return;
+        const result = await call<{ warning?: string | null }>('reset_selected_data', { selection });
+        savedWarning.value = result?.warning ?? '';
+        if (!(await refresh()) || !snapshot.value) {
+            refreshRequired.value = true;
+            error.value = '所选数据已清空，但读取最新状态失败；请重新读取已保存配置，不要重复清空。';
+            return;
+        }
+        Object.assign(preferences, snapshot.value.config.preferences);
+        preferencesBaseline.value = JSON.stringify(preferences);
+        loadRuleTarget(initialRulePresetId.value ?? 'default');
+        editProfile(
+            snapshot.value.config.profiles.find(
+                (item) => item.id === snapshot.value?.config.selectedProfileId,
+            ) ?? null,
+        );
+        if (selection.api) {
+            diagnosticGeneration++;
+            catalogGeneration++;
+            fetchedModels.value = [];
+        }
+        if (selection.history) selectedRecord.value = null;
+        if (selection.widget) await syncAutostart();
+        mailDirty.value = false;
+        savedMessage.value = `已清空并恢复初始状态：${sections.map((section) => section.label).join('、')}。`;
+    } catch (cause) {
+        error.value = `清空未完成：${String(cause)}`;
+    } finally {
+        preparing.value = false;
+        resetPending = false;
+    }
 }
 /** 有大小上限的备份先由后端全量验证，预览后单次事务导入，避免部分保存。 */
 async function importConfig(event: Event): Promise<void> {
@@ -938,7 +1112,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
     diagnosticError.value = '';
     diagnosticMessage.value = '';
     try {
-        const args = { input: { ...form, timeoutSeconds: normalizeNullableNumber(form.timeoutSeconds) } };
+        const args = { input: { ...form } };
         if (kind === 'models') {
             const catalog = await call<ModelCatalog>('fetch_models', args);
             if (generation !== diagnosticGeneration) return;
@@ -1287,23 +1461,6 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         </div>
                     </div>
                     <div class="field-row">
-                        <label for="profile-timeout">配置超时</label>
-                        <div class="field">
-                            <div class="number-control">
-                                <input
-                                    id="profile-timeout"
-                                    v-model.number="form.timeoutSeconds"
-                                    type="number"
-                                    min="10"
-                                    max="300"
-                                    placeholder="继承全局"
-                                    :disabled="busy || saving || preparing"
-                                /><span>秒</span>
-                            </div>
-                            <p>留空时继承悬浮设置中的全局超时，测试连接使用同一有效值。</p>
-                        </div>
-                    </div>
-                    <div class="field-row">
                         <label>绑定规则预设</label>
                         <div class="field">
                             <ModelPicker
@@ -1392,6 +1549,28 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                                         ? '默认规则可改名；沿用默认的模型仍保持绑定。'
                                         : '保存后可在接口配置或卡片中绑定；改名保留模型绑定关系。'
                                 }}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="field-row">
+                        <label for="rule-timeout">规则超时</label>
+                        <div class="field">
+                            <div class="number-control">
+                                <input
+                                    id="rule-timeout"
+                                    v-model.number="rule.timeoutSeconds"
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    aria-describedby="rule-timeout-help"
+                                    placeholder="继承悬浮设置"
+                                    :disabled="busy || saving || preparing"
+                                /><span>秒</span>
+                            </div>
+                            <p id="rule-timeout-help">
+                                填写正整数秒；留空继承悬浮设置（当前
+                                {{ snapshot?.config.preferences.timeoutSeconds ?? 300 }}
+                                秒）。同题所有分组共用，协议切换共享总超时。
                             </p>
                         </div>
                     </div>
@@ -1515,7 +1694,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                     <div class="preference-row">
                         <div>
                             <label for="auto-interval">测试间隔</label>
-                            <p>默认 3 分钟；成功开始手动测试、开启定时或修改间隔后重新计时。</p>
+                            <p>默认 3 分钟；每次测试结束后等待完整间隔，开启定时或修改间隔也重新计时。</p>
                         </div>
                         <div class="number-control">
                             <input
@@ -1532,15 +1711,18 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                     <div class="preference-row">
                         <div>
                             <label for="timeout">请求超时</label>
-                            <p>超时后终止等待；协议回退也共用这一总期限，不重新计时。</p>
+                            <p id="timeout-help">
+                                填写正整数秒，默认 300 秒；规则未自定义超时时使用。协议回退共享总期限。
+                            </p>
                         </div>
                         <div class="number-control">
                             <input
                                 id="timeout"
                                 v-model.number="preferences.timeoutSeconds"
                                 type="number"
-                                min="10"
-                                max="300"
+                                min="1"
+                                step="1"
+                                aria-describedby="timeout-help"
                                 required
                                 :disabled="busy || saving || preparing"
                             /><span>秒</span>
@@ -1568,20 +1750,6 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         <input
                             id="snap-edge"
                             v-model="preferences.snapToEdge"
-                            class="switch"
-                            role="switch"
-                            type="checkbox"
-                            :disabled="busy || saving || preparing"
-                        />
-                    </div>
-                    <div class="preference-row">
-                        <div>
-                            <label for="shortcut">快捷键显示 / 隐藏</label>
-                            <p>Ctrl + Alt + P，隐藏后仍可从托盘恢复。</p>
-                        </div>
-                        <input
-                            id="shortcut"
-                            v-model="preferences.shortcutEnabled"
                             class="switch"
                             role="switch"
                             type="checkbox"
@@ -1627,7 +1795,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                             role="switch"
                             type="checkbox"
                             :checked="autostartEnabled"
-                            :disabled="autostartBusy || !autostartReady"
+                            :disabled="autostartBusy || !autostartReady || saving || preparing || busy"
                             @change="toggleAutostart"
                         />
                     </div>
@@ -1781,6 +1949,22 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         导入配置
                     </button>
                     <button
+                        type="button"
+                        class="button secondary small"
+                        :disabled="saving || preparing || busy || autostartBusy"
+                        @click="resetData('恢复所有设置')"
+                    >
+                        恢复所有设置
+                    </button>
+                    <button
+                        type="button"
+                        class="button danger secondary small"
+                        :disabled="saving || preparing || busy || autostartBusy"
+                        @click="resetData('清除所有数据')"
+                    >
+                        清除所有数据
+                    </button>
+                    <button
                         class="button"
                         type="submit"
                         form="widget-settings"
@@ -1893,9 +2077,28 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
             v-if="dialog"
             :title="dialog.title"
             :message="dialog.message"
-            :actions="dialog.actions"
+            :actions="dialogActions"
             @choose="resolveDialog"
         >
+            <div v-if="dialog.kind === 'reset'" class="reset-options">
+                <label class="reset-select-all">
+                    <input
+                        type="checkbox"
+                        :checked="resetAllSelected"
+                        :indeterminate="resetSelectedCount > 0 && !resetAllSelected"
+                        @change="toggleResetAll"
+                    />
+                    <span>全选</span
+                    ><span class="muted">已选 {{ resetSelectedCount }} / {{ resetSections.length }}</span>
+                </label>
+                <label v-for="section in resetSections" :key="section.id" class="reset-option">
+                    <input v-model="resetSelection[section.id]" type="checkbox" />
+                    <span
+                        ><strong>{{ section.label }}</strong
+                        ><small>{{ section.description }}</small></span
+                    >
+                </label>
+            </div>
             <div v-if="dialog.kind === 'import'" class="import-options">
                 <p>相同 ID 的配置与预设如何处理：</p>
                 <ModelPicker

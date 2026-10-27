@@ -8,6 +8,7 @@ export const statusText: Record<string, string> = {
     failed: '降智',
     error: '测试失败',
     cancelled: '已取消',
+    html: '已生成 HTML',
 };
 
 /**
@@ -61,6 +62,8 @@ export function historyCsv(records: TestRecord[]): string {
         'httpStatus',
         'requestId',
         'ruleVersion',
+        'answerType',
+        'answerParsingVersion',
     ] as const;
     const quote = (value: unknown): string => {
         let text = String(value ?? '');

@@ -1,6 +1,6 @@
 [package]
 name = "model-probe"
-version = "1.0.2"
+version = "1.0.3"
 description = "自定义题目与连续字符串规则的桌面测智雷达"
 authors = ["ahui"]
 license = "GPL-3.0-only"
@@ -18,7 +18,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +31,7 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 semver = "1"
 sha2 = "0.10"
+regex = "1"
 # 只允许加密 SMTP；异步发送不占用测试门禁，凭据由 Windows keyring 单独保存。
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "hostname"] }
 
@@ -42,6 +42,9 @@ tokio = { version = "1", features = ["test-util"] }
 [target.'cfg(windows)'.dependencies]
 # 复用 Windows 注册表安全封装；仅用户主动切换时修改本程序的当前用户启动项。
 windows-registry = "0.6.1"
+# 只为既有主 WebView 安装 iframe 导航保护，不创建原生预览窗口。
+webview2-com = "=0.39.1"
+windows = "=0.62.2"
 windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
 
 [profile.release]

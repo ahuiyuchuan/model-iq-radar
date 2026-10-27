@@ -8,17 +8,23 @@ use std::collections::HashSet;
 
 /// 解析当前配置实际使用的规则；悬空绑定是配置错误，不能静默改用默认题目。
 pub fn effective_rule(config: &AppConfig, profile: &ModelProfile) -> Result<TestRule, String> {
-    let rule = match &profile.rule_preset_id {
+    rule_for_binding(config, profile.rule_preset_id.as_deref())
+}
+
+/// 正式请求和草稿连接测试共用已保存规则解析；None 沿用默认，悬空 ID 必须明确报错。
+pub fn rule_for_binding(config: &AppConfig, preset_id: Option<&str>) -> Result<TestRule, String> {
+    let rule = match preset_id {
         Some(id) => {
             let preset = config
                 .rule_presets
                 .iter()
-                .find(|preset| &preset.id == id)
+                .find(|preset| preset.id == id)
                 .ok_or("模型绑定的规则预设不存在，请重新选择规则后保存。")?;
             TestRule {
                 prompt: preset.prompt.clone(),
                 keyword: preset.keyword.clone(),
                 alternative_keywords: preset.alternative_keywords.clone(),
+                timeout_seconds: preset.timeout_seconds,
             }
         }
         None => config.rule.clone(),
@@ -55,6 +61,9 @@ pub fn condition_fingerprint(config: &AppConfig, profile: &ModelProfile) -> Resu
         effective_timeout_seconds: u64,
     }
     let rule = effective_rule(config, profile)?;
+    let timeout = rule
+        .timeout_seconds
+        .unwrap_or(config.preferences.timeout_seconds);
     let conditions = Conditions {
         // 改用版本 2：同一网关地址更换凭据也可能切换账户或上游，必须重新测试。
         // 保存随机版本而非密钥摘要，避免把可用于离线猜测凭据的信息写入历史。
@@ -79,9 +88,7 @@ pub fn condition_fingerprint(config: &AppConfig, profile: &ModelProfile) -> Resu
             .reasoning_effort
             .as_deref()
             .filter(|value| !value.is_empty()),
-        effective_timeout_seconds: profile
-            .timeout_seconds
-            .unwrap_or(config.preferences.timeout_seconds),
+        effective_timeout_seconds: timeout,
     };
     let bytes = serde_json::to_vec(&conditions).map_err(|_| "请求条件摘要生成失败。")?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
@@ -107,8 +114,8 @@ pub fn validate_id(id: &str) -> Result<(), String> {
 
 /// 所有保存/导入入口复用的偏好边界；None 表示不使用相应用户限制，硬上限始终存在。
 pub fn validate_preferences(preferences: &Preferences) -> Result<(), String> {
+    validate_timeout_seconds(preferences.timeout_seconds)?;
     if !(80..=100).contains(&preferences.opacity)
-        || !(10..=300).contains(&preferences.timeout_seconds)
         || !(1..=1440).contains(&preferences.auto_test_interval_minutes)
         || preferences
             .history_max_records
@@ -117,7 +124,7 @@ pub fn validate_preferences(preferences: &Preferences) -> Result<(), String> {
             .history_retention_days
             .is_some_and(|days| !(1..=3650).contains(&days))
     {
-        return Err("偏好设置超出允许范围：透明度 80—100、超时 10—300 秒、自动间隔 1—1440 分钟、历史 1—5000 条或 1—3650 天。".into());
+        return Err("偏好设置超出允许范围：透明度 80—100、自动间隔 1—1440 分钟、历史 1—5000 条或 1—3650 天。".into());
     }
     Ok(())
 }
@@ -141,7 +148,7 @@ pub(crate) fn validate_stored_config(config: &AppConfig) -> Result<(), String> {
     if config
         .rule_presets
         .iter()
-        .filter(|item| item.id != CANDY_RULE_ID)
+        .filter(|item| !is_builtin_rule_id(&item.id))
         .count()
         > 100
     {
@@ -160,6 +167,7 @@ pub(crate) fn validate_stored_config(config: &AppConfig) -> Result<(), String> {
             prompt: preset.prompt.clone(),
             keyword: preset.keyword.clone(),
             alternative_keywords: preset.alternative_keywords.clone(),
+            timeout_seconds: preset.timeout_seconds,
         }
         .validate()?;
     }
@@ -182,12 +190,6 @@ pub(crate) fn validate_stored_config(config: &AppConfig) -> Result<(), String> {
         }
         normalized_endpoint(profile)?;
         validate_reasoning_effort(profile.reasoning_effort.as_deref())?;
-        if profile
-            .timeout_seconds
-            .is_some_and(|timeout| !(10..=300).contains(&timeout))
-        {
-            return Err("模型超时应为 10—300 秒，或留空继承全局设置。".into());
-        }
         effective_rule(config, profile)?;
     }
     if config

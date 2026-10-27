@@ -1,6 +1,88 @@
-# 测智雷达 v1.0.2 复核记录
+# 测智雷达 v1.0.3 本地复核记录
 
-作者：ahui。日期：2026-10-26。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+作者：ahui。日期：2026-10-27。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+
+## v1.0.3 发布追加修复：清空与快捷键移除（2026-10-27）
+
+- 用户反馈清空失败，错误为 `Ctrl+Alt+P` 被占用。已确认根因：清空“悬浮设置”使用默认偏好，原默认会重新注册该组合键，注册失败导致清空事务中断。移除前端设置、偏好字段、全局插件、注册/注销与启动回退逻辑，显示窗口保留托盘及重复启动入口。
+- 旧配置和 v1/v2/v3 备份中的 `shortcutEnabled` 兼容忽略；后续保存、重置及导出不再写出。其余偏好、schema v3 和备份 v3 保持，Escape/日期选择/复制等页面键盘操作保留；无需删除或重建正式数据库。
+- `npm test -- --reporter=json --outputFile=<仓库外报告>`：9 个文件、185 项通过，0 失败。新增两个管理入口单独重置悬浮设置的成功回归，并核对已移除快捷键选项和原防重逻辑。
+- `run-build.ps1 test`：92 项通过，0 失败（61 单元、17 数据完整性、14 请求回归）。新增旧快捷键 true/false、单独重置/全选重置、落盘后重启，以及旧备份字段忽略并保留其他偏好的回归；沿用全部 32 分类组合及中途失败回滚测试。
+- `cargo metadata --offline --filter-platform x86_64-pc-windows-msvc` 生成锁文件，移除快捷键专用依赖且不升级剩余依赖；初次全平台离线元数据因未缓存 Android crate 失败，改用实际 Windows 目标后成功。`node scripts/generate_notices.mjs` 重新生成 37 个前端包/315 个 Windows crate 声明，不手改第三方原文。
+- `run-build.ps1 clippy` 全目标 `-D warnings`、`npm run format:check`、`npm exec -- prettier --check docs`、rustfmt 和 `git diff --check` 均通过。`run-build.ps1 build` 完成 TypeScript/Vite 与 Windows x64 生产构建；保留既有 chunk 体积提示（524.57 kB，gzip 187.96 kB）及 MSVC 导入库 stdout 提示，无构建错误。
+- `scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.3-reset-fix` 检查版本、PE x64、应用输入时间及复制摘要；文件/产品版本 1.0.3，16,536,064 字节，生成时间 2026-10-27 12:42:52（本机时间），SHA-256 `66ccf19e0d3f825d31e932f52d2e6c021d01ddf49c9a83995d6ac51a80b2e95a`。目录仅一个 EXE，正式二进制无 QA identifier；此前 16,701,440 字节的 EXE 已被替代。
+- 首次 v1.0.3 发布已完成后收到追加修复，随即转为草稿；用户已明确授权修复后覆盖原提交/Tag，提交消息保持此前批准的原文。发布前重新生成唯一 EXE，不复用下方旧构建；未继续使用已被 Escape 中止的桌面控制，也未访问正式数据库或凭据。
+
+## v1.0.3 首次发布前全面复核（2026-10-27，追加修复前记录）
+
+- 用户已完成人工 Beta 预览并授权测试；本轮相对基准 `23848a0` 检查全部 47 个修改/新增文本。复核阶段未暂存、提交、推送或创建 Tag/Release；用户审阅通过后已另行授权提交与正式发布。以下 Beta 与辅助进程数字是历史证据，不能替代当前结果。
+- `npm test -- --reporter=json --outputFile=<仓库外报告>`：9 个文件、183 项通过，0 失败，日志无 Vue/测试警告。覆盖 20 个前后端共用 HTML 识别样例，以及预览加载/尺寸/背景/迟到隔离、四项筛选、菜单保留 iframe、清空防重和复制跨页反馈。
+- `run-build.ps1 test`（`cargo test --locked --manifest-path src-tauri/Cargo.toml`）：90 项通过，0 失败，包括 60 单元、16 数据完整性、14 请求回归。新增全部 32 种分类选择边界、事务中途失败回滚、清空通知依据持久化，以及内置规则迁移立即落盘/写失败保留/删除后重启不复建。
+- `run-build.ps1 clippy`：全目标 `-D warnings` 通过。`npm run format:check`、`npm exec -- prettier --check docs`、`cargo-fmt --manifest-path src-tauri/Cargo.toml -- --check`、`git diff --check` 通过；PowerShell AST 检查交付脚本无语法错误。
+- 本轮修复：分类清空在首个 `await` 前增加占位，阻止双击重入；放大/收回在移动 iframe 前进入等待态，修复 load 事件晚于空白帧。按追加要求统一最少 300ms，新增 0/100/500ms 就绪、等待中再次 load/切换记录及卸载计时清理用例；失败及时反馈、12 秒超时不变。
+- 删除废弃截图模块/依赖和旧原生方案的 Windows feature；修正过时测试 Mock/选择器、102 条规则容量预期及新增样例类型字段。`node scripts/generate_notices.mjs` 离线重生成 37 个前端包/322 个 Windows crate；与 HEAD 相比仅产品版本标识变化，第三方原文保持。
+- 原生桌面实测使用独立 `com.ahui.model-probe.qa-review-20261027`、虚构配置和用户提供的黑天鹅动画。实际检查卡片直接显示、完整画面缩放、页内放大/Escape 后恢复尺寸位置、放大内右键不弹菜单、历史列表实时动画及点击放大、详情多列与动画直接显示、复制后返回列表无旧提示；未出现额外预览窗口。只通过隔离程序操作，无真实模型或 SMTP 请求。
+- 最后一次启动桌面复验时 Computer Use 报告用户按物理 Escape 停止；随后停止全部界面控制。新增 300ms 的精确时间由可控时钟回归验证，最终 QA 构建成功，未完成该追加改动的最后一次原生桌面复验，不能将之前桌面结果写成最终 300ms 原生实测。
+- 仓库外只读文本核对脚本：47 个改动文件严格 UTF-8/无 BOM/LF/无替换字符，22 个本地 Markdown 目标存在，六处工程版本均 1.0.3，逐文件索引无遗漏，明显令牌格式扫描无命中。发布说明改用正式 Tag 的绝对链接，发布后可直接用于 GitHub。检查注释与使用手册，移除旧截图/心跳/固定 1024×768 描述；仅历史验证记录保留旧实现说明。
+- `run-build.ps1 build`：`vue-tsc --noEmit`、Vite 和 Windows x64 `tauri build --no-bundle` 均通过；仅有既有前端 chunk 体积提示（525.03 kB，gzip 188.08 kB）及 MSVC 导入库 stdout 提示，未出现构建错误。
+- `scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.3-reviewed`：检查 PE x64、EXE 版本、应用输入时间及复制摘要；输出目录仅含 `Model-IQ-Radar-v1.0.3-Windows-x64.exe`。文件/产品版本 1.0.3，16,701,440 字节，生成时间 2026-10-27 12:19:46（本机时间），SHA-256 `adac703e47a710e19634af16bcce048567686c7aa65ec0252c66880fe224a4fb`，另行确认正式二进制不包含 QA identifier；未生成 ZIP 或附带资产。
+- 未实测真实模型服务、真实邮件投递、全部物理 DPI/多屏、登录自启、休眠唤醒和屏幕阅读器组合。iframe 共享浏览器资源，不能沿用旧工作进程的死循环硬终止结论；外部系统状态补偿无法保证与 SQLite 完全原子。指定 Java 手册已阅读，本项目采用 Vue/TypeScript/Rust 规范，Java/JVM/MyBatis 专属条款不适用。
+
+## Beta 4（2026-10-27，历史出包记录，人工预览已通过）
+
+- 交付：`release-artifacts/v1.0.3-beta4-unified-preview/Model-IQ-Radar-v1.0.3-beta.4-Windows-x64.exe`，文件/产品版本 1.0.3，16,709,632 字节，SHA-256 `7fd7755f0a5223f23a9ee94b1c0475ad129446ccb5791c51800f53c3d58ecceb`；目录仅一个 EXE，无 ZIP。
+- 实际执行：受影响文件 `npm exec prettier -- --write ...`、`cargo-fmt fmt --manifest-path src-tauri/Cargo.toml` 和 `run-build.ps1 build` 均完成；其中 `vue-tsc --noEmit`、Vite 和 Windows `tauri build --no-bundle` 成功。构建仅有既有 chunk 大小与链接器导入库提示；`package_exe.ps1` 核对 PE x64、版本、应用输入时间与复制摘要。15 个本轮文件通过有效 UTF-8/无 BOM/LF 检查，读取 `git status` 与目标文件变更统计；未提交、推送或创建 Tag/Release。
+- 本轮范围：三处 HTML 共用预览、加载动画、片段选择、点击放大和关闭；放大取消应用额外面板/留白，历史列表放大期间保留会话。打开菜单不再暂停预览或显示“预览已停止”；列表“思考强度”左对齐，详情复制反馈按页面世代隔离。
+- 主要实现文件：`HtmlPreview.vue`、`AnswerContent.vue`、`HistoryAnswerPreview.vue`、`htmlSandbox.ts` 与 `style.css` 统一预览；`HistoryPanel.vue`、`Settings.vue` 处理列表布局/入口与复制反馈；`Widget.vue`、`bridge.ts`、`model.rs` 调整默认选择及规则恢复。README、使用手册、变更日志和本地发布说明已同步；沿用 Vue/TypeScript/Rust 规范，Java 专属接口和工具条款不适用于本项目。
+- 新建接口默认绑定现存糖果预设，规则编辑页首次打开也选糖果；已有接口绑定保留，糖果已删时新建回退现存默认规则。明确清空/恢复规则时重建内置题目并把保留接口绑定糖果；不升级 schema 或配置备份格式。
+- 按用户要求，只进行格式整理、出包必需的类型/编译检查和单 EXE 交付核对；不启动应用，不运行测试、Clippy、真实模型/SMTP 或全面未提交文件审阅。加载时序、三处视觉/交互、菜单连续播放、规则默认值与剪贴板导航回归仍等待人工预览后明确授权；以下旧测试数字不代表本轮通过。
+
+## 先前 iframe Beta 3（2026-10-27，历史出包记录）
+
+- 最终交付：`release-artifacts/v1.0.3-beta3-preview-rules-history/Model-IQ-Radar-v1.0.3-beta.3-Windows-x64.exe`，文件/产品版本均为 1.0.3，16,709,632 字节，SHA-256 `31d632705e6e3f806a7173773d80255772179e2c0956388e3ee1371b60165438`；交付目录仅一个 EXE。
+- 本轮实际命令：受影响文件 `npm exec prettier -- --write ...`、`cargo-fmt fmt --manifest-path src-tauri/Cargo.toml`、`run-build.ps1 build`（`vue-tsc --noEmit`、Vite 生产构建及 `tauri build --no-bundle`）均完成。最终 Windows release 构建成功；仅保留既有前端 chunk 大小和链接器导入库提示。`scripts/package_exe.ps1` 检查 PE x64、工程/文件版本、输入时间和复制摘要，随后按 Beta 3 命名交付。没有启动应用、运行自动化测试、Clippy、全面审查或真实模型/SMTP 请求；没有 Git 提交、推送、Tag 或 Release。
+
+- 最终 Beta 3 另含 SMTP 默认 `smtp.qq.com`：前后端新建/重置一致，旧空表单只补草稿，自定义主机不覆盖；关闭通知时允许未填写账户的默认表单保存/备份，不改变启用和试发的凭据要求。未执行 SMTP 投递或回归测试。
+
+- 本轮另按最新要求删除预览十分钟自动停止计时器及原生文档过期判断；保留正常卸载释放，并在原生宿主销毁时释放文档。本项未进行时长测试，包含在待人工预览的最终 Beta 3。
+
+- Beta 3 继续包含最新预览反馈：关闭按钮独立实色 hover/focus/active；1440×1000 基准视口在 load/字体就绪后测量一次完整页面，限制在 4096×8192 内并整体居中适配。此项同样仅编译出包，尚未执行运行或视觉验证。
+
+- 本轮 Beta 3 新增鹈鹕内置题目、日本首相正文精确迁移、五类可选清空/恢复初始状态，及历史四项筛选、快照摘要和自适应详情。按用户再次明确要求，仅格式化及编译单 EXE，不执行自动化测试、桌面验证或全面未提交文件复核；相关回归与最终验收等待人工预览后明确授权。旧测试数字不代表本轮变更已验证。
+
+- 最新 Beta 2 将历史列表右侧改为与悬浮卡片相同的 iframe 实时预览，仅可见行挂载，取消截图生成；预览留边与放大层优先沿用 HTML 自身纯色背景，透明或未声明时使用卡片深色；关闭宿主默认右键菜单、浏览器保存/打印快捷入口和下载浮层，放大改为保留标题栏与边缘留白的页内面板。按用户要求本轮仅执行格式化、编译出包及交付文件核对，未启动新一轮测试，等待人工预览后的明确通知。
+- 已用页面内 sandbox iframe 替代原生预览子窗口/辅助进程，1440×1000 基准画布、首帧有界扩展后等比缩放，小预览不接管鼠标，放大为页内弹层。
+- 根据最新反馈去掉外层工具栏和说明，画面直接填满回答区域，点击放大；这次界面简化之后只执行出包必需的编译，不将此前测试结果视为当前版本的最终验证。
+- 用户明确要求先提供单 EXE Beta，待人工预览并明确允许后，才开始后续自动化测试与全面复核。组件测试适配、集成检查、文档索引和完整未提交文件审阅仍待继续。
+- 以下原生进程方案的历史证据已被当前实现替代，不能据此宣称当前 Beta 支持进程级硬隔离、无响应强制回收，或已经完成全面检查。
+
+## v1.0.3 早期原生辅助进程验证（2026-10-27，历史实现，已被 iframe 替代）
+
+- `npm version 1.0.3 --no-git-tag-version --ignore-scripts` 更新 npm 清单；随后单独同步 Cargo/Tauri 清单并用 Cargo 元数据生成 Cargo.lock；HTML 预览显式引用现有锁定版本的原生依赖，未升级既有依赖。
+- `npm test -- --reporter=dot`：9 个文件、169 项通过；包含正整数超时、快捷模型选择、html-v1 共用样例、源码保留、历史默认预览、失败重载后状态恢复、迟到启动取消和缩略图队列回归。新增首帧等待 7 秒仍不误发心跳、慢心跳合并及旧心跳不覆盖新会话两项回归。
+- `run-build.ps1 test`：86 项 Rust 测试通过（57 单元、15 数据完整性、14 请求回归），覆盖 HTML 不进入关键词判定、新旧 HTML 历史不发信且不推进文字通知状态，以及原有调度、超时、备份/schema v3 和模型目录回归。
+- `run-build.ps1 clippy`：所有 target 按 `-D warnings` 通过；`cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`、`npm run build` 及 Windows `tauri build --no-bundle` 通过。最终生产 EXE 版本为 1.0.3，大小 16,923,648 字节，SHA-256 为 `5dd15eda8d0515669420aa2c4e621dc96c4162c236db5c382a322207017535b9`，本次生成时间为 2026-10-27 09:02（本机时间）。此前同版本构建不能代替该文件。
+- `npm run format:check`、`npx prettier --check docs`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 和 `git diff --check` 通过；改动文本严格 UTF-8、无 BOM、LF，无替换字符，六处工程版本均为 1.0.3。
+- `python -B scripts/check_html_preview.py --exe <debug/release EXE> --html-file <用户提供的 UTF-8 HTML>`：调试和最终生产辅助进程均验证 SVG/HTML 实际绘制、宿主桥接隔离、零本机 TCP/HTTP 请求、拒绝其他 data 页面导航、data/blob 图片、脚本异常报告、死循环有界停止，共七例通过。所有截图严格为 640×360；工作进程从启动到回收每 10ms 采样，未出现用户可见的顶层承载窗口。Tao 的透明线程消息接收器按已核实源码单独排除。用户提供的“黑天鹅的单车漫游”连续两帧像素不同，画面已实际查看；最终复验未指定 `--output`，没有保存产品截图。
+- 本轮修复原生文档源码转义及 data 文档导航被拒绝导致的空白截图；文档 URL 按本次完整源码精确放行，子框架导航全部拒绝。HTML 新旧记录隔离通知状态；预览失败/恢复不改写历史结论。原生辅助进程不初始化 Tauri/正式数据库/凭据。
+- 针对用户反馈再次定位内嵌空白根因：顶层 Wry `set_bounds` 会移动复用的承载 HWND。改为真正的 WS_CHILD 承载窗口及 `build_as_child` 独立 WebView 子容器，保持裁剪和宿主坐标；缩略图宿主始终隐藏，显式初始化尺寸。首帧就绪后开始运行租约并发送前端心跳；监督错误保留具体安全原因。
+- CUA 原生桌面使用独立 identifier `com.ahui.model-probe.qa-html-20261027`、虚构 SQLite 配置及用户提供的动画，确认悬浮直接显示、源码/效果切换、移动后跟随、收起、列表缩略图、详情直接显示与滚动裁剪、停止/重载、放大及关闭后的具体提示。隔离构建/种子和运行副本均在仓库外；不读取正式数据库或凭据，不请求真实模型/SMTP。
+- 全部 48 个未提交文本逐文件检查见 [FILE_AUDIT-v1.0.3.md](docs/FILE_AUDIT-v1.0.3.md)。严格 UTF-8、无 BOM、LF、无替换字符，六处版本一致，审阅索引覆盖所有修改/新增文件；本地 Markdown 目标检查通过。没有覆盖、删除或重置此前 v1.0.3 工作。
+- `scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.3-html-preview-fix` 校验 PE x64、文件/产品版本、构建输入时间及 SHA-256；交付目录仅一个 `Model-IQ-Radar-v1.0.3-Windows-x64.exe`，与最终构建逐字节一致，没有 ZIP 或附带文件。
+- `node scripts/generate_notices.mjs` 离线重新生成第三方声明：37 个前端包、322 个 Windows crate。新增直接依赖均已在既有传递依赖锁定集合内，许可证正文未变化。
+- CUA 隔离浏览器夹具核对 360px 悬浮窗有目录/空目录的 70%/30% 与 65%/25%/10% 布局、规则页独立超时字段、运行中“本次结束后计时”；夹具不访问真实 API、SMTP、数据库或凭据。
+- 开发预览排除监听 `src-tauri/target` 和 `release-artifacts`，修复 Windows 构建/交付 EXE 引起的 Vite `EBUSY`；前轮已验证独占打开交付 EXE 并更新文件时间后预览仍运行。最终资源仍有约 512.53 kB 的 chunk 体积提示，原生链接器的导入库 stdout 提示不影响构建成功，独立 Clippy 严格检查通过。
+- 按用户反馈取消规则/全局的 10—300 秒业务限制，300 秒仅为默认值。回归覆盖 1/9/600/3600 秒保存和备份往返、空规则继承、零/负数/小数/精度溢出拒绝，以及 1 秒真实超时和 600 秒预算的本机请求。CUA 浏览器实查规则输入 600 秒和新提示、全局默认 300 秒及说明，无布局裁切。
+- 未实测真实模型/SMTP 投递、原生 WebView2 多 DPI、多屏及硬件休眠唤醒；浏览器布局和确定性回归不能代替这些端到端验证。已阅读指定 Java 手册并采用通用要求，本项目 Vue/TypeScript/Rust 没有 Java/JVM/MyBatis 组件，语言专属规范不适用。
+- 本轮源码、验证记录和单个 EXE 测试文件均仅在本地保留，未创建 Git 提交、Tag 或 GitHub Release；历史 v1.0.2 验证数字和下载链接仍表示已发布版本。
+
+### 前轮 v1.0.3 本地测试包（HTML 功能加入前）
+
+- 以下 EXE/摘要属于 HTML 功能加入前的交付，不能作为本轮 HTML 功能验证或最新构建。该轮文件/产品版本均为 1.0.3；只复制单个 EXE，不启动正式应用或读取正式数据库/凭据。
+- 通过 `scripts/package_exe.ps1` 核对 PE x64、文件版本和 SHA-256，将唯一的 EXE 复制到 `release-artifacts/v1.0.3/`；EXE SHA-256 为 `bf120d658d16a76107b3af9a5854cdfacd1904edab2a6fac39114a35a05f3f54`。后续 Tag/Release 同样只上传该 EXE，不生成 ZIP。旧版 ZIP 仅作为历史交付物保留，不代表 v1.0.3 构建。
+- 本地测试沿用正式应用标识，首次运行前应退出旧版并备份完整 `%APPDATA%\com.ahui.model-probe` 数据目录；schema v3 升级后不能直接切回旧版 EXE。
+
+以下保留 v1.0.2 及更早的历史验证记录，旧格式说明和数字仅对当时版本成立；当前兼容边界以 v1.0.3 使用手册为准。
 
 ## v1.0.2 发布核验（2026-10-26）
 
@@ -152,7 +234,7 @@
 ## 尚未实测的边界
 
 - 未调用真实第三方模型、发送真实邮件或使用真实用户凭据；本机 SMTP 验证服务未提供 STARTTLS 时拒绝发送账号和授权码，但不能代替各服务商的连通性验收。
-- 邮件网络发送最多同时一封、无等待/补发队列；快速连续不同事件遇到发送占用时独立提示失败，测试结果不受影响。
+- 真实 SMTP 并发投递仍需服务商端到端验收；当前每封使用独立连接，无全局忙碌拦截，无自动重试或历史补发，发送失败不影响测试结果。
 - 全套物理多屏/DPI、屏幕热插拔、系统睡眠/唤醒及断网恢复未进行硬件端到端遍历；已覆盖确定性时钟、门禁与纯坐标边界。
 - 前一轮原生隔离验收使用独立 identifier 与虚构 SQLite 数据：启动顶部吸附收为图标、恢复卡片、标题栏单击无位移后仍可收回、打开设置和历史筛选入口、JSON 实际下载并核对原始 Markdown、Alt+F4 弹出草稿保护、保存后窗口销毁并核对持久化，均已执行。本轮新增恢复态与关闭失败主要由组件/真实浏览器覆盖，未再进行原生实机复验；已有原生验收不代表所有 DPI/拖动路径已遍历。
 - 本轮深色日历已在实际浏览器验收并构建进桌面 EXE，尚未再次启动正式标识的桌面程序验收 WebView2 中的全部键盘/缩放路径，避免读写真实用户数据库；不同系统语言及屏幕阅读器的完整组合未遍历。

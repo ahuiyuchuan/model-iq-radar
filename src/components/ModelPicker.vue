@@ -325,9 +325,7 @@ defineExpose({ close });
                 @click="choose(index).catch(report)"
             >
                 <span class="option-copy"
-                    ><span>{{
-                        summaries?.[item.id] && showModel ? `${item.name} : ${item.model}` : item.name
-                    }}</span
+                    ><span>{{ summaries?.[item.id] ? `${item.name} : ${item.model}` : item.name }}</span
                     ><small v-if="summaries?.[item.id]">{{ summaries[item.id]!.rule }}</small>
                     <small v-else-if="item.model">{{ item.model }}</small></span
                 >

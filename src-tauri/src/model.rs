@@ -3,24 +3,62 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 默认题目仅保留五行正文；前端恢复默认使用同文案，已保存的自定义规则不受影响。
-pub const DEFAULT_PROMPT: &str = "请快速按顺序回答：\n1. 仅依据你的记忆，你所知道的最新一位日本首相是谁？\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
+/// IPC 的 JavaScript number 必须精确往返；这是存储表示边界，不是业务超时上限。
+const MAX_SAFE_TIMEOUT_SECONDS: u64 = 9_007_199_254_740_991;
+
+/// 验证秒数为可精确保存的正整数；规则、全局偏好和请求入口共用，不再限制为 10—300 秒。
+/// 超过前端安全整数范围时明确拒绝，避免 JSON 往返悄悄修改用户填写的秒数。
+pub fn validate_timeout_seconds(seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Err("超时必须填写正整数秒。".into());
+    }
+    if seconds > MAX_SAFE_TIMEOUT_SECONDS {
+        return Err("超时数值超过可精确保存的整数范围，请减小秒数。".into());
+    }
+    Ok(())
+}
+
+/// 按用户原文保留题目与要求之间的空行；只迁移完全一致的旧内置正文，不覆盖自定义题目。
+pub const DEFAULT_PROMPT: &str = "仅依据你的记忆，你所知道的最新一位日本首相是谁？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
+const LEGACY_DEFAULT_PROMPT: &str = "请快速按顺序回答：\n1. 仅依据你的记忆，你所知道的最新一位日本首相是谁？\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
 pub const RULE_VERSION: &str = "literal-contains-v1";
 /// 多答案仍逐项按原文连续匹配；任一命中即可，不能把答案拼接后交给模型。
 pub const ANY_RULE_VERSION: &str = "literal-contains-any-v1";
 pub const CANDY_RULE_ID: &str = "builtin-candy-test";
+pub const PELICAN_RULE_ID: &str = "builtin-pelican-test";
+/// 自带规则补入版本独立于 SQLite schema；v2 增加鹈鹕题目并精确迁移旧默认正文。
+pub const BUILTIN_RULES_VERSION: u8 = 2;
+/// “禁止联网/读文件”是发给被测模型的题目要求，不是客户端或开发工具的操作指令。
+pub const PELICAN_PROMPT: &str = "创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
 /// 用户提供的自带题目原文；只作初始化，不覆盖已保存的修改或删除。
 pub const CANDY_PROMPT: &str = "请完成回答下面的问题，答案要求只能由数字和“颗”组成，例如10颗、20颗、30颗；数字与“颗”之间不得有空格：\n\n在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4";
 
-/// 新配置默认包含糖果测试，稳定 ID 便于一次性迁移与模型绑定。
+/// 新配置包含糖果和鹈鹕测试；HTML 识别先于关键词判定，备用关键词不评价动画质量。
 pub fn builtin_rule_presets() -> Vec<RulePreset> {
-    vec![RulePreset {
-        id: CANDY_RULE_ID.into(),
-        name: "糖果测试".into(),
-        prompt: CANDY_PROMPT.into(),
-        keyword: "21颗".into(),
-        alternative_keywords: Vec::new(),
-    }]
+    vec![
+        RulePreset {
+            id: CANDY_RULE_ID.into(),
+            name: "糖果测试".into(),
+            prompt: CANDY_PROMPT.into(),
+            keyword: "21颗".into(),
+            alternative_keywords: Vec::new(),
+            timeout_seconds: None,
+        },
+        RulePreset {
+            id: PELICAN_RULE_ID.into(),
+            name: "鹈鹕测试".into(),
+            prompt: PELICAN_PROMPT.into(),
+            // 沿用现有非空答案契约；仅非 HTML 回答走普通文本匹配，HTML 始终中性展示、不发信。
+            keyword: "<svg".into(),
+            alternative_keywords: Vec::new(),
+            timeout_seconds: None,
+        },
+    ]
+}
+
+/// 两个固定 ID 不占用 100 个自定义预设配额；启动、保存及备份必须使用同一规则。
+pub fn is_builtin_rule_id(id: &str) -> bool {
+    matches!(id, CANDY_RULE_ID | PELICAN_RULE_ID)
 }
 
 /// 默认规则名称只用于展示；旧配置缺字段时命名为日本首相测试，不参与条件摘要。
@@ -50,8 +88,9 @@ pub struct ModelProfile {
     /// 推理强度；`null` 表示不发送该参数，旧配置升级为默认 low。
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: Option<String>,
-    /// 模型级超时（秒）；为空时继承全局偏好。
-    #[serde(default)]
+    /// 仅兼容读取 v1.0.2 及以前的接口超时；v1.0.3 起不生效、不再序列化。
+    /// 同题可绑定多个接口且旧值可能冲突，因此统一采用规则/全局值，不做隐式合并。
+    #[serde(default, skip_serializing)]
     pub timeout_seconds: Option<u64>,
     /// 可选规则预设绑定；空值沿用全局规则。
     #[serde(default)]
@@ -88,6 +127,9 @@ pub struct TestRule {
     /// 首个答案继续使用 keyword，旧多行字符串不拆分；缺字段等同单答案。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternative_keywords: Vec<String>,
+    /// 本题请求总超时（正整数秒）；None 继承全局值，旧数据缺字段时同样继承。
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 /// 可复用的题目与连续字符串规则；历史仍保存实际使用的文本快照。
@@ -100,6 +142,9 @@ pub struct RulePreset {
     pub keyword: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternative_keywords: Vec<String>,
+    /// 该题所有绑定模型共用的总超时；None 继承悬浮设置，不读取旧接口覆盖值。
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 impl Default for TestRule {
@@ -108,6 +153,7 @@ impl Default for TestRule {
             prompt: DEFAULT_PROMPT.into(),
             keyword: "高市早苗".into(),
             alternative_keywords: Vec::new(),
+            timeout_seconds: None,
         }
     }
 }
@@ -115,6 +161,9 @@ impl Default for TestRule {
 impl TestRule {
     /// 空答案会令所有回答通过；保存/导入/执行前均校验，精确重复也拒绝。
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(seconds) = self.timeout_seconds {
+            validate_timeout_seconds(seconds)?;
+        }
         if self.prompt.trim().is_empty() || self.prompt.chars().count() > 20_000 {
             return Err("题目必须为 1—20000 个字符，不能只有空白。".into());
         }
@@ -151,6 +200,7 @@ impl TestRule {
 }
 
 /// 桌面偏好。超时为秒；透明度只用于前端面板背景。
+/// 已移除全局显示/隐藏快捷键；旧 shortcutEnabled 由 serde 忽略，保存和备份不再写出。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -158,11 +208,11 @@ pub struct Preferences {
     pub always_on_top: bool,
     pub snap_to_edge: bool,
     pub opacity: u8,
+    /// 全局总超时，正整数秒，默认 300；仅在规则未覆盖时使用，校验 IPC 精度边界。
     pub timeout_seconds: u64,
-    pub shortcut_enabled: bool,
     /// 默认启用、每三分钟一次；没有选定模型时不会发送请求。
     pub auto_test_enabled: bool,
-    /// 分钟数，范围 1—1440；成功开始手动测试、开启自动测试或修改间隔时重新计时。
+    /// 分钟数，范围 1—1440；手动/自动测试结算后等待完整间隔，开启或修改间隔也重新计时。
     pub auto_test_interval_minutes: u64,
     /// 历史最多保留条数；None 仅使用 5000 条硬上限，旧配置默认为 500 条。
     pub history_max_records: Option<u64>,
@@ -176,8 +226,7 @@ impl Default for Preferences {
             always_on_top: true,
             snap_to_edge: true,
             opacity: 97,
-            timeout_seconds: 60,
-            shortcut_enabled: true,
+            timeout_seconds: 300,
             auto_test_enabled: true,
             auto_test_interval_minutes: 3,
             history_max_records: Some(500),
@@ -196,7 +245,7 @@ pub struct AppConfig {
     /// 可改名但不可删除的默认规则，身份仍由空绑定表示，不随名称变化。
     #[serde(default = "default_rule_name")]
     pub default_rule_name: String,
-    /// 仅控制自带预设的一次性补入；删除/编辑糖果测试后不能在重启时重新生成或覆盖。
+    /// 控制自带预设的一次性补入；已完成对应版本后，删除或编辑不在重启时被撤销。
     #[serde(default)]
     pub builtin_rules_version: u8,
     #[serde(default)]
@@ -218,7 +267,7 @@ impl Default for AppConfig {
             rule: TestRule::default(),
             default_rule_name: default_rule_name(),
             rule_presets: builtin_rule_presets(),
-            builtin_rules_version: 1,
+            builtin_rules_version: BUILTIN_RULES_VERSION,
             preferences: Preferences::default(),
             widget_position: None,
             email_notifications: crate::notifications::EmailNotificationSettings::default(),
@@ -236,17 +285,93 @@ impl AppConfig {
                 .iter()
                 .any(|item| item.id == CANDY_RULE_ID)
             {
-                self.rule_presets.extend(builtin_rule_presets());
+                self.rule_presets.extend(
+                    builtin_rule_presets()
+                        .into_iter()
+                        .filter(|item| item.id == CANDY_RULE_ID),
+                );
             }
             if self.default_rule_name == "默认规则" {
                 self.default_rule_name = default_rule_name();
             }
             self.builtin_rules_version = 1;
         }
+        if self.builtin_rules_version < BUILTIN_RULES_VERSION {
+            if !self
+                .rule_presets
+                .iter()
+                .any(|item| item.id == PELICAN_RULE_ID)
+            {
+                self.rule_presets.extend(
+                    builtin_rule_presets()
+                        .into_iter()
+                        .filter(|item| item.id == PELICAN_RULE_ID),
+                );
+            }
+            if self.rule.prompt == LEGACY_DEFAULT_PROMPT {
+                self.rule.prompt = DEFAULT_PROMPT.into();
+            }
+            self.builtin_rules_version = BUILTIN_RULES_VERSION;
+        }
     }
 }
 
-/// 历史结果。错误和取消不产生通过/未通过判定，answer 可保留截断正文。
+/// 两个管理入口共用同一清空语义；只接受五类显式选择，空选择由命令拒绝。
+/// 不包含“关于”、外部备份文件或用户导出的 EXE，避免清理范围越界。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DataResetSelection {
+    /// 接口分组、模型目录缓存与对应系统 API Key。
+    pub api: bool,
+    /// 默认题答、全部预设及模型的规则绑定。
+    pub rules: bool,
+    /// 桌面偏好、保存的位置及本程序的系统自启项。
+    pub widget: bool,
+    /// 测试正文、最近结果索引及通知恢复判断依据。
+    pub history: bool,
+    /// 邮箱设置、授权码及通知恢复判断依据。
+    pub mail: bool,
+}
+
+impl DataResetSelection {
+    /// 重建所选配置分类，其他字段原样保留；数据库/凭据及运行时副作用由命令协调提交。
+    pub fn reset_config(&self, current: &AppConfig) -> Result<AppConfig, String> {
+        if !(self.api || self.rules || self.widget || self.history || self.mail) {
+            return Err("请至少选择一个需要清空的分类。".into());
+        }
+        let mut config = current.clone();
+        if self.api {
+            config.profiles.clear();
+            config.selected_profile_id = None;
+        }
+        if self.rules {
+            config.rule = TestRule::default();
+            config.default_rule_name = default_rule_name();
+            config.rule_presets = builtin_rule_presets();
+            config.builtin_rules_version = BUILTIN_RULES_VERSION;
+            // 清空规则会重建内置预设；初始题目选糖果，接口凭据/模型和旧历史不随此操作改变。
+            for profile in &mut config.profiles {
+                profile.rule_preset_id = Some(CANDY_RULE_ID.into());
+            }
+        }
+        if self.widget {
+            config.preferences = Preferences::default();
+            config.widget_position = None;
+        }
+        if self.mail {
+            config.email_notifications = crate::notifications::EmailNotificationSettings::default();
+        }
+        Ok(config)
+    }
+
+    /// 明确清空分类时从未知通知状态重新开始；普通历史页“清空历史”仍保留恢复依据。
+    pub fn resets_notification_state(&self) -> bool {
+        self.api || self.history || self.mail
+    }
+}
+
+/// 历史结果。HTML 成功结果使用中性 `html` 状态，不产生通过/未通过判定；错误和取消
+/// 仍保留原状态，answer 可保留截断正文用于排查。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRecord {
@@ -291,6 +416,12 @@ pub struct TestRecord {
     pub http_status: Option<u16>,
     #[serde(default)]
     pub request_id: Option<String>,
+    /// 新记录的自动识别结果；旧历史缺失时前端按正文临时识别，但不改写旧结论。
+    #[serde(default)]
+    pub answer_type: Option<String>,
+    /// 识别规则版本，便于未来调整启发式时保留历史语义。
+    #[serde(default)]
+    pub answer_parsing_version: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -310,7 +441,7 @@ pub struct AppSnapshot {
     /// 设置页显式读取全部保留历史，悬浮窗只读取当前模型最近一条；均为原文快照。
     pub history: Vec<TestRecord>,
     pub running: Option<ActiveRun>,
-    /// 自动任务距单调时钟期限的毫秒数；关闭或无有效配置时为 None，不持久化。
+    /// 自动任务距单调时钟期限的毫秒数；测试中、关闭或无有效配置时为 None，不持久化。
     pub auto_test_remaining_ms: Option<u64>,
     /// 后端按规范化端点及有效规则生成，前端不能凭展示名称猜测旧结果是否仍有效。
     pub condition_fingerprints: std::collections::HashMap<String, String>,
@@ -335,8 +466,6 @@ pub struct ProfileInput {
     pub protocol_fallback_enabled: bool,
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: Option<String>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u64>,
     #[serde(default)]
     pub rule_preset_id: Option<String>,
     #[serde(default)]

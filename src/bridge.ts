@@ -6,12 +6,17 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { AppSnapshot, ModelProfile, ProfileInput, UpdateResult } from './types';
+import type { AppSnapshot, DataResetSelection, ModelProfile, ProfileInput, UpdateResult } from './types';
 
 export const desktop = isTauri();
-/** 默认五行题目不插入空行；与 Rust 默认值一致，不覆盖用户已保存的自定义问题。 */
+/** 新建接口的首选题目；按稳定 ID 判断，已有绑定和用户删除的预设不被隐式覆盖/复建。 */
+export const CANDY_RULE_ID = 'builtin-candy-test';
+/** 与 Rust 默认正文一致；已保存的自定义问题保留，不按名称猜测覆盖。 */
 export const DEFAULT_PROMPT =
-    '请快速按顺序回答：\n1. 仅依据你的记忆，你所知道的最新一位日本首相是谁？\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
+    '仅依据你的记忆，你所知道的最新一位日本首相是谁？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
+/** 题目原文只约束被测模型；HTML 回答走已有中性展示，备用关键词不评估动画质量。 */
+export const PELICAN_PROMPT =
+    '创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
 /** 浏览器布局预览使用与 Rust 同源文案；题目只发送正文，不附加 21颗 判定答案。 */
 export const CANDY_PROMPT =
     '请完成回答下面的问题，答案要求只能由数字和“颗”组成，例如10颗、20颗、30颗；数字与“颗”之间不得有空格：\n\n在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4';
@@ -22,14 +27,16 @@ const preview: AppSnapshot = {
         selectedProfileId: null,
         rule: { prompt: DEFAULT_PROMPT, keyword: '高市早苗' },
         defaultRuleName: '日本首相测试',
-        builtinRulesVersion: 1,
-        rulePresets: [{ id: 'builtin-candy-test', name: '糖果测试', prompt: CANDY_PROMPT, keyword: '21颗' }],
+        builtinRulesVersion: 2,
+        rulePresets: [
+            { id: CANDY_RULE_ID, name: '糖果测试', prompt: CANDY_PROMPT, keyword: '21颗' },
+            { id: 'builtin-pelican-test', name: '鹈鹕测试', prompt: PELICAN_PROMPT, keyword: '<svg' },
+        ],
         preferences: {
             alwaysOnTop: true,
             snapToEdge: true,
             opacity: 97,
-            timeoutSeconds: 60,
-            shortcutEnabled: true,
+            timeoutSeconds: 300,
             autoTestEnabled: true,
             autoTestIntervalMinutes: 3,
             historyMaxRecords: 500,
@@ -39,6 +46,8 @@ const preview: AppSnapshot = {
     history: [],
     running: null,
 };
+// 分类重置只作用于浏览器布局预览的内存，不接触桌面数据库或系统凭据。
+const previewDefaults = structuredClone(preview.config);
 
 /**
  * 调用本地命令，失败时将后端可读错误向上传播。
@@ -73,7 +82,11 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
     if (
         [
             'open_external_url',
+            'prepare_html_preview',
+            'release_html_preview',
+            'set_html_preview_expanded',
             'fetch_models',
+            'fetch_profile_models',
             'test_connection',
             'check_updates',
             'send_test_email',
@@ -85,7 +98,35 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
     ) {
         throw new Error('请在桌面应用中使用此功能，浏览器预览不会联网检查或打开外部页面。');
     }
-    if (command === 'save_rule') {
+    if (command === 'reset_selected_data') {
+        const selected = args.selection as DataResetSelection;
+        if (
+            !selected ||
+            !['api', 'rules', 'widget', 'history', 'mail'].some(
+                (key) => selected[key as keyof DataResetSelection] === true,
+            )
+        )
+            throw new Error('请至少选择一个需要清空的分类。');
+        if (preview.running) throw new Error('测试正在进行，请先完成或取消。');
+        if (selected.api) {
+            preview.config.profiles = [];
+            preview.config.selectedProfileId = null;
+        }
+        if (selected.rules) {
+            preview.config.rule = structuredClone(previewDefaults.rule);
+            preview.config.defaultRuleName = previewDefaults.defaultRuleName;
+            preview.config.rulePresets = structuredClone(previewDefaults.rulePresets);
+            preview.config.builtinRulesVersion = 2;
+            for (const profile of preview.config.profiles) profile.rulePresetId = CANDY_RULE_ID;
+        }
+        if (selected.widget) {
+            preview.config.preferences = structuredClone(previewDefaults.preferences);
+            preview.config.widgetPosition = null;
+        }
+        if (selected.history) preview.history = [];
+        if (selected.mail) preview.config.emailNotifications = undefined;
+        if (selected.api || selected.history || selected.mail) preview.emailNotificationError = null;
+    } else if (command === 'save_rule') {
         preview.config.rule = structuredClone(args.rule) as typeof preview.config.rule;
         if (typeof args.name === 'string') preview.config.defaultRuleName = args.name;
     } else if (command === 'set_profile_rule') {
@@ -97,6 +138,9 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
         )
             throw new Error('规则预设已不存在，请刷新后重试。');
         profile.rulePresetId = (args.rulePresetId as string | null) ?? null;
+    } else if (command === 'set_profile_model') {
+        // 预览没有远端模型目录，不伪造可选择项或绕过桌面目录校验。
+        throw new Error('请在桌面应用中拉取并切换模型。');
     } else if (command === 'set_profile_effort') {
         const profile = preview.config.profiles.find((item) => item.id === args.profileId);
         if (!profile) throw new Error('模型配置已不存在，请刷新后重试。');
@@ -141,7 +185,6 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
             interfaceMode,
             protocolFallbackEnabled: input.protocolFallbackEnabled ?? false,
             reasoningEffort,
-            timeoutSeconds: input.timeoutSeconds ? Number(input.timeoutSeconds) : null,
             rulePresetId: input.rulePresetId || null,
             catalogToken: input.catalogToken || null,
         };

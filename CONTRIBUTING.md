@@ -24,19 +24,27 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run tauri -- build --no-bundle
 ```
 
-可执行文件默认位于 `src-tauri/target/release/model-probe.exe`；设置 `CARGO_TARGET_DIR` 时以该目录为准。发布只使用免安装包，不需要执行安装器构建。
+可执行文件默认位于 `src-tauri/target/release/model-probe.exe`；设置 `CARGO_TARGET_DIR` 时以该目录为准。自 v1.0.3 起，本地测试和 GitHub Release 均只交付单个 `Model-IQ-Radar-v<版本>-Windows-x64.exe`，不提供 ZIP、文档包或独立校验文件。Tag 仍使用 `v<语义版本>`；GitHub 自动生成的源码归档不属于手工上传资产。许可证、使用说明和发布说明保留在仓库。
+
+构建后用 PowerShell 7 执行 `./scripts/package_exe.ps1`，校验版本、PE x64、构建输入时间与复制前后 SHA-256，输出到 `release-artifacts/v<版本>/`。仅向控制台输出校验信息，不生成附带文件；新轮次可用 `-OutputDirectory <目录>` 保留旧交付物，非默认 Cargo 目录可用 `-SourcePath <EXE绝对路径>`。已有同名不同内容时明确报错，不覆盖旧文件。
 
 依赖安装完成且 Cargo 在 PATH 中时，运行 `node scripts/generate_notices.mjs` 可重新生成第三方许可证合订本；生成器不联网，缺少依赖或声明会失败，不能手工删改第三方原文。原始声明的上游补充来源见 `docs/licenses/README.md`。
 
 邮件图标为已提交的 PNG，常规构建不需要图像依赖。需要重新生成时，在 `npm ci` 后准备已安装的 `sharp`，执行 `node scripts/generate_mail_assets.mjs [sharp 模块绝对目录]`；省略路径时从当前环境解析 `sharp`。脚本仅将现有 Lucide 图标写入 `src-tauri/assets/mail` 白名单，不联网、不改第三方原文。邮件模板位于 `src-tauri/src/notifications/template.rs`，采用内联样式、表格和 CID 图标；所有记录字段必须安全转义，完整回答不得截断或渲染成 HTML。设置 `MODEL_PROBE_EMAIL_PREVIEW_DIR` 后执行 Rust 测试，可将虚构记录的 HTML/EML 导出到指定 QA 目录；这条路径仅在测试代码中使用，不会发信或读取正式凭据。须以真实 MIME 中的 CID 附件预览并核对长内容与窄屏，不把浏览器预览等同于 Outlook/Gmail 实际投递验证。
+
+HTML 预览采用页面内 iframe。组件回归在 `tests/html-answer.test.ts`；桌面验收必须用独立 identifier、虚构数据库和模型，避免读取正式数据。验证有界画布缩放、无滚动条、HTML 悬停、收起裁剪、页内放大、Escape/焦点恢复，以及列表实时动画不弹出额外窗口。
+
+桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，逐文件复核见 `docs/FILE_AUDIT-v1.0.3.md`。
 
 ## 目录职责
 
 - `src/components`：悬浮窗、设置、共用 Markdown、选择器和关于组件。
 - `src/bridge.ts` / `src/types.ts`：IPC 入口与契约；浏览器预览只保留虚构内存状态。
 - `src/markdown.ts`：不可信回答的安全显示副本，不能参与判定、保存和复制。
+- `src/htmlAnswer.ts` / `src/htmlSandbox.ts`：与后端共用 html-v1 识别语义、临时 iframe 文档包装和会话消息验证；不生成或缓存截图。
 - `src-tauri/src/api.rs` / `discovery.rs`：兼容模型请求、目录拉取、独立连接诊断。
 - `src-tauri/src/lib.rs`：运行门禁、定时、凭据与窗口生命周期。
+- `src-tauri/src/html.rs` / `preview.rs`：自动识别、请求状态结算、本地临时文档协议、响应头 CSP 和既有 WebView 的 iframe 导航保护；不创建预览窗口。
 - `src-tauri/src/storage.rs` / `model.rs`：SQLite、配置、规则与历史契约。
 - `src-tauri/src/autostart.rs` / `updates.rs`：当前用户自启、只读更新检查与系统浏览器入口。
 - `src-tauri/src/notifications.rs` / `notifications/template.rs`：加密 SMTP、模型分组通知状态、当次记录的 HTML/纯文本正文与内嵌图标。
@@ -46,7 +54,7 @@ npm run tauri -- build --no-bundle
 
 源码采用 UTF-8 无 BOM、LF、四空格缩进。TypeScript/Vue/CSS 用 Prettier，Rust 用 rustfmt；注释解释业务目的、异常、安全边界和兼容性。
 
-保持完整原文连续字符串判定、原文持久化/复制、规则快照，以及手动和自动测试的共用门禁。UI 展示不得改变测智结果。变更配置、默认值和 IPC 时同步文档与有意义的回归；不要直接修改锁文件或生成文件，使用依赖工具和生成脚本。
+保持文字的完整原文连续字符串判定、原文持久化/复制、规则快照，以及手动和自动测试的共用门禁。HTML 使用中性展示状态，不参与判定/邮件；UI 展示不得改变已保存结果。变更配置、默认值和 IPC 时同步文档与有意义的回归；不要直接修改锁文件或生成文件，使用依赖工具和生成脚本。
 
 GPL-3.0-only 适用于本项目代码。依赖保留各自许可证；新增依赖需同步第三方声明。发布 Tag 使用 `v<语义版本>`，发布标题采用“测智雷达 v<版本>”，发布说明保存在 `docs/release-notes`，用户可见变化同时写入 CHANGELOG。
 

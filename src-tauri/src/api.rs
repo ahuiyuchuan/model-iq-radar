@@ -2,7 +2,7 @@
 //! HTTP 错误只映射状态码，不展示服务商响应体或包含鉴权信息的底层错误。
 //! 作者：ahui。
 
-use crate::model::{ModelProfile, TestRule};
+use crate::model::{validate_timeout_seconds, ModelProfile, TestRule};
 use reqwest::{header::HeaderMap, redirect::Policy, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -295,7 +295,18 @@ pub async fn complete(
     timeout: u64,
     token: &CancellationToken,
 ) -> Completion {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+    if let Err(message) = validate_timeout_seconds(timeout) {
+        return Completion::failure("configuration", &message);
+    }
+    // 用户可自定正整数秒，极大值不能让时钟加法溢出并使运行任务异常退出。
+    // 计时器无法表示时在发请求前报错，不截断、不改用默认值，也不尝试协议回退。
+    let Some(deadline) = tokio::time::Instant::now().checked_add(Duration::from_secs(timeout))
+    else {
+        return Completion::failure(
+            "configuration",
+            "超时超过系统计时器可表示的范围，请减小秒数。",
+        );
+    };
     let mut result = complete_once(profile, rule, key, timeout, token, deadline).await;
     if result.error_kind.as_deref() == Some("configuration") {
         return result;

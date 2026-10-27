@@ -13,6 +13,7 @@ const fake = vi.hoisted(() => ({
     snapshot: {} as AppSnapshot,
 }));
 vi.mock('../src/bridge', () => ({
+    CANDY_RULE_ID: 'builtin-candy-test',
     call: fake.call,
     subscribe: fake.subscribe,
     dragWindow: vi.fn(),
@@ -45,7 +46,6 @@ beforeEach(() => {
                 snapToEdge: true,
                 opacity: 97,
                 timeoutSeconds: 60,
-                shortcutEnabled: true,
                 autoTestEnabled: true,
                 autoTestIntervalMinutes: 3,
             },
@@ -338,7 +338,8 @@ it('两态同步模型名、测试时间、耗时、倒计时和主按钮，关�
     });
     const wrapper = mount(Widget);
     await flushPromises();
-    expect(wrapper.get('[role="combobox"]').text()).toContain('本地模型 : fixture');
+    expect(wrapper.get('[aria-label="当前模型配置"]').text()).toBe('本地模型');
+    expect(wrapper.get('[aria-label="当前分组模型"]').text()).toBe('fixture');
     expect(wrapper.get('.compact-primary').text()).toBe('重新测试');
     expect(wrapper.get('.compact-timing').attributes('title')).toContain('测试时间：');
     // 可见标签和完整时间必须同在第一行，不能只靠 title 通过回归检查。
@@ -467,6 +468,48 @@ it('接口错误显示测试失败，回答中的 HTML 不作为可执行内容'
     expect(wrapper.get('.answer-box').text()).toContain('<img');
     expect(wrapper.find('.answer-box img').exists()).toBe(false);
     expect(wrapper.get('h1').text()).toBe('测试失败');
+    wrapper.unmount();
+});
+
+it('打开四种下拉菜单均保留同一 HTML 会话，不因菜单重建回答', async () => {
+    fake.snapshot.config.profiles[0].catalogToken = 'fixture-catalog';
+    fake.snapshot.history.push({
+        id: 'html-menu',
+        profileId: 'one',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: '2026-10-27T00:00:00Z',
+        durationMs: 20,
+        status: 'html',
+        answer: '<div>animation</div>',
+        error: null,
+        prompt: '问题',
+        keyword: '答案',
+        ruleVersion: 'literal-contains-v1',
+        conditionFingerprint: 'fixture-v1',
+        answerType: 'html',
+    });
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'prepare_html_preview') return 'http://html-preview.localhost/fixture';
+        if (command === 'get_model_catalog') return [{ id: 'fixture', ownedBy: null }];
+        return structuredClone(fake.snapshot);
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    const iframe = wrapper.get('iframe').element;
+    // 菜单只改变自身显示与窗口留白，不应重新申请文档或打断动画状态。
+    for (const label of ['当前模型配置', '当前分组模型', '当前测试规则', '当前思考等级']) {
+        const trigger = wrapper.get(`[aria-label="${label}"]`);
+        await trigger.trigger('click');
+        await flushPromises();
+        expect(wrapper.get('iframe').element).toBe(iframe);
+        await trigger.trigger('keydown', { key: 'Escape' });
+        await flushPromises();
+    }
+    expect(fake.call.mock.calls.filter(([command]) => command === 'prepare_html_preview')).toHaveLength(1);
+    expect(fake.call.mock.calls.some(([command]) => command === 'release_html_preview')).toBe(false);
     wrapper.unmount();
 });
 
@@ -673,5 +716,132 @@ it('开始请求尚未同步运行令牌时禁止提前取消和重复开始', a
     finish?.();
     await flushPromises();
     expect(wrapper.get('.compact-primary').attributes('disabled')).toBeUndefined();
+    wrapper.unmount();
+});
+
+/** 快捷模型只写当前分组的单字段，不自动测试或更改规则；目录非空隐藏拉取入口。 */
+it('空目录显式拉取去重，返回目录不自动选中，换模型只提交 ID 并互斥四个菜单', async () => {
+    let finishFetch!: (value: unknown) => void;
+    let finishSelect!: () => void;
+    const models = [
+        { id: 'candidate', ownedBy: null },
+        { id: 'second', ownedBy: null },
+    ];
+    fake.call.mockImplementation(async (command: string, args?: Record<string, string>) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'get_model_catalog') return models;
+        if (command === 'fetch_profile_models') {
+            const result = await new Promise((resolve) => {
+                finishFetch = resolve;
+            });
+            fake.snapshot.config.profiles[0].catalogToken = 'catalog';
+            return result;
+        }
+        if (command === 'set_profile_model') {
+            await new Promise<void>((resolve) => {
+                finishSelect = resolve;
+            });
+            fake.snapshot.config.profiles[0].model = args!.model;
+        }
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    expect(wrapper.get('.widget-model-row').classes()).toContain('with-fetch');
+    expect(wrapper.get('[aria-label="当前分组模型"]').attributes('disabled')).toBeDefined();
+    const fetch = wrapper.get('[aria-label="拉取当前分组模型"]');
+    await fetch.trigger('click');
+    await fetch.trigger('click');
+    expect(fake.call.mock.calls.filter(([command]) => command === 'fetch_profile_models')).toHaveLength(1);
+    expect(fake.call).toHaveBeenCalledWith('fetch_profile_models', { profileId: 'one' });
+    finishFetch({ token: 'catalog', models });
+    await flushPromises();
+    expect(wrapper.find('[aria-label="拉取当前分组模型"]').exists()).toBe(false);
+    expect(wrapper.get('[aria-label="当前分组模型"]').text()).toBe('fixture');
+    expect(
+        fake.call.mock.calls.some(([command]) => command === 'set_profile_model' || command === 'start_test'),
+    ).toBe(false);
+    for (const label of ['当前模型配置', '当前分组模型', '当前测试规则', '当前思考等级', '当前分组模型']) {
+        await wrapper.get(`[aria-label="${label}"]`).trigger('click');
+        await flushPromises();
+        expect(wrapper.findAll('[role="listbox"]')).toHaveLength(1);
+        expect(wrapper.get('[role="listbox"]').attributes('aria-label')).toBe(`${label}列表`);
+    }
+    await wrapper.get('[role="option"]').trigger('click');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith('set_profile_model', { profileId: 'one', model: 'candidate' });
+    expect(wrapper.get('[aria-label="当前模型配置"]').attributes('disabled')).toBeDefined();
+    finishSelect();
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前分组模型"]').text()).toBe('candidate');
+    expect(wrapper.get('[aria-label="当前模型配置"]').attributes('disabled')).toBeUndefined();
+    wrapper.unmount();
+});
+
+it('目录失败或空返回可重试，切换分组后迟到目录不串组', async () => {
+    let finish!: (value: unknown) => void;
+    let attempts = 0;
+    fake.snapshot.config.profiles.push({
+        id: 'two',
+        name: '其他分组',
+        model: 'other',
+        baseUrl: 'http://localhost/v2',
+        hasKey: false,
+    });
+    fake.call.mockImplementation(async (command: string, args?: Record<string, string>) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'select_profile') fake.snapshot.config.selectedProfileId = args!.id;
+        if (command === 'fetch_profile_models') {
+            attempts++;
+            if (attempts === 1) throw new Error('目录失败');
+            if (attempts === 2) return { token: 'empty', models: [] };
+            return new Promise((resolve) => {
+                finish = resolve;
+            });
+        }
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('[aria-label="拉取当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('.inline-error').text()).toContain('目录失败');
+    await wrapper.get('[aria-label="拉取当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('.inline-error').text()).toContain('未返回可用模型');
+    await wrapper.get('[aria-label="拉取当前分组模型"]').trigger('click');
+    await wrapper.get('[aria-label="当前模型配置"]').trigger('click');
+    await flushPromises();
+    await wrapper.findAll('[role="option"]')[1].trigger('click');
+    await flushPromises();
+    finish({ token: 'late', models: [{ id: 'stale', ownedBy: null }] });
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前分组模型"]').text()).toBe('other');
+    expect(wrapper.find('[aria-label="拉取当前分组模型"]').exists()).toBe(true);
+    expect(wrapper.get('[aria-label="当前分组模型"]').attributes('disabled')).toBeDefined();
+    wrapper.unmount();
+});
+
+it('测试中两态均暂停倒计时，结算快照到达后从完整周期开始', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] });
+    fake.snapshot.running = {
+        id: 'running',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: new Date().toISOString(),
+    };
+    fake.snapshot.autoTestRemainingMs = null;
+    const wrapper = mount(Widget);
+    await flushPromises();
+    expect(wrapper.get('.auto-countdown').text()).toContain('本次结束后计时');
+    await vi.advanceTimersByTimeAsync(200000);
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('.auto-countdown').text()).toContain('本次结束后计时');
+    fake.snapshot.running = null;
+    fake.snapshot.autoTestRemainingMs = 180000;
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(wrapper.get('.auto-countdown').text()).toContain('03:00');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(wrapper.get('.auto-countdown').text()).toContain('02:59');
     wrapper.unmount();
 });

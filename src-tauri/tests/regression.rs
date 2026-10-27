@@ -157,6 +157,7 @@ async fn explicit_fallback_uses_other_protocol_once_without_rewriting_profile() 
             prompt: "独立问题".into(),
             keyword: "do-not-send-secret-answer".into(),
             alternative_keywords: Vec::new(),
+            timeout_seconds: None,
         };
         let result = api::complete(
             &selected,
@@ -224,6 +225,7 @@ async fn fallback_obeys_disabled_success_and_two_attempt_limit() {
             prompt: "问题".into(),
             keyword: "正确答案".into(),
             alternative_keywords: Vec::new(),
+            timeout_seconds: None,
         };
         let result = api::complete(&selected, &rule, "", 10, &CancellationToken::new()).await;
         assert_eq!(result.attempted_modes.len(), expected);
@@ -237,6 +239,25 @@ async fn fallback_obeys_disabled_success_and_two_attempt_limit() {
             requests.recv_timeout(Duration::from_secs(2)).unwrap();
         }
         assert!(requests.try_recv().is_err());
+    }
+}
+
+/// 非法或无法精确保存的秒数在网络前失败，不发送请求、不回退，也不能使计时器溢出。
+#[tokio::test]
+async fn invalid_timeout_fails_before_network_or_protocol_fallback() {
+    let mut selected = profile("https://example.com/v1".into());
+    selected.protocol_fallback_enabled = true;
+    for timeout in [0, 9_007_199_254_740_992, u64::MAX] {
+        let result = api::complete(
+            &selected,
+            &TestRule::default(),
+            "",
+            timeout,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result.error_kind.as_deref(), Some("configuration"));
+        assert!(result.attempted_modes.is_empty());
     }
 }
 
@@ -258,6 +279,7 @@ async fn fallback_shares_original_timeout_and_respects_cancellation() {
         prompt: "问题".into(),
         keyword: "完成".into(),
         alternative_keywords: Vec::new(),
+        timeout_seconds: None,
     };
     let result = api::complete(&selected, &rule, "", 1, &CancellationToken::new()).await;
     assert_eq!(result.error_kind.as_deref(), Some("timeout"));
@@ -354,6 +376,8 @@ fn markdown_answer_roundtrips_without_changing_literal_match() {
         error_kind: None,
         http_status: None,
         request_id: None,
+        answer_type: Some("text".into()),
+        answer_parsing_version: Some("html-v1".into()),
     };
     store.save_record(&record).unwrap();
     assert_eq!(store.history().unwrap()[0].answer, answer);
@@ -365,6 +389,7 @@ fn custom_rules_reject_blank_but_preserve_meaningful_spaces() {
         prompt: "问题".into(),
         keyword: " \n".into(),
         alternative_keywords: Vec::new(),
+        timeout_seconds: None,
     }
     .validate()
     .is_err());
@@ -372,6 +397,7 @@ fn custom_rules_reject_blank_but_preserve_meaningful_spaces() {
         prompt: "自定义问题\n".into(),
         keyword: " Answer ".into(),
         alternative_keywords: Vec::new(),
+        timeout_seconds: None,
     };
     assert!(rule.validate().is_ok());
     assert!(!"Answer".contains(&rule.keyword));
@@ -388,12 +414,13 @@ async fn real_request_sends_only_prompt_and_uses_complete_response() {
         prompt: "独立题面".into(),
         keyword: "自定义答案".into(),
         alternative_keywords: vec!["do-not-send-alternative-answer".into()],
+        timeout_seconds: None,
     };
     let result = api::complete(
         &profile(base),
         &rule,
         "fixture-secret",
-        10,
+        600,
         &CancellationToken::new(),
     )
     .await;
@@ -427,6 +454,7 @@ async fn responses_request_uses_responses_payload_and_parser() {
         prompt: "独立题面".into(),
         keyword: "自定义答案".into(),
         alternative_keywords: Vec::new(),
+        timeout_seconds: None,
     };
     let mut selected = profile(base);
     selected.interface_mode = "responses".into();
@@ -476,12 +504,13 @@ async fn cancellation_timeout_and_invalid_json_never_judge() {
     )
     .await;
     assert!(result.cancelled);
-    let (base, _) = fixture("200 OK", "{}".into(), Duration::from_millis(200));
+    // 0 秒现在属于配置错误；真实超时需使用合法的 1 秒期限与更慢的本机响应。
+    let (base, _) = fixture("200 OK", "{}".into(), Duration::from_millis(1500));
     let result = api::complete(
         &profile(base),
         &TestRule::default(),
         "",
-        0,
+        1,
         &CancellationToken::new(),
     )
     .await;
@@ -528,6 +557,8 @@ fn history_keeps_rule_snapshot_and_reopens_without_secrets() {
             error_kind: None,
             http_status: None,
             request_id: None,
+            answer_type: Some("text".into()),
+            answer_parsing_version: Some("html-v1".into()),
         };
         store.save_record(&record).unwrap();
         let config = AppConfig {
@@ -535,6 +566,7 @@ fn history_keeps_rule_snapshot_and_reopens_without_secrets() {
                 prompt: "新题面".into(),
                 keyword: "新答案".into(),
                 alternative_keywords: Vec::new(),
+                timeout_seconds: None,
             },
             ..AppConfig::default()
         };

@@ -1,0 +1,102 @@
+[
+    {
+        "name": "普通回答",
+        "answer": "高市早苗",
+        "kind": "text"
+    },
+    {
+        "name": "仅术语",
+        "answer": "输出 HTML 或 svg",
+        "kind": "text"
+    },
+    {
+        "name": "行内示例",
+        "answer": "例如 `<div>示例</div>` 就是 HTML。",
+        "kind": "text"
+    },
+    {
+        "name": "孤立图片",
+        "answer": "<img src=x onerror=alert(1)>",
+        "kind": "text"
+    },
+    {
+        "name": "标签前缀",
+        "answer": "<diversion>example</diversion>",
+        "kind": "text"
+    },
+    {
+        "name": "完整文档",
+        "answer": "<!doctype html><html><body>svg</body></html>",
+        "kind": "html"
+    },
+    {
+        "name": "有前言的文档",
+        "answer": "以下是动画：\n<html><body>x</body></html>",
+        "kind": "html"
+    },
+    {
+        "name": "SVG",
+        "answer": "<svg viewBox=\"0 0 100 100\"><circle r=\"20\"/></svg>",
+        "kind": "html"
+    },
+    {
+        "name": "布局片段",
+        "answer": "<div>demo</div>",
+        "kind": "html"
+    },
+    {
+        "name": "代码围栏",
+        "answer": "```html\n<svg></svg>\n```",
+        "kind": "html"
+    },
+    {
+        "name": "大写围栏",
+        "answer": "```HTML\n<div>ok</div>\n```",
+        "kind": "html"
+    },
+    {
+        "name": "空围栏",
+        "answer": "```html\n```",
+        "kind": "html"
+    },
+    {
+        "name": "不完整围栏",
+        "answer": "```html\n<html><body>",
+        "kind": "html"
+    },
+    {
+        "name": "多个围栏",
+        "answer": "```html\n<div>A</div>\n```\n说明\n```svg\n<svg></svg>\n```",
+        "kind": "html"
+    },
+    {
+        "name": "波浪围栏",
+        "answer": "~~~svg\n<svg></svg>\n~~~",
+        "kind": "html"
+    },
+    {
+        "name": "半截SVG",
+        "answer": "<svg><circle",
+        "kind": "html"
+    },
+    {
+        "name": "说明中的标签",
+        "answer": "这里有 <div>示例</div> 但只是文字。",
+        "kind": "text"
+    },
+    {
+        "name": "文字片段",
+        "answer": "<p>Hello</p>",
+        "kind": "html"
+    },
+    {
+        "name": "XML SVG",
+        "answer": "<?xml version=\"1.0\"?>\n<svg></svg>",
+        "kind": "html"
+    },
+    {
+        "name": "带编码的XML SVG",
+        "answer": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg></svg>",
+        "kind": "html"
+    }
+]

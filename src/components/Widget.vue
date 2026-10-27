@@ -1,6 +1,6 @@
 <!--
     悬浮组件：单一主操作、独立拖动区域、可滚动回答。
-    回答仅交给共用安全 Markdown 显示层，状态和复制始终使用后端结论与原文。
+    文字使用安全 Markdown，HTML 交给共用沙箱 iframe 预览；状态和复制使用后端结论与原文。
     @author ahui
 -->
 <script setup lang="ts">
@@ -24,13 +24,13 @@ import {
     Info,
     Grip,
 } from 'lucide-vue-next';
-import { call, dragWindow, openSettings, resizeWidget, subscribeDock } from '../bridge';
+import { CANDY_RULE_ID, call, dragWindow, openSettings, resizeWidget, subscribeDock } from '../bridge';
 import { formatTime, formatRelativeTime, useProbe } from '../useProbe';
 import ModelPicker from './ModelPicker.vue';
-import MarkdownAnswer from './MarkdownAnswer.vue';
+import AnswerContent from './AnswerContent.vue';
 import { ruleAnswers } from '../rules';
 import { reasoningSupport } from '../reasoning';
-import type { ModelProfile } from '../types';
+import type { FetchedModel, ModelCatalog, ModelProfile } from '../types';
 
 const {
     snapshot,
@@ -49,8 +49,17 @@ const uiNow = ref({ monotonic: performance.now(), wall: Date.now() });
 let clockTimer: ReturnType<typeof setInterval> | undefined;
 const expanded = ref(false);
 const copied = ref(false);
+const previewError = ref('');
+// 放大层位于同一页面，打开期间不因 iframe 内的鼠标/焦点变化触发边缘收起。
+const previewExpanded = ref(false);
 const cancelling = ref(false);
 const picker = ref<InstanceType<typeof ModelPicker>>();
+const modelPicker = ref<InstanceType<typeof ModelPicker>>();
+const modelPickerOpen = ref(false);
+const catalogModels = ref<FetchedModel[]>([]);
+const catalogLoading = ref(false);
+const fetchingModels = ref(false);
+let catalogGeneration = 0;
 const rulePicker = ref<InstanceType<typeof ModelPicker>>();
 const effortPicker = ref<InstanceType<typeof ModelPicker>>();
 const rulePickerOpen = ref(false);
@@ -73,8 +82,9 @@ let motionTimer: ReturnType<typeof setTimeout> | undefined;
 let releaseMotion: (() => void) | undefined;
 
 /** 键盘或辅助功能点击也必须互斥；不能只依赖 pointerdown 的外部点击关闭。 */
-async function closeOtherPickers(current: 'model' | 'rule' | 'effort'): Promise<void> {
-    if (current !== 'model') await picker.value?.close();
+async function closeOtherPickers(current: 'group' | 'model' | 'rule' | 'effort'): Promise<void> {
+    if (current !== 'group') await picker.value?.close();
+    if (current !== 'model') await modelPicker.value?.close();
     if (current !== 'rule') await rulePicker.value?.close();
     if (current !== 'effort') await effortPicker.value?.close();
 }
@@ -97,7 +107,9 @@ function scheduleTuck(): void {
     tuckTimer = setTimeout(() => {
         if (
             !hovering &&
+            !previewExpanded.value &&
             !pickerOpen.value &&
+            !modelPickerOpen.value &&
             !rulePickerOpen.value &&
             !effortPickerOpen.value &&
             !selecting.value
@@ -108,6 +120,7 @@ function scheduleTuck(): void {
 
 /** 边签使用真实小窗口，不留下透明的大面积鼠标遮挡。 */
 async function setTucked(value: boolean): Promise<void> {
+    if (value && previewExpanded.value) return;
     if (disposed || (value && (collapsing.value || tucked.value)) || (!value && revealing.value)) return;
     clearTimeout(tuckTimer);
     const generation = ++animationGeneration;
@@ -167,6 +180,16 @@ function pointerLeft(): void {
     scheduleTuck();
 }
 
+/** 放大关闭后重新计算悬停，不能沿用 iframe 内操作前的旧鼠标状态。 */
+function previewExpandedChanged(value: boolean): void {
+    previewExpanded.value = value;
+    clearTimeout(tuckTimer);
+    if (!value) {
+        hovering = Boolean(document.querySelector('.widget:hover'));
+        if (!hovering) scheduleTuck();
+    }
+}
+
 onMounted(async () => {
     clockTimer = setInterval(() => {
         uiNow.value = { monotonic: performance.now(), wall: Date.now() };
@@ -186,6 +209,7 @@ onMounted(async () => {
 onUnmounted(() => {
     disposed = true;
     animationGeneration++;
+    catalogGeneration++;
     clearTimeout(tuckTimer);
     clearTimeout(copiedTimer);
     clearTimeout(motionTimer);
@@ -202,8 +226,21 @@ const stateLabels: Record<string, string> = {
     failed: '降智',
     error: '测试失败',
     cancelled: '已取消',
+    html: '已生成 HTML',
 };
-const resultLabel = computed(() => (!busy.value && stale.value ? '待重新测试' : stateLabels[state.value]));
+const resultLabel = computed(() =>
+    !busy.value && stale.value
+        ? '待重新测试'
+        : state.value === 'html' && previewError.value
+          ? 'HTML 预览失败'
+          : stateLabels[state.value],
+);
+watch(
+    () => latest.value?.id,
+    () => {
+        previewError.value = '';
+    },
+);
 /** 两种布局共用主按钮文案：任何已完成/失败/取消记录均允许重新测试。 */
 const primaryLabel = computed(() =>
     busy.value
@@ -267,6 +304,14 @@ const ruleOptions = computed(() => [
         model: '',
     })),
 ]);
+/** 未建接口时也预选糖果；已有接口始终显示其持久绑定，不以显示默认值改变实际请求。 */
+const selectedRuleId = computed(() =>
+    profile.value
+        ? (profile.value.rulePresetId ?? '')
+        : snapshot.value?.config.rulePresets?.some((item) => item.id === CANDY_RULE_ID)
+          ? CANDY_RULE_ID
+          : '',
+);
 // 仅解释后端已判定的历史；状态不在前端重判，多答案通过时展示实际命中的项。
 const resultAnswers = computed(() => {
     const record = latest.value;
@@ -279,12 +324,13 @@ const resultAnswers = computed(() => {
 /** 后端提供剩余时长，前端用单调时钟平滑显示；不每秒发 IPC，也不自行触发付费请求。 */
 const autoCountdown = computed(() => {
     if (!profile.value) return '待配置';
+    if (busy.value) return '本次结束后计时';
     const remaining = snapshot.value?.autoTestRemainingMs;
     if (remaining == null) return '同步中';
     const seconds = Math.ceil(
         Math.max(0, remaining - Math.max(0, uiNow.value.monotonic - snapshotReceivedAt.value)) / 1000,
     );
-    if (seconds === 0) return busy.value ? '等待空闲' : '即将测试';
+    if (seconds === 0) return '即将测试';
     const minutes = Math.floor(seconds / 60);
     return `${minutes.toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
 });
@@ -294,6 +340,7 @@ const hint = computed(() => {
     if (!latest.value) return '配置好接口后，即可开始第一次测试';
     if (latest.value.status === 'passed') return '命中连续字符串：';
     if (latest.value.status === 'failed') return '未命中连续字符串：';
+    if (latest.value.status === 'html') return '回答已识别为 HTML，可查看实际效果';
     return latest.value.error || '本次未产生判定结果';
 });
 
@@ -304,6 +351,7 @@ async function toggleExpanded(): Promise<void> {
     const next = !expanded.value;
     try {
         await picker.value?.close();
+        await modelPicker.value?.close();
         await rulePicker.value?.close();
         await effortPicker.value?.close();
         await resizeWidget(next);
@@ -349,6 +397,86 @@ async function toggleAutoTest(): Promise<void> {
     } finally {
         await refresh();
         autoSwitchPending.value = false;
+    }
+}
+
+/** 目录只属于当前分组的地址/凭据句柄；切换后旧响应不得回填新分组或已卸载窗口。 */
+const catalogIdentity = computed(() =>
+    JSON.stringify([
+        profile.value?.id,
+        profile.value?.baseUrl,
+        profile.value?.catalogToken,
+        profile.value?.credentialRevision,
+    ]),
+);
+watch(
+    catalogIdentity,
+    async () => {
+        const generation = ++catalogGeneration;
+        catalogModels.value = [];
+        catalogLoading.value = false;
+        const current = profile.value;
+        if (!current?.catalogToken) return;
+        catalogLoading.value = true;
+        try {
+            const models = await call<FetchedModel[]>('get_model_catalog', {
+                token: current.catalogToken,
+                baseUrl: current.baseUrl,
+            });
+            if (!disposed && generation === catalogGeneration) catalogModels.value = models;
+        } catch (cause) {
+            if (!disposed && generation === catalogGeneration) error.value = String(cause);
+        } finally {
+            if (!disposed && generation === catalogGeneration) catalogLoading.value = false;
+        }
+    },
+    { immediate: true },
+);
+
+/** 显式拉取只读取目录，不产生推理、历史或自动选中；空目录保留重试入口。 */
+async function fetchProfileModels(): Promise<void> {
+    const current = profile.value;
+    if (!current || fetchingModels.value || catalogLoading.value || selecting.value || busy.value) return;
+    fetchingModels.value = true;
+    error.value = '';
+    const identity = catalogIdentity.value;
+    try {
+        const catalog = await call<ModelCatalog>('fetch_profile_models', { profileId: current.id });
+        if (!disposed && identity === catalogIdentity.value) {
+            catalogGeneration++;
+            catalogModels.value = catalog.models;
+            if (!catalog.models.length) error.value = '接口未返回可用模型，可在设置中手动填写模型 ID。';
+        }
+    } catch (cause) {
+        if (!disposed && identity === catalogIdentity.value) error.value = String(cause);
+    } finally {
+        if (!disposed) {
+            await refresh();
+            fetchingModels.value = false;
+        }
+    }
+}
+
+/** 仅提交目录中的模型 ID；后端再次验证最新目录，拒绝过期项，不覆盖其他配置字段。 */
+async function selectModel(model: string): Promise<void> {
+    const current = profile.value;
+    if (
+        !current ||
+        selecting.value ||
+        busy.value ||
+        model === current.model ||
+        !catalogModels.value.some((item) => item.id === model)
+    )
+        return;
+    selecting.value = true;
+    error.value = '';
+    try {
+        await call('set_profile_model', { profileId: current.id, model });
+    } catch (cause) {
+        error.value = String(cause);
+    } finally {
+        await refresh();
+        selecting.value = false;
     }
 }
 
@@ -445,7 +573,7 @@ watch(error, (value) => {
         :class="[
             {
                 expanded,
-                'picker-visible': pickerOpen || rulePickerOpen || effortPickerOpen,
+                'picker-visible': pickerOpen || modelPickerOpen || rulePickerOpen || effortPickerOpen,
                 'dock-away': collapsing || revealing,
             },
             `state-${state}`,
@@ -490,19 +618,53 @@ watch(error, (value) => {
             </div>
         </header>
 
-        <ModelPicker
-            ref="picker"
-            :profiles="snapshot?.config.profiles ?? []"
-            :selected-id="snapshot?.config.selectedProfileId ?? null"
-            :expanded="expanded"
-            :disabled="busy || selecting"
-            :summaries="profileSummaries"
-            :before-open="() => closeOtherPickers('model')"
-            @select="selectProfile"
-            @configure="safeOpenSettings"
-            @open-change="pickerOpen = $event"
-            @error="error = $event"
-        />
+        <!-- 模型目录为空才显示拉取按钮；当前手填 ID 只作占位，不伪造目录数据。 -->
+        <div class="widget-model-row" :class="{ 'with-fetch': !catalogModels.length }">
+            <ModelPicker
+                ref="picker"
+                :profiles="snapshot?.config.profiles ?? []"
+                :selected-id="snapshot?.config.selectedProfileId ?? null"
+                :expanded="expanded"
+                :disabled="busy || selecting"
+                :show-model="false"
+                :summaries="profileSummaries"
+                :before-open="() => closeOtherPickers('group')"
+                @select="selectProfile"
+                @configure="safeOpenSettings"
+                @open-change="pickerOpen = $event"
+                @error="error = $event"
+            />
+            <ModelPicker
+                ref="modelPicker"
+                class="widget-model-picker"
+                label="当前分组模型"
+                :profiles="catalogModels.map((item) => ({ id: item.id, name: item.id, model: '' }))"
+                :selected-id="profile?.model ?? null"
+                :placeholder="profile?.model || '无模型'"
+                :expanded="expanded"
+                :disabled="busy || selecting || catalogLoading || fetchingModels || !catalogModels.length"
+                :show-model="false"
+                :show-icon="false"
+                :before-open="() => closeOtherPickers('model')"
+                @select="selectModel"
+                @open-change="modelPickerOpen = $event"
+                @error="error = $event"
+            />
+            <button
+                v-if="!catalogModels.length"
+                type="button"
+                class="icon-button widget-fetch-models"
+                aria-label="拉取当前分组模型"
+                :title="
+                    catalogLoading ? '读取模型缓存中' : fetchingModels ? '正在拉取模型' : '拉取当前分组模型'
+                "
+                :aria-busy="catalogLoading || fetchingModels"
+                :disabled="busy || selecting || catalogLoading || fetchingModels || !profile"
+                @click="fetchProfileModels"
+            >
+                <RotateCw :size="14" :class="{ spin: catalogLoading || fetchingModels }" aria-hidden="true" />
+            </button>
+        </div>
 
         <div class="widget-rule-row">
             <ModelPicker
@@ -510,7 +672,7 @@ watch(error, (value) => {
                 class="widget-rule-picker"
                 label="当前测试规则"
                 :profiles="ruleOptions"
-                :selected-id="profile?.rulePresetId ?? ''"
+                :selected-id="selectedRuleId"
                 :placeholder="profile?.rulePresetId ? '规则已失效' : '默认规则'"
                 :expanded="expanded"
                 :disabled="busy || selecting || !profile"
@@ -560,11 +722,23 @@ watch(error, (value) => {
 
             <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
             <div class="answer-label"><span>模型回答</span><span class="eyebrow">完整正文</span></div>
-            <div class="answer-box" tabindex="0" :aria-busy="busy">
+            <div
+                class="answer-box"
+                :class="{ 'answer-box-html': latest?.answerType === 'html' && !busy }"
+                tabindex="0"
+                :aria-busy="busy"
+            >
                 <div v-if="busy" class="answer-placeholder">
                     <LoaderCircle :size="18" class="spin" />等待模型回答
                 </div>
-                <MarkdownAnswer v-else-if="latest?.answer" :source="latest.answer" />
+                <AnswerContent
+                    v-else-if="latest?.answer"
+                    :source="latest.answer"
+                    :answer-type="latest.answerType"
+                    :executable="latest.status !== 'error' && latest.status !== 'cancelled'"
+                    @failure="previewError = $event"
+                    @expanded-change="previewExpandedChanged"
+                />
                 <p v-else class="muted">
                     {{ state === 'idle' ? '测试完成后，回答会显示在这里。' : '没有可展示的回答。' }}
                 </p>
@@ -606,7 +780,9 @@ watch(error, (value) => {
                     {{ primaryLabel }}
                 </button>
             </div>
-            <footer class="rule-note"><Info :size="12" /><span>结果仅依据自定义连续字符串规则</span></footer>
+            <footer class="rule-note">
+                <Info :size="12" /><span>文字按连续字符串判定；HTML 仅展示效果</span>
+            </footer>
             <p class="scope-note">适用于 GPT 6 及以上系列模型，其他模型无法保证测试准确度。</p>
         </section>
 

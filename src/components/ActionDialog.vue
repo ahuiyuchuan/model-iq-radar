@@ -8,7 +8,7 @@ import { nextTick, onMounted, onUnmounted, ref } from 'vue';
 defineProps<{
     title: string;
     message: string;
-    actions: { id: string; label: string; danger?: boolean; primary?: boolean }[];
+    actions: { id: string; label: string; danger?: boolean; primary?: boolean; disabled?: boolean }[];
 }>();
 const emit = defineEmits<{ choose: [id: string] }>();
 const root = ref<HTMLElement>();
@@ -21,7 +21,12 @@ function keydown(event: KeyboardEvent): void {
         emit('choose', 'cancel');
     }
     if (event.key !== 'Tab') return;
-    const buttons = [...(root.value?.querySelectorAll<HTMLElement>('button, input, [tabindex="0"]') ?? [])];
+    // 动态选择弹窗可禁用“继续”，Tab 应跳过不可操作项，不能把焦点困在禁用按钮上。
+    const buttons = [
+        ...(root.value?.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input:not(:disabled), [tabindex="0"]',
+        ) ?? []),
+    ];
     const first = buttons[0];
     const last = buttons.at(-1);
     if (event.shiftKey && document.activeElement === first) {
@@ -62,6 +67,7 @@ onUnmounted(() => previousFocus?.focus());
                     type="button"
                     class="button"
                     :class="{ danger: action.danger, secondary: !action.primary }"
+                    :disabled="action.disabled"
                     @click="emit('choose', action.id)"
                 >
                     {{ action.label }}

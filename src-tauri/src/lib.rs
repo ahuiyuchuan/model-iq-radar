@@ -6,8 +6,10 @@ mod autostart;
 pub mod backup;
 pub mod conditions;
 mod discovery;
+mod html;
 pub mod model;
 pub mod notifications;
+pub mod preview;
 pub mod storage;
 mod updates;
 
@@ -24,12 +26,10 @@ use tauri::{
     Emitter, Listener, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const CREDENTIAL_SERVICE: &str = "com.ahui.model-probe";
-const SHORTCUT: &str = "ctrl+alt+p";
 
 /// 运行任务拥有自己的取消令牌；仅在历史持久化完成后释放占用。
 struct Running {
@@ -53,6 +53,8 @@ struct AppState {
     next_auto_test: Mutex<Instant>,
     notifications: Mutex<notifications::NotificationTracker>,
     notification_error: Mutex<Option<String>>,
+    /// 清空相关分类后递增；旧 SMTP 任务仍可收尾，但不得把过期故障提示写回新状态。
+    notification_generation: AtomicU64,
 }
 
 /// 仅保存本次进程的边缘呈现状态；数据库仍保存完整面板位置，重启可直接操作。
@@ -62,6 +64,8 @@ struct WidgetLayout {
     tucked: bool,
     expanded: bool,
     anchor: Option<(i32, i32)>,
+    /// 页内放大临时借用当前宿主尺寸，关闭时恢复；不能持久化为正常卡片位置。
+    preview_restore: Option<((i32, i32), (u32, u32))>,
 }
 
 /// 事件不携带配置或凭据；前端据此切换边缘图标并显示最新测试颜色。
@@ -178,7 +182,8 @@ fn get_snapshot(
         history,
         email_notification_error: lock(&state.notification_error)?.clone(),
         running: running.as_ref().map(|run| run.info.clone()),
-        auto_test_remaining_ms: if store.config.preferences.auto_test_enabled
+        auto_test_remaining_ms: if running.is_none()
+            && store.config.preferences.auto_test_enabled
             && store
                 .config
                 .profiles
@@ -212,11 +217,6 @@ fn diagnostic_context(
         api::responses_endpoint(&input.base_url)?;
     } else {
         api::endpoint(&input.base_url)?;
-    }
-    if let Some(timeout) = input.timeout_seconds {
-        if !(10..=300).contains(&timeout) {
-            return Err("模型超时应为 10—300 秒，或留空继承全局设置。".into());
-        }
     }
     validate_reasoning_effort(input.reasoning_effort.as_deref())?;
     if input.api_key.len() > 2500 || input.api_key.contains(['\r', '\n']) {
@@ -307,7 +307,56 @@ fn get_model_catalog(
     lock(&state.store)?.model_catalog(&token, &endpoint)
 }
 
-/// 独立固定提示词连接测试，草稿模型超时覆盖已保存的全局值；不更改配置、周期和结果。
+/// 悬浮窗只提交已保存分组 ID，凭据仍在后端读取，不接受前端拼装的主机/密钥快照。
+/// 复用诊断门禁和持久缓存，不调用推理或自动换模型；迟到响应由前端世代隔离。
+#[tauri::command]
+async fn fetch_profile_models(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<discovery::ModelCatalog, String> {
+    let input = {
+        let store = lock(&state.store)?;
+        let profile = store
+            .config
+            .profiles
+            .iter()
+            .find(|item| item.id == profile_id)
+            .ok_or("模型配置已不存在，请刷新后重试。")?;
+        ProfileInput {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            api_key: String::new(),
+            remove_key: false,
+            interface_mode: profile.interface_mode.clone(),
+            protocol_fallback_enabled: profile.protocol_fallback_enabled,
+            reasoning_effort: profile.reasoning_effort.clone(),
+            rule_preset_id: profile.rule_preset_id.clone(),
+            catalog_token: profile.catalog_token.clone(),
+        }
+    };
+    let catalog = fetch_models(state, input).await?;
+    changed(&app);
+    Ok(catalog)
+}
+
+/// 快捷换模型仅写指定分组的 model 字段；校验当前目录与运行门禁，保留凭据及其他设置。
+#[tauri::command]
+fn set_profile_model(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    model: String,
+) -> Result<(), String> {
+    let _idle = require_idle(&state)?;
+    lock(&state.store)?.set_profile_model(&profile_id, &model)?;
+    changed(&app);
+    Ok(())
+}
+
+/// 独立固定提示词连接测试，按草稿绑定的已保存规则/全局值确定超时，不读取旧接口超时。
 #[tauri::command]
 async fn test_connection(
     state: State<'_, AppState>,
@@ -316,13 +365,17 @@ async fn test_connection(
     let _guard = discovery::DiagnosticGuard::acquire()?;
     let (key, _) = diagnostic_context(&state, &input)?;
     // 请求开始时取同一份持久化超时；不在网络等待期间持有存储锁。
-    let timeout = lock(&state.store)?.config.preferences.timeout_seconds;
-    let effective_timeout = input.timeout_seconds.unwrap_or(timeout);
+    let timeout = {
+        let store = lock(&state.store)?;
+        conditions::rule_for_binding(&store.config, input.rule_preset_id.as_deref())?
+            .timeout_seconds
+            .unwrap_or(store.config.preferences.timeout_seconds)
+    };
     discovery::test_connection(
         &input.base_url,
         &input.model,
         &key,
-        effective_timeout,
+        timeout,
         &input.interface_mode,
         input.reasoning_effort.clone(),
         input.protocol_fallback_enabled,
@@ -356,11 +409,6 @@ fn save_profile(
         api::responses_endpoint(&input.base_url)?;
     } else {
         api::endpoint(&input.base_url)?;
-    }
-    if let Some(timeout) = input.timeout_seconds {
-        if !(10..=300).contains(&timeout) {
-            return Err("模型超时应为 10—300 秒，或留空继承全局设置。".into());
-        }
     }
     validate_reasoning_effort(input.reasoning_effort.as_deref())?;
     if input.api_key.len() > 2500 || input.api_key.contains(['\r', '\n']) {
@@ -435,7 +483,7 @@ fn save_profile(
         interface_mode: input.interface_mode,
         protocol_fallback_enabled: input.protocol_fallback_enabled,
         reasoning_effort: input.reasoning_effort,
-        timeout_seconds: input.timeout_seconds,
+        timeout_seconds: None,
         rule_preset_id: input.rule_preset_id,
         catalog_token,
     };
@@ -552,6 +600,7 @@ fn save_rule_preset(
         prompt: preset.prompt.clone(),
         keyword: preset.keyword.clone(),
         alternative_keywords: preset.alternative_keywords.clone(),
+        timeout_seconds: preset.timeout_seconds,
     };
     rule.validate()?;
     let mut store = lock(&state.store)?;
@@ -563,11 +612,11 @@ fn save_rule_preset(
     {
         *existing = preset;
     } else {
-        if preset.id != CANDY_RULE_ID
+        if !is_builtin_rule_id(&preset.id)
             && config
                 .rule_presets
                 .iter()
-                .filter(|item| item.id != CANDY_RULE_ID)
+                .filter(|item| !is_builtin_rule_id(&item.id))
                 .count()
                 >= 100
         {
@@ -667,7 +716,7 @@ fn delete_rule_preset(
     Ok(())
 }
 
-/// 快捷键和置顶变更若失败，会撤回数据库写入前的运行时设置。
+/// 置顶变更若失败则不写数据库；数据库写入失败时恢复此前运行时设置。
 /// 未明确编辑自动开关的保存，在存储锁内保留该权威字段，避免托盘已更新但
 /// 跨窗口事件尚未送达时，整个旧偏好对象将外部开关覆盖；省略参数兼容旧调用方。
 #[tauri::command]
@@ -679,18 +728,8 @@ fn save_preferences(
     preserve_auto_test: Option<bool>,
 ) -> Result<SaveOutcome, String> {
     let _idle = require_idle(&state)?;
-    if !(80..=100).contains(&preferences.opacity)
-        || !(10..=300).contains(&preferences.timeout_seconds)
-        || !(1..=1440).contains(&preferences.auto_test_interval_minutes)
-        || preferences
-            .history_max_records
-            .is_some_and(|value| !(1..=5000).contains(&value))
-        || preferences
-            .history_retention_days
-            .is_some_and(|value| !(1..=3650).contains(&value))
-    {
-        return Err("不透明度应为 80—100%，超时应为 10—300 秒，定时间隔应为 1—1440 分钟。".into());
-    }
+    // 保存、清理预览、启动和备份共用边界，避免只放开表单却被另一入口的旧上限拒绝。
+    conditions::validate_preferences(&preferences)?;
     let mut store = lock(&state.store)?;
     let mut config = store.config.clone();
     let previous = config.preferences.clone();
@@ -708,7 +747,7 @@ fn save_preferences(
         }
         return Err(message);
     }
-    // 透明度、置顶和快捷键等展示设置不应推迟既有自动测试；只有开关或间隔
+    // 透明度、置顶等展示设置不应推迟既有自动测试；只有开关或间隔
     // 真正改变调度时才从当前时刻重新计算完整周期。
     if auto_schedule_changed(&previous, &store.config.preferences) {
         *lock(&state.next_auto_test)? = Instant::now()
@@ -846,7 +885,7 @@ async fn send_test_email(
     notifications::send_test(&input.settings, &password).await
 }
 
-/// 判断偏好保存是否真正影响自动测试期限；仅外观、置顶和快捷键变化时保持原期限。
+/// 判断偏好保存是否真正影响自动测试期限；仅外观和置顶变化时保持原期限。
 fn auto_schedule_changed(previous: &Preferences, next: &Preferences) -> bool {
     previous.auto_test_enabled != next.auto_test_enabled
         || previous.auto_test_interval_minutes != next.auto_test_interval_minutes
@@ -880,40 +919,17 @@ fn set_auto_test_enabled(
     Ok(())
 }
 
+/// 保存、导入和分类清空共用置顶设置；不再注册全局快捷键，避免占用冲突中断事务。
 fn apply_preferences(app: &tauri::AppHandle, preferences: &Preferences) -> Result<(), String> {
-    let shortcut = app.global_shortcut();
-    let registered = shortcut.is_registered(SHORTCUT);
-    if preferences.shortcut_enabled && !registered {
-        shortcut
-            .register(SHORTCUT)
-            .map_err(|_| "快捷键 Ctrl+Alt+P 已被占用，请关闭该选项或释放快捷键。")?;
-    } else if !preferences.shortcut_enabled && registered {
-        shortcut
-            .unregister(SHORTCUT)
-            .map_err(|_| "无法注销快捷键。")?;
-    }
     if let Some(window) = app.get_webview_window("widget") {
-        if window.set_always_on_top(preferences.always_on_top).is_err() {
-            // 置顶失败时恢复调用前的快捷键状态，避免界面显示启用、实际却已注销。
-            let restored = if registered && !preferences.shortcut_enabled {
-                shortcut.register(SHORTCUT)
-            } else if !registered && preferences.shortcut_enabled {
-                shortcut.unregister(SHORTCUT)
-            } else {
-                return Err("无法更新悬浮窗置顶状态。".into());
-            };
-            if restored.is_err() {
-                return Err(
-                    "置顶设置失败，快捷键恢复也失败，请重新保存悬浮设置或重启应用。".into(),
-                );
-            }
-            return Err("无法更新悬浮窗置顶状态。".into());
-        }
+        window
+            .set_always_on_top(preferences.always_on_top)
+            .map_err(|_| "无法更新悬浮窗置顶状态。")?;
     }
     Ok(())
 }
 
-/// 手动入口：成功领取任务时，从本次开始时刻重置完整自动周期，而非等请求完成。
+/// 手动入口与自动入口共用生命周期；下次自动测试从本次结算完成后等待完整间隔。
 #[tauri::command]
 async fn start_test(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     run_test(app, state, false).await
@@ -964,7 +980,7 @@ async fn run_test(
             info: info.clone(),
             token: token.clone(),
         });
-        let timeout = profile
+        let timeout = rule
             .timeout_seconds
             .unwrap_or(config.preferences.timeout_seconds);
         (profile, rule, rule_name, timeout, fingerprint, info, token)
@@ -983,15 +999,12 @@ async fn run_test(
         Err(message) => api::Completion::failure("credentials", &message),
     };
     // 在协议错误返回到历史结算之间收到取消也必须优先记为取消，防止发出失败邮件。
-    let status = if completion.cancelled || token.is_cancelled() {
-        "cancelled"
-    } else if completion.error.is_some() {
-        "error"
-    } else if rule.matches(&completion.answer) {
-        "passed"
-    } else {
-        "failed"
-    };
+    let (answer_type, status) = html::settle(
+        &completion.answer,
+        &rule,
+        completion.error.is_some(),
+        completion.cancelled || token.is_cancelled(),
+    );
     let rule_version = rule.version().to_owned();
     let record = TestRecord {
         id: info.id,
@@ -1024,14 +1037,17 @@ async fn run_test(
         error_kind: completion.error_kind,
         http_status: completion.http_status,
         request_id: completion.request_id,
+        answer_type: Some(answer_type.as_str().into()),
+        answer_parsing_version: Some(html::PARSING_VERSION.into()),
     };
     let result = {
         let mut running = lock(&state.running)?;
         let mut store = lock(&state.store)?;
         let result = store.save_record(&record);
         let mut next = lock(&state.next_auto_test)?;
-        // 手动/自动请求都可能比周期更慢；丢弃执行期间错过的期限，不结算后立即补跑。
-        skip_elapsed_deadline(&store.config.preferences, &mut next, Instant::now());
+        // 成功、失败、超时、取消和历史保存失败都在结算后等待完整间隔，不计算请求耗时。
+        // 运行门禁尚未释放，外部自动开关在途变化也以这里的最新配置为准，不会抢跑。
+        restart_auto_deadline(&store.config.preferences, &mut next, Instant::now());
         drop(next);
         drop(store);
         // 释放运行门禁之前推进通知状态，避免另一个极快请求先结算导致邮件状态倒序。
@@ -1067,9 +1083,10 @@ fn dispatch_notification(app: &tauri::AppHandle, state: &AppState, record: TestR
         }
         let password =
             notifications::read_password()?.ok_or("邮箱授权码不存在，请重新保存邮件设置。")?;
-        Ok::<_, String>(Some((settings, password, event)))
+        let generation = state.notification_generation.load(Ordering::Acquire);
+        Ok::<_, String>(Some((settings, password, event, generation)))
     })();
-    let (settings, password, event) = match delivery {
+    let (settings, password, event, generation) = match delivery {
         Ok(Some(delivery)) => delivery,
         Ok(None) => return,
         Err(message) => {
@@ -1083,8 +1100,11 @@ fn dispatch_notification(app: &tauri::AppHandle, state: &AppState, record: TestR
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = notifications::send_notification(&settings, &password, &record, event).await;
-        if let Ok(mut error) = app.state::<AppState>().notification_error.lock() {
-            *error = result.err();
+        let state = app.state::<AppState>();
+        if let Ok(mut error) = state.notification_error.lock() {
+            if state.notification_generation.load(Ordering::Acquire) == generation {
+                *error = result.err();
+            }
         }
         changed(&app);
     });
@@ -1104,6 +1124,141 @@ fn clear_history(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()
     lock(&state.store)?.clear_history()?;
     changed(&app);
     Ok(())
+}
+
+/// 两个管理按钮共用清空命令；前端确认分类后立即生效，不经“保存设置”再次提交。
+/// 数据库一次事务提交；系统凭据/自启/运行时不能加入 SQLite 事务，因此先保存旧值，
+/// 任一步失败都尝试补偿恢复并报告恢复失败。网络等待不在此锁范围；已发出的邮件不能撤回。
+#[tauri::command]
+fn reset_selected_data(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    selection: DataResetSelection,
+) -> Result<SaveOutcome, String> {
+    let idle = require_idle(&state)?;
+    // 与模型拉取/连接诊断共用门禁，避免接口删除后迟到的网络结果重建已清空目录。
+    let _diagnostic = if selection.api {
+        Some(discovery::DiagnosticGuard::acquire()?)
+    } else {
+        None
+    };
+    let mut store = lock(&state.store)?;
+    let config = selection.reset_config(&store.config)?;
+    conditions::validate_stored_config(&config)?;
+    let previous_preferences = store.config.preferences.clone();
+    let next_preferences = config.preferences.clone();
+    // 必须在任何修改之前读齐回滚材料；读取失败时不执行清空，不输出凭据正文。
+    let keys: Vec<(Entry, Option<String>)> = if selection.api {
+        store
+            .config
+            .profiles
+            .iter()
+            .map(|profile| {
+                let entry = credential(&profile.id)?;
+                let key = read_key(&entry)?;
+                Ok((entry, key))
+            })
+            .collect::<Result<_, String>>()?
+    } else {
+        Vec::new()
+    };
+    let password = if selection.mail {
+        notifications::read_password()?
+    } else {
+        None
+    };
+    let autostart = if selection.widget {
+        Some(autostart::get_autostart()?)
+    } else {
+        None
+    };
+    // 提交后的内存状态更新也必须无失败路径；按既有 store → notifications 顺序预先取锁。
+    let mut tracker = lock(&state.notifications)?;
+    let mut next_auto_test = lock(&state.next_auto_test)?;
+    let mut notification_error = lock(&state.notification_error)?;
+    let commit = (|| {
+        if selection.widget {
+            apply_preferences(&app, &next_preferences)?;
+            autostart::set_autostart(false)?;
+        }
+        for (entry, _) in &keys {
+            set_key(entry, None)?;
+        }
+        if selection.mail {
+            notifications::save_password(None)?;
+        }
+        store.reset_selected_data(config, &selection)
+    })();
+    if let Err(message) = commit {
+        let mut failures = Vec::new();
+        for (entry, key) in &keys {
+            if set_key(entry, key.as_deref()).is_err() {
+                failures.push("API Key");
+            }
+        }
+        if selection.mail && notifications::save_password(password.as_deref()).is_err() {
+            failures.push("邮箱授权码");
+        }
+        if let Some(enabled) = autostart {
+            if autostart::set_autostart(enabled).is_err() {
+                failures.push("系统自启");
+            }
+            if apply_preferences(&app, &previous_preferences).is_err() {
+                failures.push("桌面偏好");
+            }
+        }
+        if failures.is_empty() {
+            return Err(message);
+        }
+        failures.sort_unstable();
+        failures.dedup();
+        return Err(format!(
+            "{message} 部分系统状态恢复失败（{}），请重新配置或重启应用。",
+            failures.join("、")
+        ));
+    }
+    if selection.resets_notification_state() {
+        *tracker = notifications::NotificationTracker::default();
+        *notification_error = None;
+        state.notification_generation.fetch_add(1, Ordering::AcqRel);
+    }
+    if selection.widget || selection.api {
+        restart_auto_deadline(&next_preferences, &mut next_auto_test, Instant::now());
+    }
+    drop(notification_error);
+    drop(next_auto_test);
+    drop(tracker);
+    drop(store);
+    // 呈现收尾在提交后执行；失败只返回警告，不能误报清空失败而诱导重复删除。
+    let warning = if selection.widget {
+        let result = (|| {
+            // 放大由前端 dialog 持有生命周期，设置窗口不能只缩小原生宿主而留下放大层。
+            // 此时已提交默认位置，保留现有预览，重启再按默认位置显示并明确提示。
+            if lock(&state.layout)?.preview_restore.is_some() {
+                return Err("当前 HTML 正在放大，默认窗口位置将在重启后生效。".into());
+            }
+            restore_dock_after_commit(&app, true).map_or(Ok(()), Err)?;
+            if let Some(window) = app.get_webview_window("widget") {
+                let (_, top, right, _) = work_area(&window)?;
+                let scale = window.scale_factor().map_err(|_| "无法读取显示缩放。")?;
+                window
+                    .set_position(PhysicalPosition::new(
+                        right - (382.0 * scale) as i32,
+                        top + (90.0 * scale) as i32,
+                    ))
+                    .map_err(|_| "无法恢复悬浮窗默认位置。")?;
+            }
+            Ok::<_, String>(())
+        })();
+        result
+            .err()
+            .map(|message| format!("所选数据已清空，但窗口恢复未完成：{message} 请重启应用。"))
+    } else {
+        None
+    };
+    drop(idle);
+    changed(&app);
+    Ok(SaveOutcome { warning })
 }
 
 /// 复用单一设置窗口，避免重复编辑窗口写入冲突；用户不保存时不提交草稿。
@@ -1129,7 +1284,7 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
             ))
         })
         .unwrap_or((1120.0, 900.0));
-    WebviewWindowBuilder::new(
+    let window = WebviewWindowBuilder::new(
         &app,
         "settings",
         WebviewUrl::App("index.html?view=settings".into()),
@@ -1142,6 +1297,7 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     .center()
     .build()
     .map_err(|_| "无法创建设置窗口。")?;
+    preview::secure(&window)?;
     Ok(())
 }
 
@@ -1219,7 +1375,11 @@ fn snapped_position(
 fn snap_widget(app: tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
     let state = app.state::<AppState>();
-    if lock(&state.layout)?.tucked {
+    let preserve_layout = {
+        let layout = lock(&state.layout)?;
+        layout.tucked || layout.preview_restore.is_some()
+    };
+    if preserve_layout {
         return Ok(());
     }
     let snap = lock(&state.store)?.config.preferences.snap_to_edge;
@@ -1261,6 +1421,9 @@ fn set_widget_layout(
 ) -> Result<(), String> {
     let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
     let state = app.state::<AppState>();
+    if lock(&state.layout)?.preview_restore.is_some() {
+        return Ok(());
+    }
     let (left, top, right, bottom) = work_area(&window)?;
     let scale = window.scale_factor().unwrap_or(1.0);
     let position = window.outer_position().map_err(|_| "无法读取窗口位置。")?;
@@ -1321,6 +1484,54 @@ fn set_widget_layout(
     }
     app.emit("widget-dock", DockNotice { side, tucked: hide })
         .map_err(|_| "无法刷新边缘状态。")?;
+    Ok(())
+}
+
+/// 页内预览仅临时放大既有悬浮窗；不创建窗口，原位置/尺寸只留内存。
+/// 设置窗口本身足够大，无需调整；重复打开/关闭幂等，失败仍保留恢复依据以便重试。
+#[tauri::command]
+fn set_html_preview_expanded(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    expanded: bool,
+) -> Result<(), String> {
+    if window.label() == "settings" {
+        return Ok(());
+    }
+    if window.label() != "widget" {
+        return Err("此窗口不能放大预览。".into());
+    }
+    let state = app.state::<AppState>();
+    let mut layout = lock(&state.layout)?;
+    if expanded {
+        if layout.preview_restore.is_some() {
+            return Ok(());
+        }
+        let position = window.outer_position().map_err(|_| "无法读取窗口位置。")?;
+        let size = window.inner_size().map_err(|_| "无法读取窗口尺寸。")?;
+        let (left, top, right, bottom) = work_area(&window)?;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let width = ((1120.0 * scale) as u32).min((right - left).max(1) as u32);
+        let height = ((860.0 * scale) as u32).min((bottom - top).max(1) as u32);
+        layout.preview_restore = Some(((position.x, position.y), (size.width, size.height)));
+        window
+            .set_size(tauri::PhysicalSize::new(width, height))
+            .map_err(|_| "无法放大预览。")?;
+        window
+            .set_position(PhysicalPosition::new(
+                left + (right - left - width as i32) / 2,
+                top + (bottom - top - height as i32) / 2,
+            ))
+            .map_err(|_| "无法定位预览。")?;
+    } else if let Some((position, size)) = layout.preview_restore {
+        window
+            .set_size(tauri::PhysicalSize::new(size.0, size.1))
+            .map_err(|_| "无法恢复窗口尺寸。")?;
+        window
+            .set_position(PhysicalPosition::new(position.0, position.1))
+            .map_err(|_| "无法恢复窗口位置。")?;
+        layout.preview_restore = None;
+    }
     Ok(())
 }
 
@@ -1425,7 +1636,10 @@ fn get_widget_dock(app: tauri::AppHandle) -> Result<DockNotice, String> {
     let state = app.state::<AppState>();
     {
         let layout = lock(&state.layout)?;
-        if layout.tucked || state.dragging.load(Ordering::Relaxed) {
+        if layout.tucked
+            || layout.preview_restore.is_some()
+            || state.dragging.load(Ordering::Relaxed)
+        {
             return Ok(DockNotice {
                 side: layout.side.clone(),
                 tucked: layout.tucked,
@@ -1498,19 +1712,7 @@ fn start_scheduler(app: tauri::AppHandle) {
             if due == Ok(true) {
                 // 与手动入口共用鉴权、规则快照、总超时和协议回退策略；调度器不额外重试。
                 let _ = run_test(app.clone(), app.state::<AppState>(), true).await;
-                // 请求本身耗时不算休眠；若请求跨过下一期限，丢弃该过期期限，
-                // 防止慢模型/超时返回后立即再发一个自动请求。
-                if let Ok(store) = app.state::<AppState>().store.lock() {
-                    if let Ok(mut next) = app.state::<AppState>().next_auto_test.lock() {
-                        let finished = Instant::now();
-                        if *next <= finished {
-                            *next = finished
-                                + std::time::Duration::from_secs(
-                                    store.config.preferences.auto_test_interval_minutes * 60,
-                                );
-                        }
-                    }
-                }
+                // run_test 已统一从结算时刻重新计时；网络耗时不能被当作休眠再次推迟期限。
                 previous_tick = Instant::now();
                 previous_wall = Utc::now();
             }
@@ -1524,11 +1726,9 @@ fn scheduler_gap(previous: Instant, now: Instant, wall_seconds: i64) -> bool {
         || wall_seconds > 10
 }
 
-/// 只跳过已过期的期限；在途请求期间从其他入口新开启的未来期限仍保留。
-fn skip_elapsed_deadline(preferences: &Preferences, next: &mut Instant, now: Instant) {
-    if *next <= now {
-        *next = now + std::time::Duration::from_secs(preferences.auto_test_interval_minutes * 60);
-    }
+/// 请求结算后无条件重置一个完整周期；在途重新开启自动测试也从结算后计时，不补跑。
+fn restart_auto_deadline(preferences: &Preferences, next: &mut Instant, now: Instant) {
+    *next = now + std::time::Duration::from_secs(preferences.auto_test_interval_minutes * 60);
 }
 
 /// 轮询只预检，不提前消费期限；真正领取在运行门禁内再次验证，避免手动重置后误执行。
@@ -1550,7 +1750,8 @@ fn scheduled_ready(state: &AppState, now: Instant) -> Result<bool, String> {
     Ok(now >= *lock(&state.next_auto_test)?)
 }
 
-/// 领取测试时同步更新下次期限。手动调用始终重新计时，自动调用仅在启用且到期时领取。
+/// 测试开始时预占期限，防止同一到期轮次被重复领取；这不是界面倒计时起点。
+/// 手动请求始终可领取，自动请求须启用且到期；结算时无条件重置完整周期，测试中不展示期限。
 /// 调用方须先持有运行门禁和配置锁；`now` 为单调时钟，间隔单位为分钟，边界 1—1440。
 fn claim_test_deadline(
     preferences: &Preferences,
@@ -1568,7 +1769,7 @@ fn claim_test_deadline(
     true
 }
 
-/// 快捷键与托盘共用显示逻辑，恢复时夹紧工作区，解决显示器拔出后的不可见窗口。
+/// 托盘和重复启动共用显示逻辑，恢复时夹紧工作区，解决显示器拔出后的不可见窗口。
 fn show_widget(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("widget") {
         let expanded = app
@@ -1587,31 +1788,23 @@ fn show_widget(app: &tauri::AppHandle) {
 /// 构建本地桌面应用；single-instance 是首个插件，第二次启动仅恢复现有窗口。
 pub fn run() {
     tauri::Builder::default()
+        .manage(preview::PreviewState::default())
+        .register_uri_scheme_protocol("html-preview", |context, request| {
+            preview::respond(
+                context.app_handle(),
+                context.webview_label(),
+                &request.uri().to_string(),
+            )
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_widget(app)
         }))
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _, event| {
-                    if event.state() != ShortcutState::Pressed {
-                        return;
-                    }
-                    if let Some(window) = app.get_webview_window("widget") {
-                        if window.is_visible().unwrap_or(false) {
-                            let _ = window.hide();
-                        } else {
-                            show_widget(app);
-                        }
-                    }
-                })
-                .build(),
-        )
         .setup(|app| {
             let folder = app.path().app_data_dir()?;
             std::fs::create_dir_all(&folder)?;
             let store = Store::open(&folder.join("probe.db")).map_err(std::io::Error::other)?;
             let position = store.config.widget_position;
-            let mut preferences = store.config.preferences.clone();
+            let preferences = store.config.preferences.clone();
             let notification_tracker = store
                 .load_notification_tracker()
                 .map_err(std::io::Error::other)?;
@@ -1627,6 +1820,7 @@ pub fn run() {
                 drag_origin: Mutex::new(None),
                 notifications: Mutex::new(notification_tracker),
                 notification_error: Mutex::new(None),
+                notification_generation: AtomicU64::new(0),
                 next_auto_test: Mutex::new(
                     Instant::now()
                         + std::time::Duration::from_secs(
@@ -1635,19 +1829,11 @@ pub fn run() {
                 ),
             });
             let handle = app.handle();
-            if apply_preferences(handle, &preferences).is_err() {
-                // 快捷键被占用不阻止应用启动；保存关闭状态，用户可在设置中重新启用并查看具体错误。
-                preferences.shortcut_enabled = false;
-                let _ = apply_preferences(handle, &preferences);
-                let state = app.state::<AppState>();
-                let mut store = lock(&state.store).map_err(std::io::Error::other)?;
-                let mut config = store.config.clone();
-                config.preferences = preferences.clone();
-                store.save_config(config).map_err(std::io::Error::other)?;
-            }
+            apply_preferences(handle, &preferences).map_err(std::io::Error::other)?;
             let window = app
                 .get_webview_window("widget")
                 .ok_or("悬浮窗初始化失败。")?;
+            preview::secure(&window).map_err(std::io::Error::other)?;
             if let Some((x, y)) = position {
                 window.set_position(PhysicalPosition::new(x, y))?;
             } else {
@@ -1731,6 +1917,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                // 关闭设置窗口时由原生生命周期兜底清理，不依赖定时过期或 Vue 卸载执行。
+                window
+                    .app_handle()
+                    .state::<preview::PreviewState>()
+                    .release_owner(window.label());
+                return;
+            }
             if window.label() != "widget" {
                 return;
             }
@@ -1781,6 +1975,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            preview::prepare_html_preview,
+            preview::release_html_preview,
+            set_html_preview_expanded,
             autostart::get_autostart,
             autostart::set_autostart,
             updates::open_external_url,
@@ -1788,6 +1985,8 @@ pub fn run() {
             updates::check_updates,
             fetch_models,
             get_model_catalog,
+            fetch_profile_models,
+            set_profile_model,
             test_connection,
             get_snapshot,
             get_widget_dock,
@@ -1810,6 +2009,7 @@ pub fn run() {
             start_test,
             cancel_test,
             clear_history,
+            reset_selected_data,
             open_settings,
             snap_widget,
             set_widget_layout,
@@ -1916,6 +2116,7 @@ mod desktop_tests {
             drag_origin: Mutex::new(None),
             notifications: Mutex::new(notifications::NotificationTracker::default()),
             notification_error: Mutex::new(None),
+            notification_generation: AtomicU64::new(0),
             next_auto_test: Mutex::new(now),
         };
         assert!(!scheduled_ready(&state, now).unwrap());
@@ -2048,7 +2249,6 @@ mod desktop_tests {
         let mut visual = previous.clone();
         visual.opacity = 90;
         visual.always_on_top = false;
-        visual.shortcut_enabled = false;
         assert!(!auto_schedule_changed(&previous, &visual));
 
         let mut disabled = previous.clone();
@@ -2101,24 +2301,26 @@ mod desktop_tests {
         ));
     }
 
-    /// 请求耗时超过测试周期时丢弃旧期限；期间重新开启的未来期限不能再次被推迟。
+    /// 所有结算统一重计完整间隔；请求中重新开启产生的未来期限也不能算入本次等待。
     #[test]
-    fn slow_run_skips_expired_deadline_but_preserves_a_new_future_deadline() {
+    fn settled_run_restarts_full_interval_even_after_inflight_toggle() {
         let now = Instant::now();
         let preferences = Preferences::default();
         let mut expired = now - std::time::Duration::from_secs(20);
-        skip_elapsed_deadline(&preferences, &mut expired, now);
+        restart_auto_deadline(&preferences, &mut expired, now);
         assert_eq!(expired, now + std::time::Duration::from_secs(180));
         let future = now + std::time::Duration::from_secs(120);
         let mut next = future;
-        skip_elapsed_deadline(&preferences, &mut next, now);
-        assert_eq!(next, future);
+        restart_auto_deadline(&preferences, &mut next, now);
+        assert_eq!(next, now + std::time::Duration::from_secs(180));
+        assert_eq!(Preferences::default().timeout_seconds, 300);
     }
 
     /// 老配置补齐新增字段，同时保留原有关闭选项。
     #[test]
     fn old_preferences_keep_values_and_get_schedule_defaults() {
         let preferences: Preferences = serde_json::from_value(serde_json::json!({"alwaysOnTop":false,"snapToEdge":false,"opacity":95,"timeoutSeconds":30,"shortcutEnabled":false})).unwrap();
+        assert_eq!(preferences.timeout_seconds, 30);
         assert!(!preferences.always_on_top);
         assert!(preferences.auto_test_enabled);
         assert_eq!(preferences.auto_test_interval_minutes, 3);

@@ -18,6 +18,8 @@
     --red: #ff808b;
     --line: rgba(164, 193, 226, 0.13);
     --panel-opacity: 0.97;
+    /* HTML 未声明背景时回退到卡片深色；有纯色背景时由沙箱消息同步到预览留边。 */
+    --html-preview-background: #1c2c3d;
 }
 * {
     box-sizing: border-box;
@@ -383,12 +385,42 @@ summary:focus-visible {
     white-space: nowrap;
     text-overflow: ellipsis;
 }
-/* 两态共用约 80:20 比例；等级列至少 70px，确保相同字号/箭头下 medium 仍完整可读。 */
+/* 两行扣除间隙后按需求分配宽度，所有列允许收缩；完整名称由菜单及悬停提供。 */
+.widget-model-row {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+.widget-model-row.with-fetch {
+    grid-template-columns: minmax(0, 65fr) minmax(0, 25fr) minmax(0, 10fr);
+}
+.widget-model-row > * {
+    min-width: 0;
+}
+.widget-fetch-models {
+    width: 100%;
+    height: 29px;
+    padding: 0;
+}
+.widget-model-picker .model-trigger {
+    gap: 2px;
+    padding: 0 3px;
+}
+.widget-model-picker .model-menu {
+    left: auto;
+    min-width: 250px;
+}
+.widget-model-row > .model-select:first-child .model-menu {
+    right: auto;
+    width: 320px;
+}
 .widget-rule-row {
     display: grid;
-    grid-template-columns: minmax(0, 4fr) minmax(70px, 1fr);
+    grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
     align-items: center;
-    gap: 8px;
+    gap: 5px;
     margin-top: 5px;
     min-width: 0;
 }
@@ -1053,6 +1085,54 @@ select option {
 .import-options {
     margin-top: 16px;
 }
+/* 清空范围始终由用户显式选择；全选只改草稿，确认按钮仍经过独立的最终范围确认。 */
+.reset-options {
+    display: grid;
+    gap: 8px;
+    margin-top: 16px;
+}
+.reset-select-all,
+.reset-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+    padding: 10px;
+}
+.reset-select-all {
+    align-items: center;
+    border-bottom: 1px solid var(--line);
+}
+.reset-select-all .muted {
+    margin-left: auto;
+    font-size: 11px;
+}
+.reset-option {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+}
+.reset-option:has(input:checked) {
+    border-color: #6da9ef80;
+    background: #6da9ef0c;
+}
+.reset-options input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    margin: 2px 0 0;
+    accent-color: #438fee;
+}
+.reset-option strong {
+    display: block;
+    font-size: 12px;
+}
+.reset-option small {
+    display: block;
+    margin-top: 4px;
+    color: #a8bdd6;
+    font-size: 11px;
+    line-height: 1.6;
+}
 .mail-settings fieldset {
     border: 0;
     margin: 0;
@@ -1513,8 +1593,18 @@ textarea {
     background: #a0c9fa0c;
     border-color: #a6c9f43b;
 }
-.history-item > div {
+.history-record-info {
+    flex: 1;
     min-width: 0;
+    cursor: pointer;
+    border-radius: 4px;
+}
+.history-record-info:focus-visible {
+    outline: 2px solid #83bbf5;
+    outline-offset: 4px;
+}
+.history-record-details {
+    flex-shrink: 0;
 }
 .history-model {
     font-size: 12px;
@@ -1527,12 +1617,51 @@ textarea {
     margin: 6px 0;
     overflow-wrap: anywhere;
 }
+/* 列表明确展示当次四项选择；长名称保留悬停全文，不能把右侧回答挤出卡片。 */
+.history-record-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.history-record-title .history-model {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin: 0;
+}
+.history-record-context {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px 12px;
+    margin: 8px 0;
+    font-size: 10px;
+}
+.history-record-context > div {
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+}
+.history-record-context dt {
+    color: #8ea6c1;
+    flex-shrink: 0;
+    width: 4em;
+}
+.history-record-context dd {
+    color: #bbcee4;
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 .history-time {
     display: flex;
     align-items: center;
     gap: 5px;
     color: #8ea6c1;
     font-size: 9px;
+    flex-wrap: wrap;
 }
 .result-pill {
     font-size: 9px;
@@ -1605,6 +1734,37 @@ textarea {
     margin-left: 0;
     color: #d0def0;
     overflow-wrap: anywhere;
+}
+/* 请求摘要分列，长正文另起全宽区；按窗口宽度降为两列/一列，避免单列无限拉长详情。 */
+.history-detail-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin: 16px 0 0;
+}
+.history-detail-summary > div {
+    min-width: 0;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #b6d7ff04;
+}
+.history-detail-summary dt {
+    margin: 0 0 6px;
+}
+.history-detail-summary dd {
+    margin: 0;
+    line-height: 1.65;
+}
+@media (max-width: 900px) {
+    .history-detail-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 660px) {
+    .history-detail-summary {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 .history-text {
     background: #b6d7ff07;
@@ -1816,23 +1976,41 @@ textarea {
     color: #7fe0b5;
 }
 .history-toolbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
+    display: grid;
     gap: 10px;
     margin-bottom: 16px;
 }
-.history-toolbar > .model-select {
-    width: auto;
-    flex: 1 1 150px;
+/* 四项条件独占第一排；结果、来源、日期与搜索放第二排，较窄设置窗口自然折行。 */
+.history-context-filters,
+.history-secondary-filters {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    align-items: center;
+    min-width: 0;
+}
+.history-secondary-filters {
+    grid-template-columns: minmax(160px, 1.7fr) repeat(4, minmax(0, 1fr));
+}
+.history-toolbar .model-select {
+    width: 100%;
+    min-width: 0;
 }
 .history-toolbar .model-trigger {
     height: 32px;
     font-size: 12px;
 }
-.history-toolbar > .input-affix {
-    flex: 1 1 230px;
+.history-toolbar .input-affix {
     min-width: 0;
+}
+@media (max-width: 1000px) {
+    .history-context-filters,
+    .history-secondary-filters {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .history-secondary-filters .input-affix {
+        grid-column: 1 / -1;
+    }
 }
 .date-picker {
     position: relative;
@@ -2186,5 +2364,240 @@ textarea {
     .form-footer.settings-actions {
         min-height: 60px;
         padding: 12px 22px;
+    }
+}
+
+/* 桌面画布首帧后按页面实际尺寸有界扩展，再等比适配；小预览与放大共用完整画面。 */
+.html-preview-host {
+    min-width: 0;
+}
+.html-preview {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+}
+.html-preview-stage {
+    position: relative;
+    width: 100%;
+    height: 310px;
+    overflow: hidden;
+    background: var(--html-preview-background);
+    color: var(--muted);
+    border-radius: 0;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    font-size: 12px;
+}
+.html-preview-canvas {
+    position: relative;
+}
+.html-preview-canvas iframe {
+    position: absolute;
+    inset: 0 auto auto 0;
+    border: 0;
+    transform-origin: left top;
+}
+.html-preview-loading {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: var(--html-preview-background);
+    pointer-events: none;
+}
+/* 三处预览共用等待反馈；使用实色小底板，在作品的深浅背景上都能读清。 */
+.html-preview-loading-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    color: #e4edf8;
+    background: #182b40;
+    font-size: 11px;
+    line-height: 1.5;
+}
+.html-preview-spinner {
+    flex-shrink: 0;
+    animation: spin 1s linear infinite;
+}
+/* HTML 回答填满剩余空间；滚动只留给源码，避免工具栏/说明挤出第二层滚动条。 */
+.answer-box:has(.html-preview-host) {
+    overflow: hidden;
+}
+.widget .answer-box:has(.html-preview-host),
+.history-answer:has(.html-preview-host) {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+.widget .answer-box > .html-preview-host,
+.widget .answer-box .html-preview {
+    height: 100%;
+}
+.widget .html-preview-stage {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+}
+.widget .html-source {
+    flex: 1;
+    min-height: 0;
+}
+.html-preview-dialog {
+    /* 放大直接覆盖当前宿主，去掉应用额外的面板/标题留白；作品自己的背景与布局保持原样。 */
+    inset: 0;
+    margin: 0;
+    width: 100vw;
+    height: 100vh;
+    max-width: none;
+    max-height: none;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: var(--text);
+    background: var(--html-preview-background);
+    overflow: hidden;
+    box-shadow: none;
+}
+.html-preview-dialog::backdrop {
+    background: var(--html-preview-background);
+}
+.html-preview-expanded {
+    height: 100%;
+}
+.html-preview-expanded .html-preview-stage,
+.html-preview-expanded .html-source {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    max-height: none;
+}
+.html-preview-clickable {
+    cursor: zoom-in;
+}
+.html-preview-close {
+    position: absolute;
+    z-index: 2;
+    top: 8px;
+    right: 8px;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid #637a94;
+    border-radius: 6px;
+    background: #182b40;
+    color: #fff;
+    box-shadow: 0 2px 8px #07111f38;
+}
+/* 独立样式避免通用透明图标按钮的 hover 规则覆盖；明亮作品背景下仍可辨认。 */
+.html-preview-close:hover:not(:disabled),
+.html-preview-close:focus-visible {
+    color: #fff;
+    background: #2a4563;
+    border-color: #a6c9ee;
+}
+.html-preview-close:focus-visible {
+    outline: 2px solid #83bbf5;
+    outline-offset: 2px;
+}
+.html-preview-close:active:not(:disabled) {
+    background: #102237;
+}
+.html-preview-close:disabled {
+    opacity: 0.65;
+}
+.html-preview-fragments {
+    position: absolute;
+    z-index: 1;
+    top: 8px;
+    left: 8px;
+    max-width: 150px;
+    font-size: 11px;
+}
+.html-preview-error button {
+    display: block;
+    margin: 10px auto 0;
+}
+.html-preview-error {
+    padding: 14px;
+    overflow-wrap: anywhere;
+}
+.html-source {
+    max-height: 420px;
+    overflow: auto;
+    padding: 10px;
+    margin: 0;
+    background: #06101f80;
+    color: #cfdaeb;
+    font:
+        11px/1.65 Consolas,
+        monospace;
+    white-space: pre;
+    user-select: text;
+}
+.history-answer-preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40%;
+    flex: 0 0 40%;
+    min-height: 64px;
+    max-height: 100px;
+    padding: 8px 10px;
+    border: 1px solid #9dbce41a;
+    border-radius: 5px;
+    color: #a9bdd5;
+    background: #06101f33;
+    font-size: 11px;
+    line-height: 1.6;
+    overflow: hidden;
+}
+.history-answer-summary {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+.history-answer-preview.is-html {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+.history-answer-preview .html-preview-host,
+.history-answer-preview .html-preview:not(.html-preview-expanded) {
+    width: 100%;
+    height: 84px;
+}
+.history-answer-preview .html-preview:not(.html-preview-expanded) .html-preview-stage {
+    height: 100%;
+    min-height: 0;
+}
+.result-pill.html,
+.status-symbol.html {
+    color: #a9caff;
+    background: #5b8cda25;
+}
+@media (max-width: 800px) {
+    .history-item {
+        gap: 7px;
+    }
+    .history-answer-preview {
+        width: 34%;
+        flex-basis: 34%;
     }
 }

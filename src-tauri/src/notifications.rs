@@ -22,12 +22,15 @@ use std::{
 const CREDENTIAL_SERVICE: &str = "com.ahui.model-probe.smtp";
 const CREDENTIAL_ACCOUNT: &str = "smtp-authorization";
 const MAX_TRACKED_PROFILES: usize = 1000;
+/// 与邮箱表单保持一致；只作为新建/重置默认值，不迁移覆盖用户已保存的其他 SMTP 主机。
+const DEFAULT_SMTP_HOST: &str = "smtp.qq.com";
 
 /// SMTP 配置只有非敏感字段。缺省关闭；仅 TLS / STARTTLS，禁止明文登录。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EmailNotificationSettings {
     pub enabled: bool,
+    /// 新建/重置默认 QQ SMTP，用户可编辑；已有显式地址继续保留。
     pub smtp_host: String,
     pub smtp_port: u16,
     pub security: String,
@@ -45,7 +48,7 @@ impl Default for EmailNotificationSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            smtp_host: String::new(),
+            smtp_host: DEFAULT_SMTP_HOST.into(),
             smtp_port: 465,
             security: "tls".into(),
             sender: String::new(),
@@ -68,7 +71,8 @@ pub struct EmailSettingsInput {
     pub remove_password: bool,
 }
 
-/// 验证 SMTP 非敏感配置。关闭通知时允许空白初始表单；测试邮件仍要求完整配置。
+/// 验证 SMTP 非敏感配置。关闭通知时允许只含默认主机的初始表单及旧空白表单；
+/// 启用或实际试发仍要求完整账户、收件人和授权码，不因默认主机而自动启用通知。
 pub fn validate_settings(settings: &EmailNotificationSettings) -> Result<(), String> {
     if !matches!(settings.security.as_str(), "tls" | "starttls") {
         return Err("SMTP 安全模式只能选择 TLS 或 STARTTLS。".into());
@@ -81,7 +85,7 @@ pub fn validate_settings(settings: &EmailNotificationSettings) -> Result<(), Str
     {
         return Err("SMTP 端口应为 1—65535，收件邮箱最多 10 个，账号不能包含换行。".into());
     }
-    if settings.smtp_host.is_empty()
+    if (settings.smtp_host.is_empty() || settings.smtp_host == DEFAULT_SMTP_HOST)
         && !settings.enabled
         && settings.sender.is_empty()
         && settings.username.is_empty()
@@ -292,7 +296,11 @@ impl NotificationTracker {
     /// 每条已结算记录调用一次：降智/失败逐次通知，恢复按同分组最近有效判定触发。
     /// 来源、规则、接口、思考强度和条件摘要不限制通知；取消与未知状态不推进状态。
     pub fn consider(&mut self, record: &TestRecord) -> Option<MailEvent> {
-        if !matches!(record.status.as_str(), "passed" | "failed" | "error")
+        // 新记录优先使用保存时的类型；旧历史没有 answerType 时按正文临时识别，
+        // 只用于跳过通知状态推进，不改写旧记录也不重新判定历史结果。
+        if record.answer_type.as_deref() == Some("html")
+            || (record.answer_type.is_none() && crate::html::is_html_answer(&record.answer))
+            || !matches!(record.status.as_str(), "passed" | "failed" | "error")
             || crate::conditions::validate_id(&record.profile_id).is_err()
         {
             return None;
@@ -412,7 +420,12 @@ pub async fn send_notification(
     record: &TestRecord,
     event: MailEvent,
 ) -> Result<(), String> {
-    if !event.enabled(settings) || record.status == "cancelled" {
+    // HTML 与可执行脚本只能在隔离预览中查看，不通过邮件传播，也不能更新文字状态机。
+    if record.answer_type.as_deref() == Some("html")
+        || (record.answer_type.is_none() && crate::html::is_html_answer(&record.answer))
+        || !event.enabled(settings)
+        || record.status == "cancelled"
+    {
         return Ok(());
     }
     send(settings, password, template::notification(record, event)).await
@@ -431,6 +444,50 @@ mod tests {
             "errorKind":"timeout", "httpStatus":null
         }))
         .unwrap()
+    }
+
+    /// HTML 成功、预览失败和包含部分 HTML 的请求错误均不发信、不消费先前文字状态。
+    #[tokio::test]
+    async fn html_never_sends_or_changes_prior_text_state() {
+        let mut tracker = NotificationTracker::default();
+        assert_eq!(
+            tracker.consider(&record("failed")),
+            Some(MailEvent::Degraded)
+        );
+        let before = serde_json::to_value(&tracker).unwrap();
+        for status in ["html", "passed", "failed", "error", "cancelled"] {
+            let mut html = record(status);
+            html.answer_type = Some("html".into());
+            html.answer = "<svg>partial".into();
+            assert_eq!(tracker.consider(&html), None);
+            assert_eq!(serde_json::to_value(&tracker).unwrap(), before);
+            // 非法 SMTP/空密码也必须在连接校验之前被排除，证明不会触发网络。
+            let settings = EmailNotificationSettings {
+                enabled: true,
+                ..Default::default()
+            };
+            assert!(send_notification(&settings, "", &html, MailEvent::Failure)
+                .await
+                .is_ok());
+            // 缺少类型的旧正文同样不能发信，迁移重放也不能消费之前的文字降智状态。
+            html.answer_type = None;
+            assert_eq!(tracker.consider(&html), None);
+            assert_eq!(serde_json::to_value(&tracker).unwrap(), before);
+            assert!(send_notification(&settings, "", &html, MailEvent::Failure)
+                .await
+                .is_ok());
+        }
+        assert_eq!(
+            tracker.consider(&record("passed")),
+            Some(MailEvent::Recovered)
+        );
+        let mut old = record("failed");
+        old.answer = "<svg></svg>".into();
+        // 旧历史没有 answerType；正文识别为 HTML 后不能污染文字状态，也不能凭空触发恢复。
+        assert_eq!(
+            NotificationTracker::from_history(&[old]).consider(&record("passed")),
+            None
+        );
     }
 
     /// 降智和故障逐次通知；恢复只看同一分组上次有效判定，不受来源或规则切换影响。
