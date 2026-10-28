@@ -155,7 +155,7 @@ fn get_snapshot(
     let running = lock(&state.running)?;
     let store = lock(&state.store)?;
     // 悬浮窗优先读取当前条件匹配的一条最近记录；无匹配项时保留分组最近时间并提示重测。
-    // 设置页显式请求完整历史，
+    // 设置页改用独立摘要/正文分页；仅明确导出或旧调用方才显式请求完整历史，
     // 避免自动测试每次广播时反复序列化最多 128 MiB 的原始回答。
     let condition_fingerprints: std::collections::HashMap<_, _> = store
         .config
@@ -190,6 +190,7 @@ fn get_snapshot(
         config: store.config.clone(),
         condition_fingerprints,
         history,
+        history_revision: store.history_revision()?,
         email_notification_error: lock(&state.notification_error)?.clone(),
         running: running.as_ref().map(|run| run.info.clone()),
         auto_test_remaining_ms: if running.is_none()
@@ -209,6 +210,42 @@ fn get_snapshot(
             None
         },
     })
+}
+
+/// 历史索引在独立只读事务/后台线程加载，避免扫描长回答时持有应用存储锁。
+#[tauri::command]
+async fn get_history_index(app: tauri::AppHandle) -> Result<storage::HistoryIndex, String> {
+    tokio::task::spawn_blocking(move || {
+        let reader = lock(&app.state::<AppState>().store)?.history_reader()?;
+        reader.history_index()
+    })
+    .await
+    .map_err(|_| "历史索引任务失败。".to_string())?
+}
+
+/// 只允许每页最多十条；正文用于当前页预览、详情、复制，不改写历史或重新判定。
+#[tauri::command]
+async fn get_history_records(
+    app: tauri::AppHandle,
+    sequences: Vec<i64>,
+) -> Result<Vec<TestRecord>, String> {
+    tokio::task::spawn_blocking(move || {
+        let reader = lock(&app.state::<AppState>().store)?.history_reader()?;
+        reader.history_records(&sequences)
+    })
+    .await
+    .map_err(|_| "历史页面任务失败。".to_string())?
+}
+
+/// 只返回全文命中的稳定记录 ID；输入防抖由界面负责，后端不把搜索当作接口请求。
+#[tauri::command]
+async fn search_history(app: tauri::AppHandle, query: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let reader = lock(&app.state::<AppState>().store)?.history_reader()?;
+        reader.search_history(&query)
+    })
+    .await
+    .map_err(|_| "历史搜索任务失败。".to_string())?
 }
 
 /// 临时草稿诊断只读凭据，不保存表单；改域名时不得隐式发送旧配置的密钥。
@@ -2015,6 +2052,9 @@ pub fn run() {
             set_profile_model,
             test_connection,
             get_snapshot,
+            get_history_index,
+            get_history_records,
+            search_history,
             get_widget_dock,
             save_profile,
             delete_profile,

@@ -115,7 +115,9 @@ defineExpose({ save, discard, dirty, isWorking });
 <template>
     <form id="mail-settings" class="settings-form mail-settings" @submit.prevent="save">
         <div class="notice">
-            应用需要保持运行并联网。每次降智和测试失败都会通知；恢复邮件在同一分组此前降智后再次不降智时发送。手动取消不发信，发送失败不影响测试结果。
+            应用需要保持运行并联网。保存并开启通知总开关及对应事件后，每次文字降智、每次非 HTML
+            测试失败均尝试发信；恢复仅在同一分组此前降智后再次不降智时通知。HTML（含可识别的部分
+            HTML）及手动取消不发信，发送失败不影响测试结果。
         </div>
         <div v-if="notificationError" class="inline-error" role="alert">
             最近通知发送失败：{{ notificationError }}。模型测试结果不受影响。

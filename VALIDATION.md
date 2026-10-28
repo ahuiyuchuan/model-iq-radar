@@ -1,6 +1,38 @@
-# 测智雷达 v1.0.5 本地复核记录
+# 测智雷达 v1.0.6 本地复核记录
 
 作者：ahui。日期：2026-10-28。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+
+## v1.0.6 正式发布复核（2026-10-28）
+
+- 用户在逐文件复核后明确授权提交、推送、Tag 和 Release；沿用仍有效的测试限制，不运行前端/Rust 测试、Clippy、桌面/界面自动化或真实模型/SMTP。远端 main 与本地基准 `edb2422` 一致，已有 v1.0.5 按原样保留；本轮按现有补丁版本惯例发布 v1.0.6，涵盖全部 29 个修改/新增文本，见 [FILE_AUDIT-v1.0.6.md](docs/FILE_AUDIT-v1.0.6.md)。
+- `npm version 1.0.6 --no-git-tag-version --ignore-scripts` 更新 npm 清单；Cargo 完整离线 Windows 元数据同步本项目锁文件版本，Tauri/Cargo 清单同为 1.0.6。生产 npm 包条目无变化，Cargo 锁文件仅本项目版本变化。`node scripts/generate_notices.mjs` 离线生成 37 个前端包/315 个 Windows crate 声明，逐字比较仅产品版本变化，没有手改第三方许可证。
+- 生产代码相对已复核 Beta 仅将日志构建标记改为 `sse_empty_prelude`，对应断言同步但未执行；协议、思考强度、超时、回退、HTML、邮件及 schema/备份 v3 保持。同步 README 下载链接、使用手册、CHANGELOG、正式发布说明和逐文件索引；历史人工日志与 Beta 记录保留，不将其改写为正式版测试结果。
+- `run-build.ps1 -Action build` 完成 `vue-tsc --noEmit`、Vite 及 Windows x64 `tauri build --no-bundle`，构建成功。前端为 531.72kB / gzip 190.50kB，只有既有 chunk 体积和 MSVC import library 提示，无编译错误；没有编译或执行新增 Rust 测试，不把生产编译表述为回归通过。
+- `scripts/package_exe.ps1 -OutputDirectory release-artifacts/v1.0.6` 校验 PE x64、工程/文件/产品版本、应用输入时间及复制摘要。目录仅一份 `Model-IQ-Radar-v1.0.6-Windows-x64.exe`，16,852,992 字节，SHA-256 `727e1e4d583daee9e786abcb3e3894c739521a3f922e1179f1cb0056475e6b5e`。未启动交付程序，不覆盖旧正式版/Beta，不纳入用户日志或本机数据。
+- 受影响 Prettier/rustfmt 和 `git diff --check` 已完成；最终 29 个文本的严格 UTF-8 无 BOM/LF/结尾换行、逐文件索引一致性、37 处本地路径链接及变更范围均已核对。发布通过现有 Git Credential Manager 凭据调用 GitHub API，不将凭据输出或写盘，先创建草稿、上传单个 EXE 并比对服务端 SHA-256，再公开正式 Release；不移动旧 Tag 或覆盖旧发布。
+- 已有四组 Beta 人工成功日志及其局限见下文：不能证明每次触发空前导兼容、确认历史 Chat 根因或替代未执行的自动化回归。Java/JVM/MyBatis 专属条款不适用于本项目，沿用 Vue/TypeScript/Rust 规范。退出后更换 v1.0.5 EXE 可回滚，无新增数据迁移；已清理的数据不会恢复。
+
+以下提交前复核、Beta 构建及旧版本通过记录均为历史记录，不替代本次验证范围。
+
+## 提交前静态复核（2026-10-28，未执行测试）
+
+- 逐项复核当前 23 个未提交文本，覆盖 SSE 兼容与混流保护、原始诊断/并发留存、历史摘要/分页/搜索/导出、邮箱提示、开发依赖及文档。未发现新的运行逻辑阻断问题；本次仅补充合成回归用例、必要注释和说明，未改变 Beta 的生产逻辑、版本、数据库或配置备份格式。
+- 校准 Chat EOF 诊断序号的说明：它沿用最后完整事件序号，不保证为 0；未定位类型/ID 仍为空。贡献指南同步 Vitest 5.0.5 的 Node 引擎范围，修正使用手册的中英文间距。
+- 新增 Responses 空前导正常切换、非空/推理/工具/拒绝/未知结构、关联索引、序号断裂、再次切换及矛盾终态的合成用例，补充两侧 ID 诊断断言。新增只读文件库快照与清空并发、摘要/原文分离、分页上限与失效记录、关键词检索，以及前端分页/完整详情和迟到页面隔离用例；这些 Rust/前端测试均未执行，Rust 新用例也未编译，不作通过声明。
+- 只读核对用户提供的四份新 Beta/Astra 日志：Responses low/medium 分别耗时 147,507 / 135,389ms，Chat low/medium 分别 153,566 / 127,473ms。均为 `sse_empty_prelude_diagnostic_beta`、流式请求、HTTP 200、attempt_index=1、success、完整无截断。本次没有代用户调用模型；成功日志未留正文或切换计数，不能证明兼容分支实际触发，也不能据此确认历史 Chat 故障根因或保证所有中转稳定。
+- 本次执行 `npm run build`（`vue-tsc --noEmit`、Vite）成功，产物仍为 531.72kB / gzip 190.50kB，保留既有体积提示；对比 HEAD 与当前锁文件确认生产依赖条目无变化，当前 Node v24.18.0。全部受影响文件的 Prettier/rustfmt 检查、23 个文本的严格 UTF-8/无 BOM/LF/结尾换行核对及 `git diff --check` 均完成；未运行前端/Rust 测试、Clippy、界面/桌面自动化或真实模型/SMTP。
+- 本次未重建或重新交付 EXE：此前 Windows x64 编译与 Beta 摘要见下一节，后补内容不改变生产逻辑；旧 EXE 的编译成功不能代表新增回归已通过。不提交、不推送、不修改 Tag/Release。
+
+## 未发布 SSE 兼容诊断 Beta（2026-10-28）
+
+- 本轮从干净的 `edb2422` 工作区开始，工程版本保持 1.0.5；用户明确只授权静态检查、格式化、出包必需类型检查与编译。未执行前端/Rust 测试、Clippy、桌面/界面自动化、真实模型或 SMTP 验证；本文其他章节的通过记录不代表本 Beta 已通过回归。
+- 只读核对两份用户 Responses 原文及元数据，长度分别 1,393,749 / 1,495,798 字节，HTTP 200、完整读取、未超限、原错误 invalid_event_stream；均在前五个空事件后以新 created 切换 ID。未把样本或其中服务商正文复制到仓库。只读核对 sub2api 副本提交 `f178e5ae32659e8901644a9f2378a0439ffa36ae` 的 created 转换；Chat 线上部署与失败原文未知，本版只补诊断，不据此放宽 Chat ID 校验。
+- 静态逐项核对空前导白名单、消息/内容索引、一次切换和真实混流保护；两协议原文使用现有缓冲、2 MiB 上限，SSE 结构信息独立于 JSON 位置。ID/类型/错误文本经过凭据保护，正文不可改写，原文/transport 分别有界，UUID/create_new 防并发覆盖，双协议原文按时间共同清理；故障不改变 Completion 或历史结算。
+- 历史列表独立只读事务在后台扫描摘要，常规快照仅附集合版本；每页最多十条完整正文、250ms 搜索防抖并合并过期检索，离页/切换隔离迟到结果。导出明确读取完整原文，不受当前页限制；复制/详情均使用完整记录。已有 Mock/断言按新 IPC 与 Beta 标记同步，但未运行；新兼容和分页行为等待用户人工测试及后续明确授权的回归。
+- Vitest 由 3.2.7 升至锁定 5.0.5，当前 Node 24.18.0 满足其引擎范围；安装使用 `npm install --save-dev --save-exact vitest@5.0.5 --registry=https://registry.npmjs.org --ignore-scripts`。`npm audit --registry=https://registry.npmjs.org` 报告 0 漏洞；对比锁文件确认生产依赖条目无变化，生产第三方声明无需变更。未用强制 audit fix 或升级生产依赖。
+- 已执行受影响文件 Prettier、rustfmt、`git diff --check` 和 TypeScript/Vite 生产编译。Windows 使用既有隔离工具链脚本的 `-Action build` 执行 `tauri build --no-bundle`，最终构建成功；保留既有 chunk 体积和 MSVC import library 提示。22 个修改文本严格 UTF-8/无 BOM/LF，无替换字符；编译成功不代表测试通过。
+- `scripts/package_exe.ps1` 校验 PE x64、版本、输入时间及复制摘要后，在全新目录重命名为 `release-artifacts/v1.0.5-sse-compat-diagnostic-beta1-20261028-111249/Model-IQ-Radar-v1.0.5-SSE-Compat-Diagnostic-Beta.1-Windows-x64.exe`。目录仅一份 EXE，文件/产品版本 1.0.5，16,852,992 字节，SHA-256 `2ec71d7e86bcc7209069ecdff8ffedb1ec4458443b3095f5dac48de0b169d5e1`；未启动应用，不覆盖此前交付物，不包含日志、安装包或文档包。
+- README、使用说明、变更日志、邮箱条件提示与业务注释同步；工程为 Vue/TypeScript/Rust，Java/MyBatis 专属规范不适用，遵循项目语言规范。schema/配置备份 v3 不变，退出 Beta 后可换回 v1.0.5 正式 EXE；已清理日志无法恢复。连接测试取消、HTML 隔离及新增功能不在本轮修改范围。不提交、不推送、不修改 Tag/Release。
 
 ## v1.0.5 正式发布复核（2026-10-28）
 

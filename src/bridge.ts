@@ -62,6 +62,7 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
     if (command === 'get_snapshot') {
         // 预览也遵循桌面读取范围，不能让布局调试无意依赖悬浮窗全量历史。
         const snapshot = structuredClone(preview);
+        snapshot.historyRevision = preview.history.map((record) => record.id).join(':');
         if (args.includeHistory !== true) {
             const id = snapshot.config.selectedProfileId;
             const fingerprint = id ? snapshot.conditionFingerprints?.[id] : undefined;
@@ -73,6 +74,29 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
             snapshot.history = latest ? [latest] : [];
         }
         return snapshot as T;
+    }
+    // 浏览器内存预览遵循摘要/按页正文契约，不接触桌面数据；正式检索由 Rust 后台执行。
+    if (command === 'get_history_index')
+        return {
+            revision: preview.history.map((record) => record.id).join(':'),
+            entries: preview.history.map((record, index) => ({
+                sequence: index + 1,
+                record: { ...record, answer: '', prompt: '' },
+            })),
+        } as T;
+    if (command === 'get_history_records')
+        return preview.history.filter((_record, index) =>
+            (args.sequences as number[]).includes(index + 1),
+        ) as T;
+    if (command === 'search_history') {
+        const query = String(args.query ?? '').toLocaleLowerCase();
+        return preview.history
+            .filter((record) =>
+                `${record.profileName} ${record.model} ${record.reasoningEffort ?? (record.conditionFingerprint ? '不指定' : '未记录')} ${record.answer} ${record.ruleName ?? ''} ${[record.keyword, ...(record.alternativeKeywords ?? [])].join(' ')}`
+                    .toLocaleLowerCase()
+                    .includes(query),
+            )
+            .map((record) => record.id) as T;
     }
     if (command === 'get_model_catalog') return [] as T;
     if (command === 'get_update_status') return null as T;

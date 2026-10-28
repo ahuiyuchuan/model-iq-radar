@@ -333,6 +333,8 @@ async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_requ
     assert_eq!(result.attempted_modes, ["responses"]);
     assert!(result.answer.is_empty());
     let metadata = wait_for_diagnostic(&directory).await;
+    assert_eq!(metadata["format_version"], 3);
+    assert_eq!(metadata["protocol"], "responses");
     assert_eq!(metadata["http_status"], 200);
     assert_eq!(metadata["request_id"], "fixture-request");
     assert_eq!(metadata["body_complete"], true);
@@ -340,6 +342,8 @@ async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_requ
     assert_eq!(metadata["received_body_bytes"], body.len());
     assert_eq!(metadata["json_error"]["scope"], "sse_event_data");
     assert_eq!(metadata["json_error"]["event_index"], 1);
+    assert_eq!(metadata["sse_error"]["event_index"], 1);
+    assert!(metadata["sse_error"]["reason"].is_string());
     assert_eq!(
         std::fs::read(directory.join(metadata["body_file"].as_str().unwrap())).unwrap(),
         body.as_bytes()
@@ -481,7 +485,7 @@ async fn transport_diagnostics_link_fallback_and_record_actual_stream_timings() 
     for trace in &metadata {
         assert_eq!(trace["format_version"], 2);
         assert_eq!(trace["request_stream"], true);
-        assert_eq!(trace["build_variant"], "dual_protocol_stream");
+        assert_eq!(trace["build_variant"], "sse_empty_prelude");
         assert!(
             trace["elapsed_ms"].as_u64().unwrap()
                 >= trace["response_headers_after_ms"].as_u64().unwrap()
@@ -500,7 +504,12 @@ async fn transport_diagnostics_link_fallback_and_record_actual_stream_timings() 
                 .unwrap()
     );
     assert_eq!(requests.try_iter().count(), 2);
-    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    let omitted = wait_for_diagnostic(&directory).await;
+    assert_eq!(
+        omitted["body_omission_reason"],
+        "body_not_read_or_no_bytes_received"
+    );
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
     std::fs::remove_dir_all(directory).unwrap();
 }
 

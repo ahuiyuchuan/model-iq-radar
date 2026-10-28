@@ -1,6 +1,6 @@
 [package]
 name = "model-probe"
-version = "1.0.5"
+version = "1.0.6"
 description = "自定义题目与连续字符串规则的桌面测智雷达"
 authors = ["ahui"]
 license = "GPL-3.0-only"

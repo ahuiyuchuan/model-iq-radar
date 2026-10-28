@@ -438,8 +438,10 @@ pub struct ActiveRun {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub config: AppConfig,
-    /// 设置页显式读取全部保留历史，悬浮窗只读取当前模型最近一条；均为原文快照。
+    /// 默认只读取当前模型最近一条原文；显式完整读取仅供导出与旧调用方使用。
     pub history: Vec<TestRecord>,
+    /// 实际保留集合的轻量版本；列表仅在集合变化时重读摘要，不随每次运行状态广播读取全文。
+    pub history_revision: String,
     pub running: Option<ActiveRun>,
     /// 自动任务距单调时钟期限的毫秒数；测试中、关闭或无有效配置时为 None，不持久化。
     pub auto_test_remaining_ms: Option<u64>,

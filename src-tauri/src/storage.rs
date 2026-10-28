@@ -27,6 +27,21 @@ pub struct HistoryCleanupPreview {
     pub storage_limit_bytes: u64,
 }
 
+/// 列表索引不含题目/回答正文；sequence 只作当前数据库内的读取定位，不写入导出或备份。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryIndex {
+    pub revision: String,
+    pub entries: Vec<HistoryIndexEntry>,
+}
+
+/// 单条摘要及其只读定位序号；record 的题目/回答被清空，仅用于筛选，禁止用作原文导出。
+#[derive(Serialize)]
+pub struct HistoryIndexEntry {
+    pub sequence: i64,
+    pub record: TestRecord,
+}
+
 struct CleanupPlan {
     sequences: Vec<i64>,
     preview: HistoryCleanupPreview,
@@ -391,6 +406,143 @@ impl Store {
             serde_json::from_str(&payload).map_err(|_| "历史记录格式无效；请先备份数据库。".into())
         })
         .collect()
+    }
+
+    /// 追加序号加条数/最早序号标识实际集合；重命名配置或运行状态广播不触发全文重读。
+    /// SQLite 自增序号不复用，清空后再次新增也不会与此前同条数的集合混淆。
+    pub fn history_revision(&self) -> Result<String, String> {
+        self.connection.query_row(
+            "SELECT COUNT(*), COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0) FROM test_record", [],
+            |row| Ok(format!("{}:{}:{}", row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        ).map_err(|_| "无法读取历史集合版本。".into())
+    }
+
+    /// 为后台列表/搜索建立独立只读事务；只短暂在调用方的存储锁内打开，扫描不阻塞正式结算。
+    /// 不初始化表、不迁移、不清理、不访问凭据；事务使索引与其 revision 来自同一数据库快照。
+    pub fn history_reader(&self) -> Result<Self, String> {
+        let path = self
+            .connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .ok_or("无法定位历史数据库。")?;
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| "无法打开历史只读连接。")?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .map_err(|_| "无法配置历史读取。")?;
+        connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|_| "无法开始历史读取。")?;
+        Ok(Self {
+            connection,
+            config: self.config.clone(),
+        })
+    }
+
+    /// 一次只解析一条原文后立即释放长字段，列表常驻内存不保留最多 128 MiB 的全部回答。
+    /// 返回的 record 是元数据投影，不能用作复制/导出；正文须用 sequence 按页重新读取。
+    pub fn history_index(&self) -> Result<HistoryIndex, String> {
+        let revision = self.history_revision()?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT sequence, payload FROM test_record ORDER BY sequence DESC")
+            .map_err(|_| "无法读取历史索引。")?;
+        let mut rows = statement.query([]).map_err(|_| "无法查询历史索引。")?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().map_err(|_| "历史索引读取失败。")? {
+            let payload: String = row.get(1).map_err(|_| "历史记录读取失败。")?;
+            let mut record: TestRecord =
+                serde_json::from_str(&payload).map_err(|_| "历史记录格式无效；请先备份数据库。")?;
+            record.answer.clear();
+            record.answer.shrink_to_fit();
+            record.prompt.clear();
+            record.prompt.shrink_to_fit();
+            entries.push(HistoryIndexEntry {
+                sequence: row.get(0).map_err(|_| "历史序号无效。")?,
+                record,
+            });
+        }
+        Ok(HistoryIndex { revision, entries })
+    }
+
+    /// 每页最多十条完整原文；参数绑定且仅正序号，不拼接用户内容到 SQL。
+    /// 清理导致页面缺记录时明确报错，前端可刷新；不以空字符串伪造已经删除的回答。
+    pub fn history_records(&self, sequences: &[i64]) -> Result<Vec<TestRecord>, String> {
+        if sequences.is_empty() {
+            return Ok(Vec::new());
+        }
+        if sequences.len() > 10 || sequences.iter().any(|value| *value <= 0) {
+            return Err("历史分页参数无效。".into());
+        }
+        let placeholders = vec!["?"; sequences.len()].join(",");
+        let sql = format!("SELECT payload FROM test_record WHERE sequence IN ({placeholders}) ORDER BY sequence DESC");
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|_| "无法读取历史页面。")?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(sequences), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|_| "无法查询历史页面。")?;
+        let records: Result<Vec<TestRecord>, String> = rows
+            .map(|row| {
+                serde_json::from_str(&row.map_err(|_| "历史读取失败。")?)
+                    .map_err(|_| "历史记录格式无效。".into())
+            })
+            .collect();
+        let records = records?;
+        if records.len() != sequences.len() {
+            return Err("历史已被清理，请刷新后重试。".into());
+        }
+        Ok(records)
+    }
+
+    /// 全文检索在只读后台线程逐条进行，只返回命中 ID；不将全文传入界面主线程。
+    /// 搜索范围延续原有分组名、模型、强度、回答、规则名及答案，Unicode 小写后匹配。
+    pub fn search_history(&self, query: &str) -> Result<Vec<String>, String> {
+        if query.chars().count() > 500 {
+            return Err("搜索词最多 500 个字符。".into());
+        }
+        let query = query.to_lowercase();
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload FROM test_record ORDER BY sequence DESC")
+            .map_err(|_| "无法检索历史。")?;
+        let mut rows = statement.query([]).map_err(|_| "无法查询历史。")?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().map_err(|_| "历史检索失败。")? {
+            let payload: String = row.get(0).map_err(|_| "历史读取失败。")?;
+            let record: TestRecord =
+                serde_json::from_str(&payload).map_err(|_| "历史记录格式无效。")?;
+            let effort = record.reasoning_effort.as_deref().unwrap_or(
+                if record.condition_fingerprint.is_some() {
+                    "不指定"
+                } else {
+                    "未记录"
+                },
+            );
+            let keywords = std::iter::once(record.keyword.as_str())
+                .chain(record.alternative_keywords.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if format!(
+                "{} {} {} {} {} {}",
+                record.profile_name,
+                record.model,
+                effort,
+                record.answer,
+                record.rule_name.as_deref().unwrap_or(""),
+                keywords
+            )
+            .to_lowercase()
+            .contains(&query)
+            {
+                ids.push(record.id);
+            }
+        }
+        Ok(ids)
     }
 
     /// 返回指定模型最新的一条实际保留记录。索引由启动、写入和清理维护，避免悬浮窗
@@ -845,6 +997,57 @@ mod tests {
             "error":null,"prompt":"问题","keyword":"原文","ruleVersion":"literal-contains-v1"
         }))
         .unwrap()
+    }
+
+    /// 文件库验证真实只读快照：摘要与正文分离、页长限制、Unicode 检索及并发清空不串页。
+    #[test]
+    fn history_reader_keeps_snapshot_and_requires_complete_page_records() {
+        let path = std::env::temp_dir().join(format!(
+            "model-probe-history-reader-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let mut store = Store::open(&path).unwrap();
+            for index in 0..12 {
+                let mut saved = record(&format!("record-{index}"), "2026-10-28T00:00:00Z");
+                saved.answer = format!(" 原文 TARGET-{index} \n");
+                saved.alternative_keywords = vec!["备用答案".into()];
+                store.save_record(&saved).unwrap();
+            }
+            let reader = store.history_reader().unwrap();
+            let index = reader.history_index().unwrap();
+            assert_eq!(index.revision, store.history_revision().unwrap());
+            assert_eq!(index.entries.len(), 12);
+            assert!(index
+                .entries
+                .iter()
+                .all(|entry| entry.record.answer.is_empty() && entry.record.prompt.is_empty()));
+            let sequences: Vec<_> = index.entries[..10]
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect();
+            let page = reader.history_records(&sequences).unwrap();
+            assert_eq!(page.len(), 10);
+            assert_eq!(page[0].answer, " 原文 TARGET-11 \n");
+            assert_eq!(page[0].prompt, "问题");
+            assert_eq!(reader.search_history("target-11").unwrap(), ["record-11"]);
+            assert_eq!(reader.search_history("备用答案").unwrap().len(), 12);
+            assert!(reader.search_history(&"长".repeat(501)).is_err());
+            assert!(reader.history_records(&[0]).is_err());
+            assert!(reader.history_records(&[sequences[0]; 11]).is_err());
+            assert!(reader.history_records(&[sequences[0], i64::MAX]).is_err());
+            // WAL 中只读事务保持旧集合，正式清空仍可提交；新连接不能伪造已删除的原文。
+            store.clear_history().unwrap();
+            assert_eq!(reader.history_index().unwrap().revision, index.revision);
+            assert_eq!(reader.history_records(&sequences).unwrap().len(), 10);
+            let fresh = store.history_reader().unwrap();
+            assert!(fresh.history_index().unwrap().entries.is_empty());
+            assert!(fresh.history_records(&sequences).is_err());
+            assert_ne!(store.history_revision().unwrap(), index.revision);
+        }
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
     /// 历史保存请求快照；之后改名或改答案不影响旧记录，旧字段缺失也不能猜测补填。

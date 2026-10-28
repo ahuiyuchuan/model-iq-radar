@@ -148,8 +148,10 @@ export interface ActiveRun {
 
 export interface AppSnapshot {
     config: AppConfig;
-    /** 设置页显式请求完整历史；悬浮窗只含当前模型最新的一条，避免传输所有原始回答。 */
+    /** 默认只含当前模型一条原文；完整历史仅在明确导出/旧调用方请求时返回。 */
     history: TestRecord[];
+    /** 实际保留集合版本；旧快照可缺省，正式设置页用它避免重复读取索引。 */
+    historyRevision?: string;
     running: ActiveRun | null;
     /** 后端单调时钟距离自动期限的毫秒数；测试中/关闭/无配置为 null，旧快照可缺省。 */
     autoTestRemainingMs?: number | null;
@@ -157,6 +159,12 @@ export interface AppSnapshot {
     conditionFingerprints?: Record<string, string>;
     /** 最近事件邮件发送失败的脱敏提示；不改变模型结果，不进入历史导出。 */
     emailNotificationError?: string | null;
+}
+
+/** 只供列表筛选的摘要投影，record 的 answer/prompt 为空；复制、详情和导出必须取完整原文。 */
+export interface HistoryIndex {
+    revision: string;
+    entries: { sequence: number; record: TestRecord }[];
 }
 
 export interface ProfileInput {

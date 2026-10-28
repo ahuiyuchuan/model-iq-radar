@@ -1,4 +1,4 @@
-//! 正式测试的本地取证：Responses 原始响应与两种协议的独立传输时间线。
+//! 正式测试的本地取证：两种协议的失败原始响应及独立传输时间线。
 //! 不持有应用状态锁、不参与测试结算，不发送请求或上传文件。作者：ahui。
 
 use serde::Serialize;
@@ -251,6 +251,18 @@ pub struct JsonParseError {
     pub event_index: Option<usize>,
 }
 
+/// SSE 结构错误独立于 JSON 语法错误；序号从 1 开始，无法定位时为 0。
+/// Chat 的 EOF 错误沿用最后完整事件序号，不把该位置伪装成已收到的结束事件。
+/// 原因使用解析器固定文案，ID/类型保存前脱敏限长；不记录事件 data 或自由错误消息。
+#[derive(Serialize)]
+pub struct SseParseError {
+    pub reason: &'static str,
+    pub event_index: usize,
+    pub event_type: Option<String>,
+    pub expected_response_id: Option<String>,
+    pub actual_response_id: Option<String>,
+}
+
 /// 本次响应的诊断快照；不包含 URL、请求体、鉴权头、密钥或用户配置。
 /// 字节数指 HTTP 客户端交付的正文，不包括 TLS/HTTP 分块边界；完整性只以读取到 EOF 为准。
 #[derive(Serialize)]
@@ -269,6 +281,7 @@ pub struct ResponseDiagnostic {
     pub body_complete: bool,
     pub body_truncated: bool,
     pub json_error: Option<JsonParseError>,
+    pub sse_error: Option<SseParseError>,
     pub body_file: Option<String>,
     /// 已知请求密钥若被上游回显，不改写原文，也不落盘该正文；元数据明确说明省略原因。
     pub body_omission_reason: Option<&'static str>,
@@ -280,6 +293,30 @@ pub struct ResponseDiagnostic {
 /// 尽力异步保存；满队列、写入/清理失败仅输出固定本地提示，不覆盖原错误、不阻塞历史结算。
 /// 调用前已结束网络读取；不复制密钥到后台任务，正文命中已知密钥时只保存省略标记。
 pub fn save_in_background(directory: &Path, mut diagnostic: ResponseDiagnostic, key: &str) {
+    diagnostic.content_type = diagnostic
+        .content_type
+        .map(|value| safe_transport_text(&value, key));
+    diagnostic.request_id = diagnostic
+        .request_id
+        .map(|value| safe_transport_text(&value, key));
+    if let Some(error) = diagnostic.sse_error.as_mut() {
+        error.event_type = error
+            .event_type
+            .take()
+            .map(|value| safe_transport_text(&value, key));
+        error.expected_response_id = error
+            .expected_response_id
+            .take()
+            .map(|value| safe_transport_text(&value, key));
+        error.actual_response_id = error
+            .actual_response_id
+            .take()
+            .map(|value| safe_transport_text(&value, key));
+    }
+    // JSON 库的错误文本也可能包含服务商输入的片段；不得把已知凭据带入元数据。
+    if let Some(error) = diagnostic.json_error.as_mut() {
+        error.message = safe_transport_text(&error.message, key);
+    }
     if !key.is_empty()
         && diagnostic
             .body
@@ -291,7 +328,7 @@ pub fn save_in_background(directory: &Path, mut diagnostic: ResponseDiagnostic, 
         diagnostic.body_omission_reason = Some("known_request_credential_in_response");
     }
     let Ok(permit) = PENDING_WRITES.try_acquire() else {
-        eprintln!("Responses 响应诊断队列已满；原测试结果保留。");
+        eprintln!("响应诊断队列已满；原测试结果保留。");
         return;
     };
     let directory = directory.to_path_buf();
@@ -299,7 +336,7 @@ pub fn save_in_background(directory: &Path, mut diagnostic: ResponseDiagnostic, 
     drop(tokio::task::spawn_blocking(move || {
         let _permit = permit;
         if save(&directory, diagnostic).is_err() {
-            eprintln!("Responses 响应诊断保存失败；原测试结果保留。");
+            eprintln!("响应诊断保存失败；原测试结果保留。");
         }
     }));
 }
@@ -312,7 +349,8 @@ fn save(directory: &Path, mut diagnostic: ResponseDiagnostic) -> io::Result<()> 
     fs::create_dir_all(directory)?;
     prune(directory)?;
     let stem = format!(
-        "responses-{}-{}",
+        "{}-{}-{}",
+        diagnostic.protocol,
         chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
         Uuid::new_v4()
     );
@@ -323,13 +361,27 @@ fn save(directory: &Path, mut diagnostic: ResponseDiagnostic) -> io::Result<()> 
     let mut metadata_created = false;
     let result = (|| {
         if diagnostic.body_omission_reason.is_none() {
-            let mut file = OpenOptions::new()
+            let body_result = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&body_path)?;
-            body_created = true;
-            file.write_all(&diagnostic.body)?;
-            diagnostic.body_file = Some(body_name);
+                .open(&body_path);
+            // 正文失败时尽力留存元数据，明确 saved=0；不把部分文件伪装成完整正文。
+            let body_saved = match body_result {
+                Ok(mut file) => {
+                    body_created = true;
+                    file.write_all(&diagnostic.body).is_ok()
+                }
+                Err(_) => false,
+            };
+            if body_saved {
+                diagnostic.body_file = Some(body_name);
+            } else {
+                if body_created {
+                    let _ = fs::remove_file(&body_path);
+                }
+                diagnostic.saved_body_bytes = 0;
+                diagnostic.body_omission_reason = Some("body_write_failed");
+            }
         }
         let metadata = serde_json::to_vec_pretty(&diagnostic).map_err(io::Error::other)?;
         let mut file = OpenOptions::new()
@@ -351,7 +403,7 @@ fn save(directory: &Path, mut diagnostic: ResponseDiagnostic) -> io::Result<()> 
     result
 }
 
-/// 仅匹配 responses/transport 前缀、完整 UTC 时间戳、UUID 与两种扩展名；每个目录为新组预留一位。
+/// 仅匹配两协议/transport 前缀、完整 UTC 时间戳、UUID 与两种扩展名；每个目录为新组预留一位。
 /// 任一清理失败就放弃本次写入，不通过无限追加文件绕过保留上限；不递归删除目录。
 fn prune(directory: &Path) -> io::Result<()> {
     let mut records: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
@@ -372,6 +424,7 @@ fn prune(directory: &Path) -> io::Result<()> {
         // 独立目录仍可能由用户放入其他文件；不能只凭前缀及末尾 UUID 删除它们。
         let Some(suffix) = stem
             .strip_prefix("responses-")
+            .or_else(|| stem.strip_prefix("chat_completions-"))
             .or_else(|| stem.strip_prefix("transport-"))
         else {
             continue;
@@ -387,7 +440,8 @@ fn prune(directory: &Path) -> io::Result<()> {
             continue;
         }
         records
-            .entry(stem.to_owned())
+            // 两协议共用二十组预算，按时间而非协议前缀清理，避免总是先删除 Chat 文件。
+            .entry(suffix.to_owned())
             .or_default()
             .push(entry.path());
     }
@@ -436,7 +490,7 @@ mod tests {
 
     fn diagnostic(body: &[u8]) -> ResponseDiagnostic {
         ResponseDiagnostic {
-            format_version: 2,
+            format_version: 3,
             started_at_utc: "2026-10-27T00:00:00Z".into(),
             finished_at_utc: "2026-10-27T00:00:01Z".into(),
             protocol: "responses",
@@ -456,6 +510,7 @@ mod tests {
                 scope: "response_body",
                 event_index: None,
             }),
+            sse_error: None,
             body_file: None,
             body_omission_reason: None,
             body: body.to_vec(),

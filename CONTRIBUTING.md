@@ -5,7 +5,7 @@
 ## 环境
 
 - Windows x64、WebView2 Runtime。
-- Node.js 22.12+（或兼容版本）、npm。
+- Node.js `^22.12.0 || ^24.0.0 || >=26.0.0`、npm（Vitest 5.0.5 的引擎范围，生产 EXE 无需 Node）。
 - Rust stable MSVC 工具链、MSVC C++ Build Tools 与 Windows SDK。首次编译需要下载 crates。
 - Python/Pillow 仅在重新生成图标时需要，普通构建不依赖 Python。
 
@@ -34,7 +34,7 @@ npm run tauri -- build --no-bundle
 
 HTML 预览采用页面内 iframe。组件回归在 `tests/html-answer.test.ts`；桌面验收必须用独立 identifier、虚构数据库和模型，避免读取正式数据。验证有界画布缩放、无滚动条、HTML 悬停、收起裁剪、页内放大、Escape/焦点恢复，以及列表实时动画不弹出额外窗口。
 
-桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，逐文件复核见 `docs/FILE_AUDIT-v1.0.5.md`。
+桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，逐文件复核见 `docs/FILE_AUDIT-v1.0.6.md`。
 
 ## 目录职责
 

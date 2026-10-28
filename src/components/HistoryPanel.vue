@@ -1,6 +1,6 @@
 <!-- 历史浏览器过滤本机日期、展示请求快照和文字/HTML 回答；可见行复用卡片预览，不重判旧记录。@author ahui -->
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { ArrowUpRight, Search, History, Clock3 } from 'lucide-vue-next';
 import { formatTime } from '../useProbe';
 import { localDate, statusText, reasoningLabel } from '../historyExport';
@@ -11,15 +11,21 @@ import AnswerContent from './AnswerContent.vue';
 import HistoryAnswerPreview from './HistoryAnswerPreview.vue';
 import { previewAllowed } from '../htmlAnswer';
 import DatePicker from './DatePicker.vue';
+import { call } from '../bridge';
 const previewError = ref('');
 const props = defineProps<{
     history: TestRecord[];
     profiles: ModelProfile[];
     modelValue: TestRecord | null;
+    /** 桌面传入摘要及数据库序号；本地布局预览可继续传入完整记录。 */
+    remote?: boolean;
+    sequences?: Record<string, number>;
 }>();
 const emit = defineEmits<{
     'update:modelValue': [value: TestRecord | null];
     filtered: [records: TestRecord[]];
+    working: [value: boolean];
+    refresh: [];
 }>();
 const selectedRecord = computed({
     get: () => props.modelValue,
@@ -85,6 +91,50 @@ const historyStatus = ref('');
 const historySource = ref('');
 const historyFrom = ref('');
 const historyTo = ref('');
+// 检索只在停止输入 250ms 后提交；世代隔离让旧搜索/旧页不能覆盖当前筛选。
+const searchIds = shallowRef<Set<string> | null>(null);
+const searchPending = ref(false);
+const pagePending = ref(false);
+const historyError = ref('');
+const currentPage = ref(1);
+const pageSize = 10;
+const pageRecords = shallowRef<TestRecord[]>([]);
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let searchGeneration = 0;
+let pageGeneration = 0;
+let disposed = false;
+// 同一组件只允许一条全文扫描在途；较新的输入合并到它之后，避免慢盘上排队积压。
+let searchInFlight: Promise<string[]> | undefined;
+async function searchWhenIdle(query: string, generation: number): Promise<void> {
+    if (searchInFlight) await searchInFlight.catch(() => {});
+    if (disposed || generation !== searchGeneration) return;
+    const request = call<string[]>('search_history', { query });
+    searchInFlight = request;
+    try {
+        const ids = await request;
+        if (!disposed && generation === searchGeneration) searchIds.value = new Set(ids);
+    } catch (cause) {
+        if (!disposed && generation === searchGeneration) historyError.value = String(cause);
+    } finally {
+        if (searchInFlight === request) searchInFlight = undefined;
+        if (!disposed && generation === searchGeneration) searchPending.value = false;
+    }
+}
+watch(
+    [historySearch, () => props.history],
+    () => {
+        if (!props.remote) return;
+        const generation = ++searchGeneration;
+        clearTimeout(searchTimer);
+        historyError.value = '';
+        searchIds.value = null;
+        searchPending.value = Boolean(historySearch.value);
+        if (!historySearch.value) return;
+        const query = historySearch.value;
+        searchTimer = setTimeout(() => void searchWhenIdle(query, generation), 250);
+    },
+    { immediate: true },
+);
 /** 历史按稳定配置 ID 筛选；当前已删除的配置仍以历史快照名称提供筛选。 */
 const historyGroups = computed(() => {
     const groups = new Map<string, string>();
@@ -153,9 +203,11 @@ const filteredHistory = computed(() => {
         // 历史正文可达 128 MiB；没有搜索词时不能为了匹配空串逐条复制、转小写整段回答。
         return (
             !query ||
-            `${item.profileName} ${item.model} ${reasoningLabel(item)} ${item.answer} ${item.ruleName ?? ''} ${ruleAnswers(item).join(' ')}`
-                .toLocaleLowerCase()
-                .includes(query)
+            (props.remote
+                ? Boolean(searchIds.value?.has(item.id))
+                : `${item.profileName} ${item.model} ${reasoningLabel(item)} ${item.answer} ${item.ruleName ?? ''} ${ruleAnswers(item).join(' ')}`
+                      .toLocaleLowerCase()
+                      .includes(query))
         );
     });
 });
@@ -173,8 +225,60 @@ watch(historyEfforts, (efforts) => {
     if (!efforts.some((item) => item.id === historyEffort.value)) historyEffort.value = '';
 });
 
-// 将当前可见集合提供给固定底栏导出，原始记录对象始终保持完整，筛选不截断回答。
-watch(filteredHistory, (records) => emit('filtered', records), { immediate: true });
+// 底栏只用筛选集合的稳定 ID 选择导出范围，实际导出重新读取完整正文，不受分页限制。
+watch(
+    filteredHistory,
+    (records) => {
+        currentPage.value = 1;
+        emit('filtered', records);
+    },
+    { immediate: true },
+);
+const pageCount = computed(() => Math.max(1, Math.ceil(filteredHistory.value.length / pageSize)));
+const pageItems = computed(() =>
+    filteredHistory.value.slice((currentPage.value - 1) * pageSize, currentPage.value * pageSize),
+);
+const visibleRecords = computed(() => (props.remote ? pageRecords.value : pageItems.value));
+
+/** 原文仅为当前十条加载，翻页立即释放旧页；详情使用已加载对象，复制不依赖摘要。 */
+async function loadPage(): Promise<void> {
+    const generation = ++pageGeneration;
+    if (props.remote && !selectedRecord.value) pageRecords.value = [];
+    if (!props.remote || selectedRecord.value || searchPending.value) {
+        pagePending.value = false;
+        return;
+    }
+    pageRecords.value = [];
+    pagePending.value = true;
+    if (!historySearch.value || searchIds.value) historyError.value = '';
+    try {
+        const sequences = pageItems.value.map((record) => props.sequences?.[record.id]);
+        if (sequences.some((sequence) => sequence == null)) throw new Error('历史索引已变化，请刷新后重试。');
+        const records = sequences.length
+            ? await call<TestRecord[]>('get_history_records', { sequences })
+            : [];
+        if (!disposed && generation === pageGeneration) pageRecords.value = records;
+    } catch (cause) {
+        if (!disposed && generation === pageGeneration) historyError.value = String(cause);
+    } finally {
+        if (!disposed && generation === pageGeneration) pagePending.value = false;
+    }
+}
+watch([pageItems, () => props.sequences, selectedRecord, searchPending], () => void loadPage(), {
+    immediate: true,
+});
+watch(
+    [searchPending, pagePending, historyError],
+    () => emit('working', searchPending.value || pagePending.value || Boolean(historyError.value)),
+    { immediate: true },
+);
+onBeforeUnmount(() => {
+    disposed = true;
+    searchGeneration++;
+    pageGeneration++;
+    clearTimeout(searchTimer);
+    emit('working', false);
+});
 </script>
 <template>
     <div class="history-page">
@@ -320,7 +424,17 @@ watch(filteredHistory, (records) => emit('filtered', records), { immediate: true
             <p v-if="historyFrom && historyTo && historyFrom > historyTo" class="inline-error" role="alert">
                 开始日期不能晚于结束日期。
             </p>
-            <div v-if="!filteredHistory.length" class="empty-state">
+            <p v-if="searchPending || pagePending" class="muted" role="status">
+                {{ searchPending ? '正在搜索…' : '正在读取记录…' }}
+            </p>
+            <p v-if="historyError" class="inline-error" role="alert">
+                {{ historyError }}
+                <button type="button" class="button subtle small" @click="$emit('refresh')">刷新历史</button>
+            </p>
+            <div
+                v-if="!filteredHistory.length && !searchPending && !pagePending && !historyError"
+                class="empty-state"
+            >
                 <History :size="34" />
                 <h2>
                     {{
@@ -339,7 +453,26 @@ watch(filteredHistory, (records) => emit('filtered', records), { immediate: true
                 </h2>
                 <p>完成一次测试后，可在这里查看回答与规则快照。</p>
             </div>
-            <div v-for="record in filteredHistory" :key="record.id" class="history-item">
+            <nav v-if="filteredHistory.length" class="history-pagination" aria-label="历史分页">
+                <span>共 {{ filteredHistory.length }} 条 · 第 {{ currentPage }} / {{ pageCount }} 页</span>
+                <button
+                    type="button"
+                    class="button subtle small"
+                    :disabled="currentPage <= 1 || pagePending || searchPending"
+                    @click="currentPage--"
+                >
+                    上一页
+                </button>
+                <button
+                    type="button"
+                    class="button subtle small"
+                    :disabled="currentPage >= pageCount || pagePending || searchPending"
+                    @click="currentPage++"
+                >
+                    下一页
+                </button>
+            </nav>
+            <div v-for="record in visibleRecords" :key="record.id" class="history-item">
                 <!-- 元信息与预览分别操作，避免放大、片段选择和重载被整行点击带入详情。 -->
                 <div
                     class="history-record-info"

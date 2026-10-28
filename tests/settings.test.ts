@@ -152,12 +152,97 @@ it('历史四项筛选按 AND 组合，保留已删项并把缺失强度与不�
     await choose(wrapper, '按模型筛选历史', 'model-a');
     await choose(wrapper, '按规则预设筛选历史', '规则甲');
     await choose(wrapper, '按思考强度筛选历史', 'high');
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(1);
     expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([base]);
     await choose(wrapper, '按思考强度筛选历史', '未记录');
     expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([history[3]]);
     await choose(wrapper, '按思考强度筛选历史', '不指定');
     expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toEqual([history[4]]);
+    wrapper.unmount();
+});
+
+it('远程历史按十条分页，筛选导出集合不限当前页，详情只使用完整原文', async () => {
+    fake.snapshot.history = Array.from({ length: 12 }, (_, index) => ({
+        id: `page-${index}`,
+        profileId: 'one',
+        profileName: '测试模型',
+        model: 'model',
+        startedAt: '2026-10-28T00:00:00Z',
+        durationMs: 10,
+        status: 'passed',
+        answer: ` 原文-${index}\n`,
+        prompt: `完整题目-${index}`,
+        keyword: '原文',
+        error: null,
+        ruleVersion: 'literal-contains-v1',
+    }));
+    const history = fake.snapshot.history.map((record) => ({ ...record, answer: '', prompt: '' }));
+    const sequences = Object.fromEntries(history.map((record, index) => [record.id, index + 1]));
+    const wrapper = mount(HistoryPanel, {
+        props: { remote: true, history, sequences, profiles: [], modelValue: null },
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.history-item')).toHaveLength(10);
+    expect(wrapper.emitted('filtered')?.at(-1)?.[0]).toHaveLength(12);
+    await wrapper.findAll('.history-pagination button')[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.history-item')).toHaveLength(2);
+    expect(wrapper.get('.history-pagination').text()).toContain('第 2 / 2 页');
+    await wrapper.findAll('.history-record-info')[0].trigger('click');
+    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(fake.snapshot.history[10]);
+    await choose(wrapper, '按结果筛选历史', '降智');
+    await flushPromises();
+    expect(wrapper.findAll('.history-item')).toHaveLength(0);
+    wrapper.unmount();
+});
+
+it('旧历史正文请求晚于新索引返回时不覆盖当前页', async () => {
+    const base = {
+        profileId: 'one',
+        profileName: '测试模型',
+        model: 'model',
+        startedAt: '2026-10-28T00:00:00Z',
+        durationMs: 10,
+        status: 'passed' as const,
+        answer: '完整回答',
+        prompt: '完整题目',
+        keyword: '回答',
+        error: null,
+        ruleVersion: 'literal-contains-v1',
+    };
+    const old = { ...base, id: 'old' };
+    const current = { ...base, id: 'current' };
+    let resolveOld!: (records: (typeof old)[]) => void;
+    fake.call.mockImplementation(async (command: string, args?: { sequences?: number[] }) => {
+        if (command === 'get_history_records')
+            return args?.sequences?.[0] === 1
+                ? new Promise<(typeof old)[]>((resolve) => {
+                      resolveOld = resolve;
+                  })
+                : [current];
+    });
+    const wrapper = mount(HistoryPanel, {
+        props: {
+            remote: true,
+            history: [{ ...old, answer: '', prompt: '' }],
+            sequences: { old: 1 },
+            profiles: [],
+            modelValue: null,
+        },
+    });
+    await wrapper.setProps({
+        history: [{ ...current, answer: '', prompt: '' }],
+        sequences: { current: 2 },
+    });
+    await flushPromises();
+    expect(wrapper.findAll('.history-item')).toHaveLength(1);
+    await wrapper.get('.history-record-info').trigger('click');
+    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(current);
+    resolveOld([old]);
+    await flushPromises();
+    await wrapper.get('.history-record-info').trigger('click');
+    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(current);
     wrapper.unmount();
 });
 
@@ -189,6 +274,7 @@ it.each([false, true])('详情复制迟到结果在返回并重进同记录后�
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.findAll('nav button')[3].trigger('click');
+    await flushPromises();
     await wrapper.get('.history-record-info').trigger('click');
     await wrapper
         .findAll('.settings-actions button')
@@ -476,7 +562,31 @@ vi.mock('../src/bridge', () => ({
     desktop: true,
     CANDY_RULE_ID: 'builtin-candy-test',
     DEFAULT_PROMPT: '默认问题',
-    call: fake.call,
+    // 新历史 IPC 的本地契约：摘要不含正文、页面重新取原文；仍保留 fake.call 的观察/拒绝路径。
+    call: async (command: string, args?: Record<string, unknown>) => {
+        const result = await fake.call(command, args);
+        if (command === 'get_snapshot') {
+            const snapshot = result as AppSnapshot;
+            return { ...snapshot, historyRevision: snapshot.history.map((record) => record.id).join(':') };
+        }
+        // 单个用例可返回延迟/失败结果，不能被默认历史夹具吞掉异步竞争的证据。
+        if (result !== undefined) return result;
+        if (command === 'get_history_index')
+            return {
+                revision: fake.snapshot.history.map((record) => record.id).join(':'),
+                entries: fake.snapshot.history.map((record, index) => ({
+                    sequence: index + 1,
+                    record: { ...record, answer: '', prompt: '' },
+                })),
+            };
+        if (command === 'get_history_records')
+            return structuredClone(
+                fake.snapshot.history.filter((_record, index) =>
+                    (args?.sequences as number[]).includes(index + 1),
+                ),
+            );
+        return result;
+    },
     subscribe: fake.subscribe,
     subscribeUpdateStatus: fake.updates,
     dragWindow: vi.fn(),
@@ -631,10 +741,15 @@ it('自启读取系统状态，切换立即生效且去重，不保存配置或�
     expect(fake.call.mock.calls.length).toBe(before);
 });
 
-it('设置页显式请求完整历史，悬浮窗快照优化不影响筛选、导出和详情数据源', async () => {
+it('设置页初始快照不读取完整历史，进入历史后独立读取摘要索引', async () => {
     const wrapper = mount(Settings);
     await flushPromises();
-    expect(fake.call).toHaveBeenCalledWith('get_snapshot', { includeHistory: true });
+    expect(fake.call).toHaveBeenCalledWith('get_snapshot', { includeHistory: false });
+    expect(fake.call.mock.calls.some(([command]) => command === 'get_history_index')).toBe(false);
+    await wrapper.findAll('nav button')[3].trigger('click');
+    await flushPromises();
+    await flushPromises();
+    expect(fake.call.mock.calls.some(([command]) => command === 'get_history_index')).toBe(true);
     wrapper.unmount();
 });
 
@@ -740,10 +855,12 @@ it('历史分组与关键词组合筛选，删除的配置仍可筛选，复制�
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.findAll('nav button')[3].trigger('click');
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(2);
     const filter = wrapper.get('[aria-label="按分组筛选历史"]');
     await filter.trigger('click');
     await wrapper.findAll('[role="option"]')[2].trigger('click');
+    await flushPromises();
     await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(1);
     expect(wrapper.get('.history-item').text()).toContain('已删除分组');
@@ -1005,6 +1122,7 @@ it('历史状态和来源筛选只影响导出集合，并保留原始 Markdown'
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.findAll('nav button')[3].trigger('click');
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(2);
     await wrapper.get('[aria-label="按结果筛选历史"]').trigger('click');
     await wrapper
@@ -1016,11 +1134,13 @@ it('历史状态和来源筛选只影响导出集合，并保留原始 Markdown'
         .findAll('[role="option"]')
         .find((item) => item.text().includes('手动测试'))!
         .trigger('click');
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(1);
     const exportButton = wrapper
         .findAll('.settings-actions button')
         .find((button) => button.text() === '导出');
     await exportButton!.trigger('click');
+    await flushPromises();
     expect(createObjectURL).toHaveBeenCalled();
     expect(click).toHaveBeenCalled();
     expect(revokeObjectURL).not.toHaveBeenCalled();
@@ -1559,6 +1679,7 @@ it('偏好已提交但原生窗口恢复失败时仍同步保存基线，离页�
     expect(wrapper.get<HTMLInputElement>('#snap-edge').element.checked).toBe(false);
     await wrapper.findAll('nav button')[3].trigger('click');
     await flushPromises();
+    await flushPromises();
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     expect(wrapper.get('.save-warning').text()).toContain(warning);
     expect(fake.call.mock.calls.filter(([command]) => command === 'save_preferences')).toHaveLength(1);
@@ -1595,6 +1716,7 @@ it('旧历史 null 强度显示未记录，新协议快照的 null 才显示不�
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.findAll('nav button')[3].trigger('click');
+    await flushPromises();
     await wrapper.findAll('.history-record-info')[0].trigger('click');
     expect(wrapper.get('.history-detail').text()).not.toContain('不指定');
     expect(wrapper.get('.history-detail').text()).toContain('未记录');
@@ -1738,12 +1860,14 @@ it('历史无搜索词时不读取长回答，输入搜索后仍按原文匹配'
     });
     const wrapper = mount(HistoryPanel, { props: { history: [record], profiles: [], modelValue: null } });
     await flushPromises();
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(1);
     // Vue Test Utils 初始化 props 可读取 getter；只观察实际日期过滤导致的正文访问。
     reads = 0;
     await wrapper.get('[aria-label="历史开始日期"]').setValue('2026-10-25');
     expect(reads).toBe(0);
     await wrapper.get('[aria-label="搜索历史"]').setValue('target');
+    await flushPromises();
     expect(wrapper.findAll('.history-item')).toHaveLength(1);
     expect(reads).toBeGreaterThan(0);
     wrapper.unmount();

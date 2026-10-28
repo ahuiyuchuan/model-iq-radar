@@ -3,7 +3,7 @@
     @author ahui
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue';
 import {
     Target,
     SlidersHorizontal,
@@ -59,6 +59,8 @@ import type {
     ModelCatalog,
     ConnectionResult,
     DataResetSelection,
+    AppSnapshot,
+    HistoryIndex,
 } from '../types';
 import ModelPicker from './ModelPicker.vue';
 import HistoryPanel from './HistoryPanel.vue';
@@ -66,9 +68,52 @@ import AboutPanel from './AboutPanel.vue';
 import ActionDialog from './ActionDialog.vue';
 import MailSettings from './MailSettings.vue';
 
-// 设置页是唯一需要完整历史的窗口；悬浮窗只加载当前模型的最新记录。
-const { snapshot, busy, error, refresh } = useProbe({ includeHistory: true });
+// 设置窗口的常规状态刷新不携带完整历史；历史页独立加载索引和每页正文。
+const { snapshot, busy, error, refresh } = useProbe();
 const page = ref('api');
+const historyRecords = shallowRef<TestRecord[]>([]);
+const historySequences = shallowRef<Record<string, number>>({});
+const historyLoading = ref(false);
+const historyWorking = ref(false);
+const historyLoadError = ref('');
+const exportingHistory = ref(false);
+let historyIndexRevision: string | undefined;
+let historyLoadGeneration = 0;
+
+/** 仅在进入历史或保留集合变化时加载摘要；离页/卸载后的迟到结果不能写回界面。 */
+async function loadHistoryIndex(): Promise<void> {
+    const generation = ++historyLoadGeneration;
+    historyLoading.value = true;
+    historyLoadError.value = '';
+    try {
+        const index = await call<HistoryIndex>('get_history_index');
+        if (disposed || generation !== historyLoadGeneration || page.value !== 'history') return;
+        historyRecords.value = index.entries.map((entry) => entry.record);
+        historySequences.value = Object.fromEntries(
+            index.entries.map((entry) => [entry.record.id, entry.sequence]),
+        );
+        historyIndexRevision = index.revision;
+        if (
+            selectedRecord.value &&
+            !historyRecords.value.some((record) => record.id === selectedRecord.value?.id)
+        )
+            selectedRecord.value = null;
+    } catch (cause) {
+        if (!disposed && generation === historyLoadGeneration && page.value === 'history')
+            historyLoadError.value = String(cause);
+    } finally {
+        if (generation === historyLoadGeneration) historyLoading.value = false;
+    }
+}
+watch([page, () => snapshot.value?.historyRevision], () => {
+    if (page.value !== 'history') {
+        historyLoadGeneration++;
+        historyLoading.value = false;
+        return;
+    }
+    if (historyIndexRevision === undefined || historyIndexRevision !== snapshot.value?.historyRevision)
+        void loadHistoryIndex();
+});
 const contentScroll = ref<HTMLElement>();
 const saving = ref(false);
 // 预览/导入同样锁住当前草稿，避免异步确认期间输入被保存基线吞掉。
@@ -897,19 +942,35 @@ async function copyDiagnostic(): Promise<void> {
 }
 
 /** JSON 无损保留原文；CSV 增加公式前缀转义，范围由用户明确选择。 */
-function exportHistory(): void {
-    const records = exportScope.value === 'all' ? (snapshot.value?.history ?? []) : filteredHistory.value;
-    if (!records.length) {
-        error.value = '当前范围没有可导出的历史记录。';
-        return;
-    }
+async function exportHistory(): Promise<void> {
+    if (exportingHistory.value || historyLoading.value || historyWorking.value) return;
+    const ids =
+        exportScope.value === 'all' ? null : new Set(filteredHistory.value.map((record) => record.id));
     const format = exportFormat.value;
-    downloadText(
-        `测智雷达-历史-${localDate(new Date())}.${format}`,
-        format === 'csv' ? historyCsv(records) : JSON.stringify(records, null, 2),
-        format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8',
-    );
-    savedMessage.value = `已导出 ${records.length} 条历史记录${format === 'csv' ? '（公式前缀已转义，原文请用 JSON）' : ''}`;
+    const turn = ++historyFeedbackGeneration;
+    exportingHistory.value = true;
+    try {
+        // 导出是用户明确触发的全量读取；索引不含正文，绝不能直接把摘要当作完整记录下载。
+        const full = await call<AppSnapshot>('get_snapshot', { includeHistory: true });
+        if (disposed || turn !== historyFeedbackGeneration || page.value !== 'history') return;
+        const records = ids ? full.history.filter((record) => ids.has(record.id)) : full.history;
+        if (ids && records.length !== ids.size) throw new Error('历史已被清理，请刷新筛选后重新导出。');
+        if (!records.length) {
+            error.value = '当前范围没有可导出的历史记录。';
+            return;
+        }
+        downloadText(
+            `测智雷达-历史-${localDate(new Date())}.${format}`,
+            format === 'csv' ? historyCsv(records) : JSON.stringify(records, null, 2),
+            format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8',
+        );
+        savedMessage.value = `已导出 ${records.length} 条历史记录${format === 'csv' ? '（公式前缀已转义，原文请用 JSON）' : ''}`;
+    } catch (cause) {
+        if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
+            error.value = String(cause);
+    } finally {
+        exportingHistory.value = false;
+    }
 }
 /** 备份由后端白名单生成，绝不直接序列化含凭据状态的整个运行快照。 */
 async function exportConfig(): Promise<void> {
@@ -1862,10 +1923,23 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                 <HistoryPanel
                     v-else
                     v-model="selectedRecord"
-                    :history="snapshot?.history ?? []"
+                    :history="historyRecords"
+                    :sequences="historySequences"
+                    :remote="true"
                     :profiles="snapshot?.config.profiles ?? []"
                     @filtered="filteredHistory = $event"
+                    @working="historyWorking = $event"
+                    @refresh="loadHistoryIndex"
                 />
+                <p v-if="page === 'history' && historyLoading" class="muted" role="status">
+                    正在读取历史索引…
+                </p>
+                <p v-if="page === 'history' && historyLoadError" class="inline-error" role="alert">
+                    {{ historyLoadError }}
+                    <button type="button" class="button subtle small" @click="loadHistoryIndex">
+                        重新读取
+                    </button>
+                </p>
             </div>
 
             <!-- 外部 form 关联保留浏览器原生必填校验，按钮区域独占固定行，不遮挡主体。 -->
@@ -2055,17 +2129,28 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                             type="button"
                             class="button secondary small"
                             :disabled="
-                                !(exportScope === 'all' ? snapshot?.history.length : filteredHistory.length)
+                                exportingHistory ||
+                                historyLoading ||
+                                historyWorking ||
+                                Boolean(historyLoadError) ||
+                                !(exportScope === 'all' ? historyRecords.length : filteredHistory.length)
                             "
                             @click="exportHistory"
                         >
-                            <Download :size="14" />导出
+                            <Download :size="14" />{{ exportingHistory ? '正在导出…' : '导出' }}
                         </button>
                     </div>
                     <button
                         type="button"
                         class="button subtle danger"
-                        :disabled="!snapshot?.history.length || busy || saving || preparing"
+                        :disabled="
+                            !historyRecords.length ||
+                            busy ||
+                            saving ||
+                            preparing ||
+                            exportingHistory ||
+                            historyLoading
+                        "
                         @click="clearHistory"
                     >
                         <Trash2 :size="14" />{{ confirmClear ? '确认清空' : '清空' }}

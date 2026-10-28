@@ -1980,6 +1980,20 @@ textarea {
     gap: 10px;
     margin-bottom: 16px;
 }
+/* 分页只控制已筛选集合的呈现，导出仍包含整个筛选结果；窄窗口允许自然换行。 */
+.history-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+    color: var(--muted);
+    font-size: 12px;
+}
+.history-pagination > span {
+    margin-right: auto;
+}
 /* 四项条件独占第一排；结果、来源、日期与搜索放第二排，较窄设置窗口自然折行。 */
 .history-context-filters,
 .history-secondary-filters {

@@ -1,14 +1,14 @@
 //! Chat Completions 与 Responses 适配器。只提交一个独立题目，不提交答案、历史或工具。
 //! HTTP 错误只映射状态码，不展示服务商响应体或包含鉴权信息的底层错误。
-//! 正式 Responses 异常可落盘原始响应；两种协议另保存有界传输时间线，不参与判定或历史正文。
+//! 正式双协议异常可落盘本次原始响应及有界传输时间线，不参与判定或历史正文。
 //! 作者：ahui。
 
 use crate::{
     chat_sse,
     model::{validate_timeout_seconds, ModelProfile, TestRule},
     response_diagnostics::{
-        self, JsonParseError, ResponseDiagnostic, TransportDiagnostic, TransportFailure,
-        BODY_LIMIT_BYTES,
+        self, JsonParseError, ResponseDiagnostic, SseParseError, TransportDiagnostic,
+        TransportFailure, BODY_LIMIT_BYTES,
     },
     responses_sse,
 };
@@ -442,7 +442,7 @@ async fn complete_once(
                 .as_millis() as u64,
         );
         trace.request_stream = request_stream;
-        trace.build_variant = "dual_protocol_stream".into();
+        trace.build_variant = "sse_empty_prelude".into();
         trace
     });
     // 正文缓冲在 select 外持有，取消/超时丢弃网络 future 后仍能保存已经收到的部分。
@@ -452,9 +452,8 @@ async fn complete_once(
     let mut body_complete = false;
     let mut body_truncated = false;
     let mut json_error = None;
+    let mut sse_error = None;
     let mut response_metadata = None;
-    // 原文落盘仍仅限既有 Responses 范围；两种协议另有独立的纯元数据时间线。
-    let mut sse_response = false;
     let started_at_utc = chrono::Utc::now().to_rfc3339();
     let work = async {
         let mut payload = if profile.interface_mode == "responses" {
@@ -526,6 +525,21 @@ async fn complete_once(
             result.request_id = request_id.clone();
             result
         };
+        // 两种协议都捕获本次响应头；HTTP 非成功仍立即返回原错误，不为诊断额外读取正文。
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let event_stream = responses_sse::is_event_stream(content_type, &[]);
+        if diagnostic_directory.is_some() {
+            response_metadata = Some((
+                status,
+                content_type
+                    .filter(|value| value.len() <= 256 && (key.is_empty() || !value.contains(key)))
+                    .map(str::to_owned),
+                request_id.clone(),
+            ));
+        }
         if !response.status().is_success() {
             let (kind, message) = match status {
                 401 | 403 => ("authentication", format!("鉴权失败（HTTP {status}），请检查 API Key 和权限。")),
@@ -535,19 +549,6 @@ async fn complete_once(
                 _ => ("http", format!("接口返回 HTTP {status}，请检查模型名称和服务状态。")),
             };
             return with_metadata(Completion::failure(kind, &message));
-        }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok());
-        let event_stream = responses_sse::is_event_stream(content_type, &[]);
-        sse_response = profile.interface_mode == "responses" && event_stream;
-        // 只保留所需的响应头；不复制请求对象、鉴权头、请求体、URL 或其他响应头。
-        if diagnostic_directory.is_some() && profile.interface_mode == "responses" {
-            let content_type = content_type
-                .filter(|value| value.len() <= 256 && (key.is_empty() || !value.contains(key)))
-                .map(str::to_owned);
-            response_metadata = Some((status, content_type, request_id.clone()));
         }
         if let Some(trace) = transport.as_mut() {
             trace.stage = "reading_response_body".into();
@@ -597,7 +598,6 @@ async fn complete_once(
         // 仍先读取到 EOF：中断、超时或超限不能靠已收到的增量/结束片段绕过完整性检查。
         // 网关忽略 stream:true 返回完整 JSON 时继续兼容；不改用非流式重发请求。
         let event_stream = event_stream || responses_sse::is_event_stream(None, &bytes);
-        sse_response = profile.interface_mode == "responses" && event_stream;
         // 完整 JSON 始终保留原兼容路径，即使网关误标 Content-Type 也不无故破坏旧行为。
         let parsed_json = serde_json::from_slice::<Value>(&bytes);
         if event_stream && parsed_json.is_err() {
@@ -615,6 +615,13 @@ async fn complete_once(
                     }
                 }
                 Err(failure) => {
+                    sse_error = Some(SseParseError {
+                        reason: failure.message,
+                        event_index: failure.event_index,
+                        event_type: failure.event_type,
+                        expected_response_id: failure.expected_response_id,
+                        actual_response_id: failure.actual_response_id,
+                    });
                     if let Some(error) = failure.json_error {
                         json_error = Some(JsonParseError {
                             message: error.to_string(),
@@ -682,28 +689,21 @@ async fn complete_once(
         response_diagnostics::save_transport_in_background(directory, trace, key);
     }
     // SSE 解析或最终协议验证失败同样保留原始事件流；正常成功不新增原始正文文件。
-    if (sse_response && result.error.is_some())
-        || matches!(
-            result.error_kind.as_deref(),
-            Some(
-                "invalid_json"
-                    | "response_too_large"
-                    | "read_interrupted"
-                    | "timeout"
-                    | "cancelled"
-            )
-        )
-    {
+    if result.error.is_some() {
         if let (Some(directory), Some((status, content_type, request_id))) =
             (diagnostic_directory, response_metadata)
         {
             response_diagnostics::save_in_background(
                 directory,
                 ResponseDiagnostic {
-                    format_version: 2,
+                    format_version: 3,
                     started_at_utc,
                     finished_at_utc: chrono::Utc::now().to_rfc3339(),
-                    protocol: "responses",
+                    protocol: if profile.interface_mode == "responses" {
+                        "responses"
+                    } else {
+                        "chat_completions"
+                    },
                     http_status: status,
                     content_type,
                     request_id,
@@ -714,8 +714,10 @@ async fn complete_once(
                     body_complete,
                     body_truncated,
                     json_error,
+                    sse_error,
                     body_file: None,
-                    body_omission_reason: None,
+                    body_omission_reason: (!body_complete && bytes.is_empty())
+                        .then_some("body_not_read_or_no_bytes_received"),
                     body: bytes,
                 },
                 key,

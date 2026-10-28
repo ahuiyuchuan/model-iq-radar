@@ -33,7 +33,10 @@ pub fn parse(bytes: &[u8]) -> Result<Value, StreamFailure> {
             if has_data {
                 data.pop();
                 event_index += 1;
-                dispatch(event_name, &data, event_index, &mut state)?;
+                // Chat 尚无真实失败原文；继续严格拒绝 ID 变化，仅补齐失败事件定位。
+                dispatch(event_name, &data, event_index, &mut state).map_err(|failure| {
+                    failure.with_context(event_name, &data, state.response_id.as_deref())
+                })?;
             }
             event_name = "";
             data.clear();
@@ -105,6 +108,9 @@ fn dispatch(
         message: "Chat Completions SSE 事件不是有效的 JSON，未执行判定。",
         json_error: Some(error),
         event_index,
+        event_type: None,
+        expected_response_id: None,
+        actual_response_id: None,
     })?;
     if value.get("error").is_some_and(|error| !error.is_null()) {
         return Err(invalid(
@@ -191,6 +197,9 @@ fn dispatch(
             message: "接口返回拒绝回答，未执行判定。",
             json_error: None,
             event_index,
+            event_type: None,
+            expected_response_id: None,
+            actual_response_id: None,
         });
     }
     if delta
@@ -205,6 +214,9 @@ fn dispatch(
             message: "模型请求调用工具，本测试不执行工具。",
             json_error: None,
             event_index,
+            event_type: None,
+            expected_response_id: None,
+            actual_response_id: None,
         });
     }
     if let Some(content) = delta.get("content").filter(|value| !value.is_null()) {
@@ -236,6 +248,9 @@ fn invalid(message: &'static str, event_index: usize) -> StreamFailure {
         message,
         json_error: None,
         event_index,
+        event_type: None,
+        expected_response_id: None,
+        actual_response_id: None,
     }
 }
 
@@ -246,6 +261,9 @@ fn incomplete(event_index: usize) -> StreamFailure {
         message: "Chat Completions SSE 未收到完整结束状态和结束标记，未执行判定。",
         json_error: None,
         event_index,
+        event_type: None,
+        expected_response_id: None,
+        actual_response_id: None,
     }
 }
 
@@ -320,6 +338,15 @@ mod tests {
     fn mixed_responses_roles_and_candidates_are_rejected() {
         let valid = stream("stop");
         let changed_id = valid.replacen("chat-fixture", "different-response", 1);
+        // 即便第一块只是角色，也不在缺少真实失败证据时放宽 ID 校验；诊断须指出两侧 ID。
+        let failure = parse(changed_id.as_bytes()).unwrap_err();
+        assert_eq!(
+            failure.expected_response_id.as_deref(),
+            Some("different-response")
+        );
+        assert_eq!(failure.actual_response_id.as_deref(), Some("chat-fixture"));
+        assert_eq!(failure.event_type.as_deref(), Some("chat.completion.chunk"));
+        assert_eq!(failure.event_index, 2);
         for source in [
             changed_id,
             valid.replace("\"assistant\"", "\"user\""),
