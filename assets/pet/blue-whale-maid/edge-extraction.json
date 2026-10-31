@@ -1,0 +1,31 @@
+{
+    "author": "ahui",
+    "source": "edge-left-source.png",
+    "sourceSha256": "9a7eff7a995fb9859b32b9cefdcd97f13ac11403b67ddcdbb99440124792fc26",
+    "sourceSize": [
+        1254,
+        1254
+    ],
+    "alphaNoiseMaximum": 3,
+    "sourceCrop": [
+        16,
+        225,
+        459,
+        887
+    ],
+    "canvasSize": 320,
+    "scale": 0.47129909365558914,
+    "placedAt": [
+        0,
+        4
+    ],
+    "visibleBounds": [
+        0,
+        4,
+        209,
+        316
+    ],
+    "directions": [
+        "left"
+    ]
+}

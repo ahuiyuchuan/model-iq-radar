@@ -272,14 +272,51 @@ export async function subscribeUpdateStatus(
 }
 
 let layoutQueue: Promise<unknown> = Promise.resolve();
+/** 桌宠场景接管原面板/选择器的尺寸申请，经典模式仍使用原命令。 */
+let sceneLayoutHandler: ((expanded: boolean, menuHeight: number) => Promise<void>) | undefined;
+/** 注册同窗口场景适配器；清理只撤销自己，避免旧组件卸载影响新场景。 */
+export function registerSceneLayout(
+    handler: (expanded: boolean, menuHeight: number) => Promise<void>,
+): () => void {
+    sceneLayoutHandler = handler;
+    return () => {
+        if (sceneLayoutHandler === handler) sceneLayoutHandler = undefined;
+    };
+}
+/**
+ * 原生拖动终态和可选速度：窗口跟随光标时 DOM 不一定继续收到 pointermove。
+ * @param handler 松手/失败时幂等收尾；不代表业务请求结束。
+ * @param motion 可选速度回调，单位为逻辑像素/秒，仅按住拖动时约 30Hz 推送。
+ * @returns 统一解除监听函数；任一注册失败会先清理已注册的监听。
+ */
+export async function subscribeDragEnd(
+    handler: () => void,
+    motion?: (velocity: [number, number]) => void,
+): Promise<() => void> {
+    if (!desktop) return () => {};
+    const end = await listen('widget-drag-ended', handler);
+    try {
+        const move = motion
+            ? await listen<[number, number]>('pet-drag-motion', (event) => motion(event.payload))
+            : () => {};
+        return () => {
+            end();
+            move();
+        };
+    } catch (cause) {
+        end();
+        throw cause;
+    }
+}
 
 /**
  * 串行调整卡片、菜单和边签，防止快速切换时旧尺寸覆盖新状态。
  * @param expanded 是否显示完整回答卡片。
  * @param menuHeight 菜单所需逻辑像素，0 表示关闭菜单。
- * @param tucked 是否收成屏幕边缘小图标（侧边 28×48、顶部 48×28 逻辑像素）；仅已吸附时生效。
+ * @param tucked 是否收成经典屏幕边缘小图标；桌宠探头由独立场景处理。
  */
 export async function resizeWidget(expanded: boolean, menuHeight = 0, tucked = false): Promise<void> {
+    if (sceneLayoutHandler) return sceneLayoutHandler(expanded, menuHeight);
     if (!desktop) return;
     const update = layoutQueue
         .catch(() => {})
@@ -314,13 +351,24 @@ export async function subscribeDock(
     }
 }
 
-/** 只有标题栏可主动发起拖动，按钮不会成为隐含拖动区域。 */
-export async function dragWindow(): Promise<void> {
+/** 标题栏和桌宠实体可主动拖动，普通业务按钮不成为隐含拖动区域。
+ * @param pointerDelta 桌宠从按下到越过阈值的逻辑像素位移；省略时保持经典标题栏行为。
+ * 原生接管前先补回已消费位移，使快速拖动也能移动窗口，而不是仅切换悬空姿态。
+ */
+export async function dragWindow(pointerDelta?: [number, number]): Promise<void> {
     if (desktop) {
         const window = getCurrentWindow();
-        if (window.label === 'widget') await call('prepare_widget_drag');
+        if (window.label === 'widget') await call('prepare_widget_drag', { pointerDelta });
         await window.startDragging();
     }
+}
+
+/** 桌宠使用透明窗口逐帧跟随，不进入系统“拖动轮廓”模式。
+ * @param pointerDelta 从按下到越过拖动阈值的逻辑像素位移，补偿原生接管前的输入。
+ * @returns 原生跟随循环已启动；松手通过 widget-drag-ended 通知收尾。
+ */
+export async function dragPetWindow(pointerDelta: [number, number]): Promise<void> {
+    if (desktop) await call('start_pet_drag', { pointerDelta });
 }
 
 /** 桌面模式打开复用的设置窗口；浏览器通过独立地址展示相同组件。 */

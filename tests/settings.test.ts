@@ -284,6 +284,8 @@ it.each([false, true])('详情复制迟到结果在返回并重进同记录后�
         .findAll('.settings-actions button')
         .find((button) => button.text().includes('返回记录'))!
         .trigger('click');
+    // 返回列表会异步重新读取当前页；等待完成再打开同一记录。
+    await flushPromises();
     await wrapper.get('.history-record-info').trigger('click');
     complete();
     await flushPromises();
@@ -569,6 +571,7 @@ vi.mock('../src/bridge', () => ({
             const snapshot = result as AppSnapshot;
             return { ...snapshot, historyRevision: snapshot.history.map((record) => record.id).join(':') };
         }
+        if (command === 'list_skins' && result === undefined) return [];
         // 单个用例可返回延迟/失败结果，不能被默认历史夹具吞掉异步竞争的证据。
         if (result !== undefined) return result;
         if (command === 'get_history_index')
@@ -590,6 +593,7 @@ vi.mock('../src/bridge', () => ({
     subscribe: fake.subscribe,
     subscribeUpdateStatus: fake.updates,
     dragWindow: vi.fn(),
+    dragPetWindow: vi.fn(),
     windowAction: vi.fn(),
     resizeWidget: fake.resize,
     protectWindowClose: fake.nativeClose,
@@ -762,6 +766,7 @@ it('侧栏沿用首版顺序，新增功能位于关于之前，关于固定为�
         '悬浮设置',
         '测试历史',
         '邮箱通知',
+        '皮肤管理',
         '关于',
     ]);
     await wrapper.findAll('nav button').at(-1)!.trigger('click');
@@ -1724,6 +1729,7 @@ it('旧历史 null 强度显示未记录，新协议快照的 null 才显示不�
         .findAll('.settings-actions button')
         .find((button) => button.text().includes('返回记录'))!
         .trigger('click');
+    await flushPromises();
     await wrapper.findAll('.history-record-info')[1].trigger('click');
     expect(wrapper.get('.history-detail').text()).toContain('不指定');
     wrapper.unmount();

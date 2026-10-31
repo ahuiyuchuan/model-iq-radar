@@ -17,6 +17,30 @@ beforeEach(() => {
     fake.resize.mockReset().mockResolvedValue(undefined);
 });
 
+it('桌宠场景菜单由宿主测量，开关不再自行调整卡片或经典窗口高度', async () => {
+    const wrapper = mount(ModelPicker, {
+        props: {
+            profiles,
+            selectedId: 'one',
+            expanded: false,
+            disabled: false,
+            context: 'scene',
+            prefix: '接口',
+        },
+    });
+    expect(wrapper.get('.model-prefix').text()).toBe('接口');
+    await wrapper.get('[role="combobox"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(true);
+    expect(fake.resize).not.toHaveBeenCalled();
+    await wrapper.get('[role="combobox"]').trigger('keydown', { key: 'Escape' });
+    await flushPromises();
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
+    expect(fake.resize).not.toHaveBeenCalled();
+    expect(wrapper.emitted('openChange')).toEqual([[true], [false]]);
+    wrapper.unmount();
+});
+
 it('模型菜单左侧保留标题与规则，强度独立列不重复思考前缀，选中图标单独占位', async () => {
     const wrapper = mount(ModelPicker, {
         props: {
@@ -197,5 +221,55 @@ it('后台缩短列表会约束键盘高亮，空列表关闭菜单且不产生�
     await flushPromises();
     expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
     expect(trigger.attributes('aria-activedescendant')).toBeUndefined();
+    wrapper.unmount();
+});
+
+/** 异步场景扩窗期间菜单只能隐藏测量，关闭/迟到回调不允许重新出画。 */
+it.each([false, true])('场景菜单等待窗口就绪；等待期间取消=%s', async (cancel) => {
+    let finish!: () => void;
+    const prepare = vi.fn(
+        () =>
+            new Promise<void>((resolve) => {
+                finish = resolve;
+            }),
+    );
+    const wrapper = mount(ModelPicker, {
+        props: {
+            profiles,
+            selectedId: 'one',
+            expanded: false,
+            disabled: false,
+            context: 'scene',
+            prepareSceneMenu: prepare,
+        },
+    });
+    await wrapper.get('[role="combobox"]').trigger('click');
+    await flushPromises();
+    expect(prepare).toHaveBeenCalledOnce();
+    expect((wrapper.get('.model-menu').element as HTMLElement).style.visibility).toBe('hidden');
+    if (cancel) await wrapper.get('[role="combobox"]').trigger('keydown', { key: 'Escape' });
+    finish();
+    await flushPromises();
+    expect(wrapper.find('.model-menu').exists()).toBe(!cancel);
+    if (!cancel) expect((wrapper.get('.model-menu').element as HTMLElement).style.visibility).toBe('');
+    wrapper.unmount();
+});
+it('场景扩窗失败关闭隐藏菜单并交回错误', async () => {
+    const wrapper = mount(ModelPicker, {
+        props: {
+            profiles,
+            selectedId: 'one',
+            expanded: false,
+            disabled: false,
+            context: 'scene',
+            prepareSceneMenu: async () => {
+                throw new Error('扩窗失败');
+            },
+        },
+    });
+    await wrapper.get('[role="combobox"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.model-menu').exists()).toBe(false);
+    expect(String(wrapper.emitted('error'))).toContain('扩窗失败');
     wrapper.unmount();
 });

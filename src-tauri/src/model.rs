@@ -199,12 +199,41 @@ impl TestRule {
     }
 }
 
+/// 角色皮肤偏好；与测试条件无关，旧配置默认经典外观，不自动启用桌宠。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SkinPreferences {
+    pub id: String,
+    /// 角色画布边长，96—192 逻辑像素；展开与收起保持同一尺寸。
+    pub size: u16,
+    pub animation: bool,
+    pub bubbles: bool,
+    /// 默认允许空闲自主动作；旧皮肤偏好缺字段时由 serde(default) 补齐。
+    pub autonomous: bool,
+    /// 空闲常态动作；serde(default) 为旧配置补 idle，允许值由偏好校验统一限制。
+    pub idle_action: String,
+}
+impl Default for SkinPreferences {
+    fn default() -> Self {
+        Self {
+            id: "classic".into(),
+            size: 144,
+            animation: true,
+            bubbles: true,
+            autonomous: true,
+            idle_action: "idle".into(),
+        }
+    }
+}
+
 /// 桌面偏好。超时为秒；透明度只用于前端面板背景。
 /// 已移除全局显示/隐藏快捷键；旧 shortcutEnabled 由 serde 忽略，保存和备份不再写出。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct Preferences {
+    /// 仅影响外观；旧配置缺失时恢复经典，不参与模型条件指纹。
+    pub skin: SkinPreferences,
     pub always_on_top: bool,
     pub snap_to_edge: bool,
     pub opacity: u8,
@@ -223,6 +252,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            skin: SkinPreferences::default(),
             always_on_top: true,
             snap_to_edge: true,
             opacity: 97,

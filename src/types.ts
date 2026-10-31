@@ -3,6 +3,7 @@
  * 历史记录保存规则快照，避免用户修改题目后误读旧结果。
  * @author ahui
  */
+import type { SkinPreferences } from './pet/types';
 export interface ModelProfile {
     id: string;
     name: string;
@@ -46,6 +47,8 @@ export interface TestRule {
 
 /** 超时单位为秒；透明度范围为 80—100%，仅影响面板背景。 */
 export interface Preferences {
+    /** 角色外观；缺省为经典布局。只影响展示，不参与测试条件指纹。 */
+    skin?: SkinPreferences;
     alwaysOnTop: boolean;
     snapToEdge: boolean;
     opacity: number;

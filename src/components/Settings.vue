@@ -6,6 +6,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue';
 import {
     Target,
+    Palette,
     SlidersHorizontal,
     Monitor,
     History,
@@ -48,6 +49,8 @@ import { downloadText, historyCsv, localDate, statusText, reasoningLabel } from 
 import { formatTime, useProbe } from '../useProbe';
 import { reasoningSupport } from '../reasoning';
 import { ruleAnswers, ruleError } from '../rules';
+import { loadSkin } from '../pet/skinLoader';
+import type { PetAction } from '../pet/types';
 import type {
     ModelProfile,
     Preferences,
@@ -67,6 +70,8 @@ import HistoryPanel from './HistoryPanel.vue';
 import AboutPanel from './AboutPanel.vue';
 import ActionDialog from './ActionDialog.vue';
 import MailSettings from './MailSettings.vue';
+import SkinManager from './SkinManager.vue';
+import { DEFAULT_SKIN } from '../pet/types';
 
 // 设置窗口的常规状态刷新不携带完整历史；历史页独立加载索引和每页正文。
 const { snapshot, busy, error, refresh } = useProbe();
@@ -148,6 +153,7 @@ const initialRulePresetId = computed(() =>
 );
 const mailPanel = ref<InstanceType<typeof MailSettings>>();
 const mailDirty = ref(false);
+const skinWorking = ref(false);
 const exportScope = ref('filtered');
 const exportFormat = ref('json');
 const importBackup = ref<unknown>(null);
@@ -261,6 +267,7 @@ const nav = [
     { id: 'widget', label: '悬浮设置', icon: Monitor },
     { id: 'history', label: '测试历史', icon: History },
     { id: 'mail', label: '邮箱通知', icon: Zap },
+    { id: 'skins', label: '皮肤管理', icon: Palette },
     { id: 'about', label: '关于', icon: Info },
 ];
 const selectedProfile = computed(() =>
@@ -333,7 +340,9 @@ watch(snapshot, (value, previous) => {
     if (!init.value) {
         init.value = true;
         loadRuleTarget(initialRulePresetId.value ?? 'default');
-        Object.assign(preferences, value.config.preferences);
+        Object.assign(preferences, value.config.preferences, {
+            skin: { ...DEFAULT_SKIN, ...value.config.preferences.skin },
+        });
         editProfile(value.config.profiles.find((item) => item.id === value.config.selectedProfileId) ?? null);
         ruleBaseline.value = ruleDraft();
         preferencesBaseline.value = JSON.stringify(preferences);
@@ -383,7 +392,7 @@ watch(page, () => {
     confirmDelete.value = false;
     confirmClear.value = false;
     if (contentScroll.value) contentScroll.value.scrollTop = 0;
-    if (page.value === 'widget') void syncAutostart();
+    if (page.value === 'widget' || page.value === 'skins') void syncAutostart();
 });
 watch(
     () => selectedRecord.value?.id,
@@ -515,7 +524,8 @@ function ruleDraft(): string {
 function draftDirty(): boolean {
     if (page.value === 'api') return JSON.stringify(form) !== profileBaseline.value;
     if (page.value === 'rules') return ruleDraft() !== ruleBaseline.value;
-    if (page.value === 'widget') return JSON.stringify(preferences) !== preferencesBaseline.value;
+    if (page.value === 'widget' || page.value === 'skins')
+        return JSON.stringify(preferences) !== preferencesBaseline.value;
     return page.value === 'mail' && mailDirty.value;
 }
 /** 同时只保留一个用户决策；重复点击关闭/切页不会覆盖已有等待或丢弃草稿。 */
@@ -544,12 +554,13 @@ function discardDraft(): void {
         assignRule(saved.rule);
         presetName.value = saved.name;
     }
-    if (page.value === 'widget') Object.assign(preferences, JSON.parse(preferencesBaseline.value));
+    if (page.value === 'widget' || page.value === 'skins')
+        Object.assign(preferences, JSON.parse(preferencesBaseline.value));
     if (page.value === 'mail') mailPanel.value?.discard();
 }
 /** 保存失败继续留在原编辑页；放弃会恢复基线，取消不改变页面/编辑对象。 */
 async function mayLeave(): Promise<boolean> {
-    if (saving.value || preparing.value || refreshRequired.value) return false;
+    if (saving.value || preparing.value || refreshRequired.value || skinWorking.value) return false;
     if (page.value === 'mail' && mailPanel.value?.isWorking) {
         error.value = '邮件操作正在进行，请等待完成后再离开此页。';
         return false;
@@ -567,7 +578,7 @@ async function mayLeave(): Promise<boolean> {
     if (choice !== 'save') return false;
     if (page.value === 'api') await saveProfile();
     else if (page.value === 'rules') await saveRule();
-    else if (page.value === 'widget') await savePreferences();
+    else if (page.value === 'widget' || page.value === 'skins') await savePreferences();
     else if (page.value === 'mail') return (await mailPanel.value?.save()) ?? false;
     return !draftDirty() && !error.value;
 }
@@ -602,7 +613,9 @@ async function recoverSavedState(): Promise<void> {
     preparing.value = true;
     try {
         if (!(await refresh()) || !snapshot.value) return;
-        Object.assign(preferences, snapshot.value.config.preferences);
+        Object.assign(preferences, snapshot.value.config.preferences, {
+            skin: { ...DEFAULT_SKIN, ...snapshot.value.config.preferences.skin },
+        });
         preferencesBaseline.value = JSON.stringify(preferences);
         loadRuleTarget(initialRulePresetId.value ?? 'default');
         editProfile(
@@ -769,8 +782,14 @@ async function deletePreset(id: string): Promise<void> {
 /** 提前展示实际清理影响；确认前不修改设置或删除历史。 */
 async function savePreferences(): Promise<void> {
     if (saving.value || preparing.value || busy.value) return;
+    // 包括资源预检在内的本次保存使用独立提示；不能把上一次成功留在本次失败旁边。
+    savedMessage.value = '';
+    savedWarning.value = '';
+    error.value = '';
     const input = {
         ...preferences,
+        // 捕获独立的外观值，避免预览/确认期间草稿变化或响应式代理进入异步 IPC。
+        skin: { ...DEFAULT_SKIN, ...preferences.skin },
         historyMaxRecords: normalizeNullableNumber(preferences.historyMaxRecords),
         historyRetentionDays: normalizeNullableNumber(preferences.historyRetentionDays),
     };
@@ -799,6 +818,17 @@ async function savePreferences(): Promise<void> {
     }
     preparing.value = true;
     try {
+        // 预览失败的皮肤不能写盘后仍宣称“已生效”。保存前实际解码所有声明动作，
+        // 覆盖内置资源的 CSP、丢失文件和坏图集；失败保留原配置，允许切回经典恢复。
+        if (input.skin.id !== 'classic') {
+            const checked = await loadSkin(input.skin.id);
+            try {
+                for (const action of Object.keys(checked.manifest.actions))
+                    await checked.image(action as PetAction);
+            } finally {
+                checked.dispose();
+            }
+        }
         const impact = await call<{ removedCount: number; remainingCount: number }>(
             'preview_history_retention',
             { preferences: input },
@@ -1039,7 +1069,9 @@ async function resetData(title: string): Promise<void> {
             error.value = '所选数据已清空，但读取最新状态失败；请重新读取已保存配置，不要重复清空。';
             return;
         }
-        Object.assign(preferences, snapshot.value.config.preferences);
+        Object.assign(preferences, snapshot.value.config.preferences, {
+            skin: { ...DEFAULT_SKIN, ...snapshot.value.config.preferences.skin },
+        });
         preferencesBaseline.value = JSON.stringify(preferences);
         loadRuleTarget(initialRulePresetId.value ?? 'default');
         editProfile(
@@ -1117,7 +1149,9 @@ async function importConfig(event: Event): Promise<void> {
             return;
         }
         if (snapshot.value) {
-            Object.assign(preferences, snapshot.value.config.preferences);
+            Object.assign(preferences, snapshot.value.config.preferences, {
+                skin: { ...DEFAULT_SKIN, ...snapshot.value.config.preferences.skin },
+            });
             preferencesBaseline.value = JSON.stringify(preferences);
             loadRuleTarget('default');
             editProfile(
@@ -1271,13 +1305,15 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                                     ? 'CONNECTION'
                                     : page === 'rules'
                                       ? 'TEST RULE'
-                                      : page === 'widget'
-                                        ? 'APPEARANCE'
-                                        : page === 'history'
-                                          ? 'HISTORY'
-                                          : page === 'mail'
-                                            ? 'EMAIL'
-                                            : 'ABOUT'
+                                      : page === 'skins'
+                                        ? 'SKINS'
+                                        : page === 'widget'
+                                          ? 'APPEARANCE'
+                                          : page === 'history'
+                                            ? 'HISTORY'
+                                            : page === 'mail'
+                                              ? 'EMAIL'
+                                              : 'ABOUT'
                             }}
                         </p>
                         <h1>{{ nav.find((item) => item.id === page)?.label }}</h1>
@@ -1287,24 +1323,26 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                                     ? '连接你要测试的模型，每次请求都是一次独立对话。'
                                     : page === 'rules'
                                       ? '定义题目和多个判定答案，完整回答命中任意一项即不降智。'
-                                      : page === 'widget'
-                                        ? '让雷达以你习惯的方式，安静地留在桌面。'
-                                        : page === 'history'
-                                          ? '每一次结果，都保留当时的问题与判定依据。'
-                                          : page === 'mail'
-                                            ? '通过加密 SMTP 接收模型状态变化，不打断桌面测试。'
-                                            : '版本信息、更新与项目反馈。'
+                                      : page === 'skins'
+                                        ? '让角色陪你一起测试，也随时换一种桌面风格。'
+                                        : page === 'widget'
+                                          ? '让雷达以你习惯的方式，安静地留在桌面。'
+                                          : page === 'history'
+                                            ? '每一次结果，都保留当时的问题与判定依据。'
+                                            : page === 'mail'
+                                              ? '通过加密 SMTP 接收模型状态变化，不打断桌面测试。'
+                                              : '版本信息、更新与项目反馈。'
                             }}
                         </p>
                     </div>
                     <span class="section-icon"
                         ><SlidersHorizontal v-if="page === 'api'" :size="22" /><ListChecks
                             v-else-if="page === 'rules'"
-                            :size="22" /><Monitor v-else-if="page === 'widget'" :size="22" /><History
-                            v-else-if="page === 'history'"
-                            :size="22" /><Zap v-else-if="page === 'mail'" :size="22" /><Info
-                            v-else
-                            :size="22"
+                            :size="22" /><Palette v-else-if="page === 'skins'" :size="22" /><Monitor
+                            v-else-if="page === 'widget'"
+                            :size="22" /><History v-else-if="page === 'history'" :size="22" /><Zap
+                            v-else-if="page === 'mail'"
+                            :size="22" /><Info v-else :size="22"
                     /></span>
                 </div>
 
@@ -1732,6 +1770,14 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                     <p v-if="restoredMessage" class="muted small-text" role="status">{{ restoredMessage }}</p>
                 </form>
 
+                <form v-else-if="page === 'skins'" id="skin-settings" @submit.prevent="savePreferences">
+                    <SkinManager
+                        :model-value="preferences.skin ?? DEFAULT_SKIN"
+                        :disabled="saving || preparing || busy"
+                        @update:model-value="preferences.skin = $event"
+                        @working="skinWorking = $event"
+                    />
+                </form>
                 <form
                     v-else-if="page === 'widget'"
                     id="widget-settings"
@@ -1994,6 +2040,17 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         :disabled="saving || preparing || busy"
                     >
                         <Save :size="15" />{{ saving ? '正在保存' : '保存规则' }}
+                    </button>
+                </template>
+                <template v-else-if="page === 'skins'">
+                    <span class="muted small-text footer-hint">皮肤与动画仅影响外观，保存后生效</span>
+                    <button
+                        class="button"
+                        type="submit"
+                        form="skin-settings"
+                        :disabled="saving || preparing || busy || skinWorking"
+                    >
+                        <Save :size="15" />{{ saving ? '正在保存' : '保存皮肤设置' }}
                     </button>
                 </template>
                 <template v-else-if="page === 'widget'">

@@ -7,6 +7,77 @@ use model_probe_lib::{
 };
 use serde_json::json;
 
+/// 外观不参与模型条件；旧配置、v3 备份和分类重置共同覆盖新增嵌套字段。
+#[test]
+fn skin_defaults_backup_reset_and_fingerprint_remain_compatible() {
+    use model_probe_lib::model::{DataResetSelection, Preferences, SkinPreferences};
+    let mut config = config();
+    let before = conditions::condition_fingerprint(&config, &config.profiles[0]).unwrap();
+    let mut old = serde_json::to_value(&config.preferences).unwrap();
+    old.as_object_mut().unwrap().remove("skin");
+    let migrated: Preferences = serde_json::from_value(old).unwrap();
+    assert_eq!(migrated.skin.id, "classic");
+    config.preferences.skin = SkinPreferences {
+        id: "test-pet".into(),
+        size: 192,
+        animation: false,
+        bubbles: false,
+        autonomous: false,
+        idle_action: "error".into(),
+    };
+    assert_eq!(
+        conditions::condition_fingerprint(&config, &config.profiles[0]).unwrap(),
+        before
+    );
+    let backup = backup::export_backup(&config).unwrap();
+    let roundtrip: backup::BackupDocument =
+        serde_json::from_value(serde_json::to_value(backup).unwrap()).unwrap();
+    assert_eq!(roundtrip.config.preferences.skin.id, "test-pet");
+    assert!(!roundtrip.config.preferences.skin.animation);
+    assert_eq!(roundtrip.config.preferences.skin.idle_action, "error");
+    assert!(conditions::validate_preferences(&roundtrip.config.preferences).is_ok());
+    // 真正关闭并重新打开隔离数据库，验证重启恢复；不读取正式配置或系统凭据。
+    let path = std::env::temp_dir().join(format!("model-probe-idle-{}.db", uuid::Uuid::new_v4()));
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.save_config(config.clone()).unwrap();
+    }
+    assert_eq!(
+        Store::open(&path)
+            .unwrap()
+            .config
+            .preferences
+            .skin
+            .idle_action,
+        "error"
+    );
+    std::fs::remove_file(path).unwrap();
+    let reset = DataResetSelection {
+        api: false,
+        rules: false,
+        widget: true,
+        history: false,
+        mail: false,
+    }
+    .reset_config(&config)
+    .unwrap();
+    assert_eq!(reset.preferences.skin.id, "classic");
+    assert_eq!(reset.preferences.skin.idle_action, "idle");
+    assert_eq!(reset.profiles[0].id, config.profiles[0].id);
+    config.preferences.skin.size = 95;
+    assert!(conditions::validate_preferences(&config.preferences).is_err());
+    config.preferences.skin.size = 144;
+    for action in [
+        "idle", "petting", "dragging", "working", "success", "seated", "wave", "stretch",
+        "landing", "bow", "failed", "error",
+    ] {
+        config.preferences.skin.idle_action = action.into();
+        assert!(conditions::validate_preferences(&config.preferences).is_ok());
+    }
+    config.preferences.skin.idle_action = "unknown".into();
+    assert!(conditions::validate_preferences(&config.preferences).is_err());
+}
+
 /// 新开关默认关闭，关闭时旧摘要不变；开启改变条件，备份和配置往返保留显式策略。
 #[test]
 fn protocol_fallback_defaults_off_invalidates_conditions_and_roundtrips_backup() {

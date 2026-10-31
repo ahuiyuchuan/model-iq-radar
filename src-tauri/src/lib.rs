@@ -10,6 +10,7 @@ mod discovery;
 mod html;
 pub mod model;
 pub mod notifications;
+mod pet_window;
 pub mod preview;
 mod response_diagnostics;
 mod responses_sse;
@@ -33,6 +34,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const CREDENTIAL_SERVICE: &str = "com.ahui.model-probe";
+
+/// 拖动世代切换与最终位置保存共用短门禁；不跨窗口API或事件发送持锁，避免同步回调死锁。
+static DRAG_STATE_GATE: Mutex<()> = Mutex::new(());
 
 /// 运行任务拥有自己的取消令牌；仅在历史持久化完成后释放占用。
 struct Running {
@@ -1436,6 +1440,10 @@ fn snapped_position(
 /// 边缘吸附使用逻辑 16px 阈值；所有情况先限制到工作区内，避免展开后超出屏幕。
 #[tauri::command]
 fn snap_widget(app: tauri::AppHandle) -> Result<(), String> {
+    // 桌宠按实际角色轮廓吸附；经典 360px 面板尺寸不参与桌宠判定。
+    if lock(&app.state::<pet_window::PetWindowState>().0)?.active {
+        return pet_window::snap_scene(&app);
+    }
     let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
     let state = app.state::<AppState>();
     let preserve_layout = {
@@ -1484,6 +1492,9 @@ fn set_widget_layout(
 ) -> Result<(), String> {
     let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
     let state = app.state::<AppState>();
+    if lock(&app.state::<pet_window::PetWindowState>().0)?.active {
+        return Ok(());
+    }
     if lock(&state.layout)?.preview_restore.is_some() {
         return Ok(());
     }
@@ -1564,6 +1575,11 @@ fn set_html_preview_expanded(
     if window.label() != "widget" {
         return Err("此窗口不能放大预览。".into());
     }
+    // 放大前先移除裁剪；恢复则必须等尺寸和屏幕位置恢复后再按最终 DPI 建 Region。
+    // Region恢复必须在释放layout锁后执行，允许DPI回调读取预览已结束的真实状态。
+    if expanded {
+        pet_window::preview_region(&app, true)?;
+    }
     let state = app.state::<AppState>();
     let mut layout = lock(&state.layout)?;
     if expanded {
@@ -1595,21 +1611,56 @@ fn set_html_preview_expanded(
             .map_err(|_| "无法恢复窗口位置。")?;
         layout.preview_restore = None;
     }
+    drop(layout);
+    if !expanded {
+        pet_window::preview_region(&app, false)?;
+    }
     Ok(())
 }
 
 /// 只有用户从拖动区域开始的移动才触发自动收回；程序调整位置不会误触发。
 #[tauri::command]
-fn prepare_widget_drag(app: tauri::AppHandle) -> Result<(), String> {
+fn prepare_widget_drag(
+    app: tauri::AppHandle,
+    pointer_delta: Option<[i32; 2]>,
+) -> Result<(), String> {
+    // 经典标题栏缺省为零；桌宠传入阈值检测已消费的逻辑位移，限制异常 IPC 的位移范围。
+    let delta = pointer_delta.unwrap_or([0, 0]);
+    if delta
+        .iter()
+        .any(|value| !(-16_384..=16_384).contains(value))
+    {
+        return Err("拖动位移超出支持范围。".into());
+    }
     let state = app.state::<AppState>();
     let window = app.get_webview_window("widget").ok_or("悬浮窗不存在。")?;
     let position = window.outer_position().map_err(|_| "无法读取拖动起点。")?;
-    *lock(&state.drag_origin)? = Some((position.x, position.y));
-    // 原生拖动可能最终没有产生任何 `Moved` 事件；仅按下标题栏时保留
-    // 边缘侧信息，避免鼠标离开后丢失自动收起状态。
-    state.drag_moved.store(false, Ordering::Relaxed);
-    state.dragging.store(true, Ordering::Relaxed);
-    let generation = state.drag_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let scale = window
+        .scale_factor()
+        .map_err(|_| "无法读取拖动显示比例。")?;
+    let generation = {
+        let _gate = lock(&DRAG_STATE_GATE)?;
+        *lock(&state.drag_origin)? = Some((position.x, position.y));
+        // 新拖动和旧保存事务按门禁线性化，旧释放不能借用本次世代建立保存意图。
+        state.drag_moved.store(false, Ordering::Relaxed);
+        state.dragging.store(true, Ordering::Relaxed);
+        state.drag_generation.fetch_add(1, Ordering::Relaxed) + 1
+    };
+    if delta != [0, 0] {
+        let target = PhysicalPosition::new(
+            position
+                .x
+                .saturating_add((f64::from(delta[0]) * scale).round() as i32),
+            position
+                .y
+                .saturating_add((f64::from(delta[1]) * scale).round() as i32),
+        );
+        if window.set_position(target).is_err() {
+            let _ = finish_widget_drag(&app);
+            return Err("无法移动桌宠，请重试。".into());
+        }
+        mark_widget_drag_moved(&app, (target.x, target.y));
+    }
     // 即使系统没有产生任何 Moved，也必须在松开鼠标后清理拖动状态。
     // 这条释放监视路径与 Moved 后的收尾共用幂等 finish，单击标题栏不会丢失吸附。
     tauri::async_runtime::spawn(async move {
@@ -1662,9 +1713,19 @@ fn mark_widget_drag_moved(app: &tauri::AppHandle, position: (i32, i32)) {
 /// 松开鼠标后识别左、右、顶部，关闭吸附时不产生边缘图标。
 fn finish_widget_drag(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let Some(moved) = release_widget_drag(&state)? else {
+    let Some((moved, generation)) = release_widget_drag(&state)? else {
         return Ok(());
     };
+    let _ = app.emit("widget-drag-ended", ());
+    if lock(&app.state::<pet_window::PetWindowState>().0)?.active {
+        if moved {
+            pet_window::snap_scene(app)?;
+            pet_window::queue_position_save(app, generation)?;
+        }
+        return app
+            .emit("widget-dock", pet_window::dock_notice(app)?)
+            .map_err(|_| "无法刷新桌宠边缘状态。".into());
+    }
     if !moved {
         let layout = lock(&state.layout)?;
         return app
@@ -1683,19 +1744,49 @@ fn finish_widget_drag(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 释放与位移独立：无位移也结束拖动，重复的系统释放/延迟 Moved 收尾必须幂等。
-/// 返回 None 表示本次无需收尾，Some(false) 表示仅单击，Some(true) 表示实际拖动。
-fn release_widget_drag(state: &AppState) -> Result<Option<bool>, String> {
+/// 返回 None 表示无需收尾；元组为是否真实移动、释放所属世代，不能在后续重新读取替代。
+fn release_widget_drag(state: &AppState) -> Result<Option<(bool, u64)>, String> {
+    let _gate = lock(&DRAG_STATE_GATE)?;
     if !state.dragging.swap(false, Ordering::Relaxed) {
         return Ok(None);
     }
     *lock(&state.drag_origin)? = None;
-    Ok(Some(state.drag_moved.swap(false, Ordering::Relaxed)))
+    Ok(Some((
+        state.drag_moved.swap(false, Ordering::Relaxed),
+        state.drag_generation.load(Ordering::Relaxed),
+    )))
+}
+
+/// 退场取消不同于正常松手：作废旧循环并清输入占用，不吸附、不保存位置。
+/// 调用方仅在活动桌宠生命周期中使用；经典标题栏仍由 release_widget_drag 正常结算。
+#[cfg(test)]
+fn cancel_pet_drag_state(state: &AppState) -> Result<bool, String> {
+    let gate = lock(&DRAG_STATE_GATE)?;
+    cancel_pet_drag_state_locked(state, &gate)
+}
+
+/// 调用方已持有生命周期门禁，可与pending清理合并为一个不可被旧保存穿插的取消操作。
+fn cancel_pet_drag_state_locked(
+    state: &AppState,
+    _gate: &MutexGuard<'_, ()>,
+) -> Result<bool, String> {
+    // 先递增世代，已排队的旧主线程闭包和释放监视器都不得接管之后的新拖动。
+    state.drag_generation.fetch_add(1, Ordering::Relaxed);
+    // Moved还会排队220ms后的吸附回调；取消必须连这条旧收尾也作废，避免换肤后写位置。
+    state.move_generation.fetch_add(1, Ordering::Relaxed);
+    let was_dragging = state.dragging.swap(false, Ordering::Relaxed);
+    state.drag_moved.store(false, Ordering::Relaxed);
+    *lock(&state.drag_origin)? = None;
+    Ok(was_dragging)
 }
 
 /// 首次订阅时主动读取真实边缘状态，修复启动后尚未拖动的顶部面板不会自动收起。
 /// 已缩成图标或正在拖动时保留布局状态，不把小图标坐标覆盖为面板锚点。
 #[tauri::command]
 fn get_widget_dock(app: tauri::AppHandle) -> Result<DockNotice, String> {
+    if lock(&app.state::<pet_window::PetWindowState>().0)?.active {
+        return pet_window::dock_notice(&app);
+    }
     let state = app.state::<AppState>();
     {
         let layout = lock(&state.layout)?;
@@ -1851,6 +1942,7 @@ fn show_widget(app: &tauri::AppHandle) {
 /// 构建本地桌面应用；single-instance 是首个插件，第二次启动仅恢复现有窗口。
 pub fn run() {
     tauri::Builder::default()
+        .manage(pet_window::PetWindowState::default())
         .manage(preview::PreviewState::default())
         .register_uri_scheme_protocol("html-preview", |context, request| {
             preview::respond(
@@ -1908,7 +2000,12 @@ pub fn run() {
                     top + (90.0 * scale) as i32,
                 ))?;
             }
-            snap_widget(handle.clone()).map_err(std::io::Error::other)?;
+            // 桌宠资源尚在前端加载时不能先按经典 360px 面板吸附/夹紧，
+            // 否则屏幕右侧保存的 182px 桌宠位置会在每次重启时被向左推。
+            // 首个已验证场景会按真实尺寸夹紧；坏皮肤回退时仍由经典布局负责恢复。
+            if preferences.skin.id == "classic" {
+                snap_widget(handle.clone()).map_err(std::io::Error::other)?;
+            }
             use tauri::{
                 menu::{CheckMenuItem, Menu, MenuItem},
                 tray::TrayIconBuilder,
@@ -1994,7 +2091,11 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
+                    let _ = pet_window::cancel_active_drag(window.app_handle());
                     let _ = window.hide();
+                }
+                tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    pet_window::refresh_region(window.app_handle());
                 }
                 tauri::WindowEvent::Moved(position) => {
                     // 拖动结束 220ms 后再吸附和持久化，避免每个鼠标移动都执行写盘。
@@ -2038,6 +2139,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            pet_window::set_pet_scene_layout,
+            pet_window::get_pet_menu_bounds,
+            pet_window::clear_pet_scene,
+            pet_window::start_pet_drag,
+            pet_window::cancel_pet_drag,
+            pet_window::list_skins,
+            pet_window::get_skin,
+            pet_window::install_skin,
+            pet_window::remove_skin,
             preview::prepare_html_preview,
             preview::release_html_preview,
             set_html_preview_expanded,
@@ -2166,6 +2276,38 @@ mod desktop_tests {
         );
     }
 
+    /// 退场清理作废旧循环且只结算一次；不复用正常释放的吸附、写盘或经典边缘恢复。
+    #[test]
+    fn pet_drag_cancel_invalidates_old_generation_without_saving_or_clearing_classic_side() {
+        let state = AppState {
+            store: Mutex::new(Store::open(std::path::Path::new(":memory:")).unwrap()),
+            running: Mutex::new(None),
+            move_generation: AtomicU64::new(0),
+            settings_gate: Mutex::new(()),
+            layout: Mutex::new(WidgetLayout::default()),
+            dragging: AtomicBool::new(true),
+            drag_moved: AtomicBool::new(true),
+            drag_generation: AtomicU64::new(4),
+            drag_origin: Mutex::new(Some((10, 20))),
+            notifications: Mutex::new(notifications::NotificationTracker::default()),
+            notification_error: Mutex::new(None),
+            notification_generation: AtomicU64::new(0),
+            next_auto_test: Mutex::new(Instant::now()),
+        };
+        state.layout.lock().unwrap().side = Some("left".into());
+        let position = state.store.lock().unwrap().config.widget_position;
+        assert!(cancel_pet_drag_state(&state).unwrap());
+        assert_eq!(state.drag_generation.load(Ordering::Relaxed), 5);
+        assert_eq!(state.move_generation.load(Ordering::Relaxed), 1);
+        assert!(!state.dragging.load(Ordering::Relaxed));
+        assert!(!state.drag_moved.load(Ordering::Relaxed));
+        assert!(state.drag_origin.lock().unwrap().is_none());
+        assert_eq!(state.store.lock().unwrap().config.widget_position, position);
+        assert_eq!(state.layout.lock().unwrap().side.as_deref(), Some("left"));
+        assert!(!cancel_pet_drag_state(&state).unwrap());
+        assert_eq!(release_widget_drag(&state).unwrap(), None);
+    }
+
     /// 使用真实门禁和模拟单调时间，不需要等待三分钟或调用模型。
     #[test]
     fn schedule_waits_deduplicates_and_skips_disabled_or_busy() {
@@ -2190,7 +2332,7 @@ mod desktop_tests {
         state.layout.lock().unwrap().side = Some("top".into());
         state.dragging.store(true, Ordering::Relaxed);
         *state.drag_origin.lock().unwrap() = Some((700, 0));
-        assert_eq!(release_widget_drag(&state).unwrap(), Some(false));
+        assert_eq!(release_widget_drag(&state).unwrap(), Some((false, 0)));
         assert!(!state.dragging.load(Ordering::Relaxed));
         assert_eq!(state.layout.lock().unwrap().side.as_deref(), Some("top"));
         assert!(state.drag_origin.lock().unwrap().is_none());

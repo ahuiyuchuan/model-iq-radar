@@ -8,7 +8,10 @@ import { externalUrl } from '../src/markdown';
 
 const fake = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock('../src/bridge', () => ({ call: fake.call }));
-beforeEach(() => fake.call.mockReset().mockResolvedValue(undefined));
+beforeEach(() => {
+    // Vitest 5 将 hook 返回的函数视作清理回调，因此不能返回 IPC mock。
+    fake.call.mockReset().mockResolvedValue(undefined);
+});
 afterEach(() => vi.restoreAllMocks());
 
 it('渲染 CommonMark 与 GFM 常用语法，任务只读，代码使用本地高亮', () => {

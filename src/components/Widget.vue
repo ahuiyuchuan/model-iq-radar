@@ -23,14 +23,17 @@ import {
     Zap,
     Info,
     Grip,
+    PanelLeftClose,
 } from 'lucide-vue-next';
 import { CANDY_RULE_ID, call, dragWindow, openSettings, resizeWidget, subscribeDock } from '../bridge';
 import { formatTime, formatRelativeTime, useProbe } from '../useProbe';
 import ModelPicker from './ModelPicker.vue';
+import PetStage from './PetStage.vue';
 import AnswerContent from './AnswerContent.vue';
 import { ruleAnswers } from '../rules';
 import { reasoningSupport } from '../reasoning';
 import type { FetchedModel, ModelCatalog, ModelProfile } from '../types';
+import type { Rect } from '../pet/types';
 
 const {
     snapshot,
@@ -48,7 +51,73 @@ const {
 const uiNow = ref({ monotonic: performance.now(), wall: Date.now() });
 let clockTimer: ReturnType<typeof setInterval> | undefined;
 const expanded = ref(false);
+const petActive = ref(false);
+const petPanelVisible = ref(true);
+const card = ref<HTMLElement>();
+const petStage = ref<InstanceType<typeof PetStage>>();
+const cardHeight = ref(176);
+const floatingBounds = ref<Rect[]>([]);
+let cardObserver: ResizeObserver | undefined;
+const observedMenus = new Set<Element>();
+let measuredFrame = 0;
+/**
+ * 菜单相对卡片测量，交由桌宠场景扩展窗口与输入区域；绝不把菜单高度当作卡片高度。
+ * 关闭菜单后清空浮层轮廓，因此边饰始终跟随真实卡片，透明空白也不会永久拦截点击。
+ */
+async function measureSceneContent(): Promise<void> {
+    await nextTick();
+    const element = card.value;
+    if (disposed || !petActive.value || !element) {
+        for (const menu of observedMenus) cardObserver?.unobserve(menu);
+        observedMenus.clear();
+        floatingBounds.value = [];
+        return;
+    }
+    const origin = element.getBoundingClientRect();
+    if (origin.height > 0) cardHeight.value = Math.ceil(origin.height);
+    const menus = [...element.querySelectorAll<HTMLElement>('.model-menu')];
+    // 后台目录可能在菜单已打开时变化；观察浮层本身而非只观察卡片，防止列表增高后仍沿用旧边界。
+    for (const old of observedMenus) {
+        if (!menus.includes(old as HTMLElement)) {
+            cardObserver?.unobserve(old);
+            observedMenus.delete(old);
+        }
+    }
+    for (const menu of menus) {
+        if (!observedMenus.has(menu)) {
+            cardObserver?.observe(menu);
+            observedMenus.add(menu);
+        }
+    }
+    floatingBounds.value = menus
+        .map((menu): Rect => {
+            const box = menu.getBoundingClientRect();
+            // 预留阴影的安全边距，并包含菜单相对选择器的真实偏移。
+            return [box.left - origin.left - 3, box.top - origin.top - 3, box.width + 6, box.height + 8];
+        })
+        .filter((bounds) => bounds[2] > 6 && bounds[3] > 8);
+}
+function queueSceneMeasure(): void {
+    cancelAnimationFrame(measuredFrame);
+    measuredFrame = requestAnimationFrame(() => void measureSceneContent());
+}
+/** 菜单先隐藏测量，再等待场景IPC完成；只预留浮层空间，不拉长卡片或滚动整页。 */
+async function prepareSceneMenu(): Promise<void> {
+    if (!petActive.value || disposed) return;
+    await measureSceneContent();
+    await nextTick();
+    await petStage.value?.syncLayout();
+}
+/** 桌宠独立控制面板收放，经典边签逻辑只在经典模式启用。 */
+watch(petActive, (value) => {
+    if (value) {
+        tucked.value = false;
+        edgeSide.value = null;
+        clearTimeout(tuckTimer);
+    }
+});
 const copied = ref(false);
+const showRawAnswer = ref(false);
 const previewError = ref('');
 // 放大层位于同一页面，打开期间不因 iframe 内的鼠标/焦点变化触发边缘收起。
 const previewExpanded = ref(false);
@@ -103,7 +172,7 @@ function waitForMotion(): Promise<void> {
 /** 鼠标离开 250ms 后收回；只缩短等待，保留原有 180/220ms 过渡动画。 */
 function scheduleTuck(): void {
     clearTimeout(tuckTimer);
-    if (!edgeSide.value || tucked.value) return;
+    if (petActive.value || !edgeSide.value || tucked.value) return;
     tuckTimer = setTimeout(() => {
         if (
             !hovering &&
@@ -191,11 +260,17 @@ function previewExpandedChanged(value: boolean): void {
 }
 
 onMounted(async () => {
+    if (typeof ResizeObserver !== 'undefined') {
+        cardObserver = new ResizeObserver(queueSceneMeasure);
+        if (card.value) cardObserver.observe(card.value);
+    }
+    window.addEventListener('resize', queueSceneMeasure);
     clockTimer = setInterval(() => {
         uiNow.value = { monotonic: performance.now(), wall: Date.now() };
     }, 1000);
     try {
         const cleanup = await subscribeDock((dock) => {
+            if (petActive.value) return;
             edgeSide.value = dock.side;
             tucked.value = dock.tucked;
             if (!dock.tucked) scheduleTuck();
@@ -216,7 +291,17 @@ onUnmounted(() => {
     releaseMotion?.();
     clearInterval(clockTimer);
     unsubscribeDock?.();
+    cardObserver?.disconnect();
+    observedMenus.clear();
+    cancelAnimationFrame(measuredFrame);
+    window.removeEventListener('resize', queueSceneMeasure);
 });
+
+watch(
+    [petActive, expanded, petPanelVisible, pickerOpen, modelPickerOpen, rulePickerOpen, effortPickerOpen],
+    () => void measureSceneContent(),
+    { flush: 'post' },
+);
 
 const state = computed(() => (busy.value ? 'running' : (latest.value?.status ?? 'idle')));
 const stateLabels: Record<string, string> = {
@@ -240,6 +325,7 @@ watch(
     () => {
         previewError.value = '';
         copied.value = false;
+        showRawAnswer.value = false;
         clearTimeout(copiedTimer);
     },
 );
@@ -575,277 +661,347 @@ watch(error, (value) => {
 </script>
 
 <template>
-    <button
-        v-if="tucked"
-        class="edge-tab"
-        :class="[edgeSide, `state-${state}`, { 'edge-restoring': revealing }]"
-        :aria-label="`显示测智雷达：${resultLabel}`"
-        @mouseenter="pointerEntered"
-        @click="setTucked(false)"
-        @focus="setTucked(false)"
+    <PetStage
+        ref="petStage"
+        v-slot="{ togglePanel }"
+        :snapshot="snapshot"
+        :latest="latest"
+        :busy="busy"
+        :stale="stale"
+        :preview-expanded="previewExpanded"
+        :content-expanded="expanded"
+        :content-height="cardHeight"
+        :floating-bounds="floatingBounds"
+        @active="petActive = $event"
+        @visible="petPanelVisible = $event"
+        @error="error = $event"
     >
-        <LoaderCircle v-if="busy" :size="20" class="edge-spinner spin" aria-hidden="true" />
-        <Target v-else :size="18" aria-hidden="true" /><span class="sr-only" aria-live="polite">{{
-            resultLabel
-        }}</span>
-    </button>
-    <main
-        v-else
-        class="widget panel"
-        :class="[
-            {
-                expanded,
-                'picker-visible': pickerOpen || modelPickerOpen || rulePickerOpen || effortPickerOpen,
-                'dock-away': collapsing || revealing,
-            },
-            `state-${state}`,
-            edgeSide ? `dock-${edgeSide}` : '',
-        ]"
-        :style="{ '--panel-opacity': (snapshot?.config.preferences.opacity ?? 97) / 100 }"
-        aria-label="测智雷达悬浮组件"
-        @mouseenter="pointerEntered"
-        @mouseleave="pointerLeft"
-    >
-        <header class="widget-header drag-area" @mousedown.left="dragWindow().catch(() => {})">
-            <div class="brand">
-                <Target class="brand-mark" :size="17" aria-hidden="true" />
-                <span>测智雷达</span>
-            </div>
-            <Grip :size="22" class="drag-grip" aria-hidden="true" />
-            <div class="widget-tools" @mousedown.stop>
-                <button
-                    class="icon-button"
-                    :class="{ active: autoTestEnabled }"
-                    :aria-pressed="autoTestEnabled"
-                    :disabled="autoSwitchPending"
-                    aria-label="切换自动测试"
-                    :title="`${autoTestEnabled ? '关闭' : '开启'}自动测试 · 每 ${snapshot?.config.preferences.autoTestIntervalMinutes ?? 3} 分钟`"
-                    @click="toggleAutoTest"
-                >
-                    <TimerReset :size="15" />
-                </button>
-                <button class="icon-button" aria-label="打开设置" title="设置" @click="safeOpenSettings">
-                    <Settings2 :size="15" />
-                </button>
-                <button
-                    class="icon-button expand-button"
-                    :aria-expanded="expanded"
-                    :disabled="layoutPending"
-                    :aria-label="expanded ? '收起结果' : '展开测试详情'"
-                    :title="expanded ? '收起' : '展开'"
-                    @click="toggleExpanded"
-                >
-                    <ChevronUp v-if="expanded" :size="16" /><ChevronDown v-else :size="16" />
-                </button>
-            </div>
-        </header>
-
-        <!-- 模型目录为空才显示拉取按钮；当前手填 ID 只作占位，不伪造目录数据。 -->
-        <div class="widget-model-row" :class="{ 'with-fetch': !catalogModels.length }">
-            <ModelPicker
-                ref="picker"
-                :profiles="snapshot?.config.profiles ?? []"
-                :selected-id="snapshot?.config.selectedProfileId ?? null"
-                :expanded="expanded"
-                :disabled="busy || selecting"
-                :show-model="false"
-                :summaries="profileSummaries"
-                :before-open="() => closeOtherPickers('group')"
-                @select="selectProfile"
-                @configure="safeOpenSettings"
-                @open-change="pickerOpen = $event"
-                @error="error = $event"
-            />
-            <ModelPicker
-                ref="modelPicker"
-                class="widget-model-picker"
-                label="当前分组模型"
-                :profiles="catalogModels.map((item) => ({ id: item.id, name: item.id, model: '' }))"
-                :selected-id="profile?.model ?? null"
-                :placeholder="profile?.model || '无模型'"
-                :expanded="expanded"
-                :disabled="busy || selecting || catalogLoading || fetchingModels || !catalogModels.length"
-                :show-model="false"
-                :show-icon="false"
-                :before-open="() => closeOtherPickers('model')"
-                @select="selectModel"
-                @open-change="modelPickerOpen = $event"
-                @error="error = $event"
-            />
-            <button
-                v-if="!catalogModels.length"
-                type="button"
-                class="icon-button widget-fetch-models"
-                aria-label="拉取当前分组模型"
-                :title="
-                    catalogLoading ? '读取模型缓存中' : fetchingModels ? '正在拉取模型' : '拉取当前分组模型'
-                "
-                :aria-busy="catalogLoading || fetchingModels"
-                :disabled="busy || selecting || catalogLoading || fetchingModels || !profile"
-                @click="fetchProfileModels"
+        <button
+            v-if="tucked"
+            class="edge-tab"
+            :class="[edgeSide, `state-${state}`, { 'edge-restoring': revealing }]"
+            :aria-label="`显示测智雷达：${resultLabel}`"
+            @mouseenter="pointerEntered"
+            @click="setTucked(false)"
+            @focus="setTucked(false)"
+        >
+            <LoaderCircle v-if="busy" :size="20" class="edge-spinner spin" aria-hidden="true" />
+            <Target v-else :size="18" aria-hidden="true" /><span class="sr-only" aria-live="polite">{{
+                resultLabel
+            }}</span>
+        </button>
+        <main
+            ref="card"
+            v-else
+            v-show="!petActive || petPanelVisible || previewExpanded"
+            class="widget panel"
+            :class="[
+                {
+                    expanded,
+                    'picker-visible': pickerOpen || modelPickerOpen || rulePickerOpen || effortPickerOpen,
+                    'dock-away': collapsing || revealing,
+                },
+                `state-${state}`,
+                edgeSide ? `dock-${edgeSide}` : '',
+            ]"
+            :style="{ '--panel-opacity': (snapshot?.config.preferences.opacity ?? 97) / 100 }"
+            aria-label="测智雷达悬浮组件"
+            @mouseenter="pointerEntered"
+            @mouseleave="pointerLeft"
+        >
+            <header
+                class="widget-header drag-area"
+                @mousedown.left="!petActive && dragWindow().catch(() => {})"
             >
-                <RotateCw :size="14" :class="{ spin: catalogLoading || fetchingModels }" aria-hidden="true" />
-            </button>
-        </div>
+                <div class="brand">
+                    <Target class="brand-mark" :size="17" aria-hidden="true" />
+                    <span>测智雷达</span>
+                </div>
+                <Grip :size="22" class="drag-grip" aria-hidden="true" />
+                <div class="widget-tools" @mousedown.stop>
+                    <button
+                        class="icon-button"
+                        :class="{ active: autoTestEnabled }"
+                        :aria-pressed="autoTestEnabled"
+                        :disabled="autoSwitchPending"
+                        aria-label="切换自动测试"
+                        :title="`${autoTestEnabled ? '关闭' : '开启'}自动测试 · 每 ${snapshot?.config.preferences.autoTestIntervalMinutes ?? 3} 分钟`"
+                        @click="toggleAutoTest"
+                    >
+                        <TimerReset :size="15" />
+                    </button>
+                    <button class="icon-button" aria-label="打开设置" title="设置" @click="safeOpenSettings">
+                        <Settings2 :size="15" />
+                    </button>
+                    <button
+                        class="icon-button expand-button"
+                        :aria-expanded="expanded"
+                        :disabled="layoutPending"
+                        :aria-label="expanded ? '收起结果' : '展开测试详情'"
+                        :title="expanded ? '收起' : '展开'"
+                        @click="toggleExpanded"
+                    >
+                        <ChevronUp v-if="expanded" :size="16" /><ChevronDown v-else :size="16" />
+                    </button>
+                    <button
+                        v-if="petActive"
+                        class="icon-button pet-collapse"
+                        aria-label="收起为桌宠"
+                        title="收起为桌宠"
+                        @click="togglePanel"
+                    >
+                        <PanelLeftClose :size="16" />
+                    </button>
+                </div>
+            </header>
 
-        <div class="widget-rule-row">
-            <ModelPicker
-                ref="rulePicker"
-                class="widget-rule-picker"
-                label="当前测试规则"
-                :profiles="ruleOptions"
-                :selected-id="selectedRuleId"
-                :placeholder="profile?.rulePresetId ? '规则已失效' : '默认规则'"
-                :expanded="expanded"
-                :disabled="busy || selecting || !profile"
-                :show-model="false"
-                :before-open="() => closeOtherPickers('rule')"
-                @select="selectRule"
-                @open-change="rulePickerOpen = $event"
-                @error="error = $event"
-            />
-            <ModelPicker
-                ref="effortPicker"
-                class="widget-effort-picker"
-                label="当前思考等级"
-                :profiles="reasoning.options"
-                :selected-id="currentEffort"
-                :expanded="expanded"
-                :disabled="busy || selecting || !profile"
-                :show-model="false"
-                :show-icon="false"
-                :description="reasoning.notice"
-                :before-open="() => closeOtherPickers('effort')"
-                @select="selectEffort"
-                @open-change="effortPickerOpen = $event"
-                @error="error = $event"
-            />
-        </div>
+            <!-- 模型目录为空才显示拉取按钮；当前手填 ID 只作占位，不伪造目录数据。 -->
+            <div class="widget-model-row" :class="{ 'with-fetch': !catalogModels.length }">
+                <ModelPicker
+                    ref="picker"
+                    :profiles="snapshot?.config.profiles ?? []"
+                    :context="petActive ? 'scene' : 'widget'"
+                    :selected-id="snapshot?.config.selectedProfileId ?? null"
+                    :expanded="expanded"
+                    :disabled="busy || selecting"
+                    :show-model="false"
+                    :summaries="profileSummaries"
+                    :before-open="() => closeOtherPickers('group')"
+                    :prepare-scene-menu="prepareSceneMenu"
+                    @select="selectProfile"
+                    @configure="safeOpenSettings"
+                    @open-change="pickerOpen = $event"
+                    @error="error = $event"
+                />
+                <ModelPicker
+                    ref="modelPicker"
+                    class="widget-model-picker"
+                    label="当前分组模型"
+                    :context="petActive ? 'scene' : 'widget'"
+                    icon="brain"
+                    :profiles="catalogModels.map((item) => ({ id: item.id, name: item.id, model: '' }))"
+                    :selected-id="profile?.model ?? null"
+                    :placeholder="profile?.model || '无模型'"
+                    :expanded="expanded"
+                    :disabled="busy || selecting || catalogLoading || fetchingModels || !catalogModels.length"
+                    :show-model="false"
+                    :show-icon="false"
+                    :before-open="() => closeOtherPickers('model')"
+                    :prepare-scene-menu="prepareSceneMenu"
+                    @select="selectModel"
+                    @open-change="modelPickerOpen = $event"
+                    @error="error = $event"
+                />
+                <button
+                    v-if="!catalogModels.length"
+                    type="button"
+                    class="icon-button widget-fetch-models"
+                    aria-label="拉取当前分组模型"
+                    :title="
+                        catalogLoading
+                            ? '读取模型缓存中'
+                            : fetchingModels
+                              ? '正在拉取模型'
+                              : '拉取当前分组模型'
+                    "
+                    :aria-busy="catalogLoading || fetchingModels"
+                    :disabled="busy || selecting || catalogLoading || fetchingModels || !profile"
+                    @click="fetchProfileModels"
+                >
+                    <RotateCw
+                        :size="14"
+                        :class="{ spin: catalogLoading || fetchingModels }"
+                        aria-hidden="true"
+                    />
+                </button>
+            </div>
 
-        <section v-if="expanded" class="result-content">
-            <div class="result-heading" aria-live="polite">
-                <span class="status-symbol hero-symbol" :class="state">
-                    <LoaderCircle v-if="busy" :size="25" class="spin" />
-                    <Check v-else-if="state === 'passed'" :size="25" />
-                    <CircleAlert v-else-if="state === 'failed'" :size="25" />
-                    <X v-else-if="state === 'error'" :size="25" />
-                    <Minus v-else :size="25" />
-                </span>
-                <div class="result-heading-copy">
-                    <h1>{{ resultLabel }}</h1>
-                    <p :title="hint + resultAnswers">
-                        {{ hint }}
-                        <strong v-if="!busy && (state === 'passed' || state === 'failed')">{{
-                            resultAnswers
-                        }}</strong>
+            <div class="widget-rule-row">
+                <ModelPicker
+                    ref="rulePicker"
+                    class="widget-rule-picker"
+                    label="当前测试规则"
+                    :context="petActive ? 'scene' : 'widget'"
+                    icon="list"
+                    :profiles="ruleOptions"
+                    :selected-id="selectedRuleId"
+                    :placeholder="profile?.rulePresetId ? '规则已失效' : '默认规则'"
+                    :expanded="expanded"
+                    :disabled="busy || selecting || !profile"
+                    :show-model="false"
+                    :before-open="() => closeOtherPickers('rule')"
+                    :prepare-scene-menu="prepareSceneMenu"
+                    @select="selectRule"
+                    @open-change="rulePickerOpen = $event"
+                    @error="error = $event"
+                />
+                <ModelPicker
+                    ref="effortPicker"
+                    class="widget-effort-picker"
+                    label="当前思考等级"
+                    :context="petActive ? 'scene' : 'widget'"
+                    icon="sliders"
+                    :profiles="reasoning.options"
+                    :selected-id="currentEffort"
+                    :expanded="expanded"
+                    :disabled="busy || selecting || !profile"
+                    :show-model="false"
+                    :show-icon="false"
+                    :description="reasoning.notice"
+                    :before-open="() => closeOtherPickers('effort')"
+                    :prepare-scene-menu="prepareSceneMenu"
+                    @select="selectEffort"
+                    @open-change="effortPickerOpen = $event"
+                    @error="error = $event"
+                />
+            </div>
+
+            <!-- 经典与桌宠共用原纵向内容，皮肤只改变颜色与边饰，避免维护两套业务控件。 -->
+            <section v-if="expanded" class="result-content" aria-label="本次测试详情">
+                <div class="result-heading" aria-live="polite">
+                    <span class="status-symbol hero-symbol" :class="state">
+                        <LoaderCircle v-if="busy" :size="25" class="spin" />
+                        <Check v-else-if="state === 'passed'" :size="25" />
+                        <CircleAlert v-else-if="state === 'failed'" :size="25" />
+                        <X v-else-if="state === 'error'" :size="25" />
+                        <Minus v-else :size="25" />
+                    </span>
+                    <div class="result-heading-copy">
+                        <h1>{{ resultLabel }}</h1>
+                        <p :title="hint + resultAnswers">
+                            {{ hint }}
+                            <strong v-if="!busy && (state === 'passed' || state === 'failed')">{{
+                                resultAnswers
+                            }}</strong>
+                        </p>
+                    </div>
+                </div>
+
+                <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
+                <div class="answer-label">
+                    <span>模型回答</span>
+                    <div class="answer-label-tools">
+                        <span class="eyebrow">{{ answerCaption }}</span>
+                        <button
+                            v-if="latestRecord?.answerType === 'html'"
+                            class="icon-button"
+                            :disabled="busy || !latestRecord?.answer"
+                            :aria-pressed="showRawAnswer"
+                            @click="showRawAnswer = !showRawAnswer"
+                        >
+                            {{ showRawAnswer ? '返回预览' : '原始回答' }}
+                        </button>
+                    </div>
+                </div>
+                <div
+                    class="answer-box"
+                    :class="{
+                        'answer-box-html': latestRecord?.answerType === 'html' && !busy && !showRawAnswer,
+                    }"
+                    tabindex="0"
+                    :aria-busy="busy"
+                >
+                    <div v-if="busy" class="answer-placeholder">
+                        <LoaderCircle :size="18" class="spin" />等待模型回答
+                    </div>
+                    <pre v-else-if="showRawAnswer && latestRecord?.answer" class="pet-raw-answer">{{
+                        latestRecord.answer
+                    }}</pre>
+                    <AnswerContent
+                        v-else-if="latestRecord?.answer"
+                        :source="latestRecord.answer"
+                        :answer-type="latestRecord.answerType"
+                        :executable="latestRecord.status !== 'error' && latestRecord.status !== 'cancelled'"
+                        @failure="previewError = $event"
+                        @expanded-change="previewExpandedChanged"
+                    />
+                    <p v-else class="muted">
+                        {{ state === 'idle' ? '测试完成后，回答会显示在这里。' : '没有可展示的回答。' }}
                     </p>
                 </div>
-            </div>
+                <div class="metadata" :class="{ 'with-countdown': autoTestEnabled }">
+                    <div class="test-timestamp">
+                        <Clock3 :size="14" /><span
+                            >{{ stale && !busy ? '上次测试' : '测试时间'
+                            }}<strong :title="testTimeTitle">{{ compactTestTime }}</strong></span
+                        >
+                    </div>
+                    <div>
+                        <Zap :size="14" /><span
+                            >请求耗时<strong>{{ requestDuration }}</strong></span
+                        >
+                    </div>
+                    <div v-if="autoTestEnabled" class="auto-countdown">
+                        <Clock3 :size="14" /><span
+                            >下次测试<strong>{{ autoCountdown }}</strong></span
+                        >
+                    </div>
+                </div>
+                <div class="expanded-actions">
+                    <button
+                        class="button secondary"
+                        :disabled="busy || !latestRecord?.answer"
+                        @click="copyAnswer"
+                    >
+                        <Check v-if="copied" :size="15" /><Copy v-else :size="15" />{{
+                            copied ? '已复制' : '复制回答'
+                        }}
+                    </button>
+                    <button
+                        class="button"
+                        :class="{ secondary: busy }"
+                        :disabled="cancelling || selecting || (busy && !snapshot?.running)"
+                        @click="primaryAction"
+                    >
+                        <X v-if="busy" :size="15" /><RotateCw v-else-if="latestRecord" :size="15" /><Play
+                            v-else
+                            :size="15"
+                        />
+                        {{ primaryLabel }}
+                    </button>
+                </div>
+                <footer class="rule-note">
+                    <Info :size="12" /><span>文字按连续字符串判定；HTML 仅展示效果</span>
+                </footer>
+                <p class="scope-note">适用于 GPT 6 及以上系列模型，其他模型无法保证测试准确度。</p>
+            </section>
 
-            <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
-            <div class="answer-label">
-                <span>模型回答</span><span class="eyebrow">{{ answerCaption }}</span>
-            </div>
-            <div
-                class="answer-box"
-                :class="{ 'answer-box-html': latestRecord?.answerType === 'html' && !busy }"
-                tabindex="0"
-                :aria-busy="busy"
-            >
-                <div v-if="busy" class="answer-placeholder">
-                    <LoaderCircle :size="18" class="spin" />等待模型回答
+            <div v-if="!expanded" class="compact-actions">
+                <div class="compact-status" aria-live="polite">
+                    <span class="status-symbol" :class="state">
+                        <LoaderCircle v-if="busy" :size="15" class="spin" />
+                        <Check v-else-if="state === 'passed'" :size="12" />
+                        <CircleAlert v-else-if="state === 'failed'" :size="12" />
+                        <X v-else-if="state === 'error'" :size="12" />
+                        <Minus v-else :size="12" /> </span
+                    >{{ resultLabel }}
                 </div>
-                <AnswerContent
-                    v-else-if="latestRecord?.answer"
-                    :source="latestRecord.answer"
-                    :answer-type="latestRecord.answerType"
-                    :executable="latestRecord.status !== 'error' && latestRecord.status !== 'cancelled'"
-                    @failure="previewError = $event"
-                    @expanded-change="previewExpandedChanged"
-                />
-                <p v-else class="muted">
-                    {{ state === 'idle' ? '测试完成后，回答会显示在这里。' : '没有可展示的回答。' }}
-                </p>
-            </div>
-            <div class="metadata" :class="{ 'with-countdown': autoTestEnabled }">
-                <div class="test-timestamp">
-                    <Clock3 :size="14" /><span
-                        >{{ stale && !busy ? '上次测试' : '测试时间'
-                        }}<strong :title="testTimeTitle">{{ compactTestTime }}</strong></span
-                    >
-                </div>
-                <div>
-                    <Zap :size="14" /><span
-                        >请求耗时<strong>{{ requestDuration }}</strong></span
-                    >
-                </div>
-                <div v-if="autoTestEnabled" class="auto-countdown">
-                    <Clock3 :size="14" /><span
-                        >下次测试<strong>{{ autoCountdown }}</strong></span
-                    >
-                </div>
-            </div>
-            <div class="expanded-actions">
-                <button
-                    class="button secondary"
-                    :disabled="busy || !latestRecord?.answer"
-                    @click="copyAnswer"
+                <div
+                    class="compact-timing"
+                    :title="`测试时间：${testTimeTitle}；请求耗时：${requestDuration}`"
                 >
-                    <Check v-if="copied" :size="15" /><Copy v-else :size="15" />{{
-                        copied ? '已复制' : '复制回答'
-                    }}
-                </button>
+                    <!-- 标签必须直接可见，不能仅藏在悬停说明中；日期仍与耗时、倒计时分行。 -->
+                    <span class="compact-test-time">测试时间 {{ compactTestTime }}</span>
+                    <span v-if="busy || latestRecord || autoTestEnabled" class="compact-request-details">
+                        <span v-if="busy || latestRecord">耗时 {{ requestDuration }}</span>
+                        <span v-if="autoTestEnabled" class="auto-countdown"
+                            >{{ busy || latestRecord ? ' · ' : '' }}下次 {{ autoCountdown }}</span
+                        >
+                    </span>
+                </div>
                 <button
-                    class="button"
+                    class="button compact-primary"
                     :class="{ secondary: busy }"
                     :disabled="cancelling || selecting || (busy && !snapshot?.running)"
                     @click="primaryAction"
                 >
-                    <X v-if="busy" :size="15" /><RotateCw v-else-if="latestRecord" :size="15" /><Play
+                    <X v-if="busy" :size="13" /><RotateCw v-else-if="latestRecord" :size="13" /><Play
                         v-else
-                        :size="15"
+                        :size="13"
                     />
                     {{ primaryLabel }}
                 </button>
             </div>
-            <footer class="rule-note">
-                <Info :size="12" /><span>文字按连续字符串判定；HTML 仅展示效果</span>
-            </footer>
-            <p class="scope-note">适用于 GPT 6 及以上系列模型，其他模型无法保证测试准确度。</p>
-        </section>
-
-        <div v-else class="compact-actions">
-            <div class="compact-status" aria-live="polite">
-                <span class="status-symbol" :class="state">
-                    <LoaderCircle v-if="busy" :size="15" class="spin" />
-                    <Check v-else-if="state === 'passed'" :size="12" />
-                    <CircleAlert v-else-if="state === 'failed'" :size="12" />
-                    <X v-else-if="state === 'error'" :size="12" />
-                    <Minus v-else :size="12" /> </span
-                >{{ resultLabel }}
-            </div>
-            <div class="compact-timing" :title="`测试时间：${testTimeTitle}；请求耗时：${requestDuration}`">
-                <!-- 标签必须直接可见，不能仅藏在悬停说明中；日期仍与耗时、倒计时分行。 -->
-                <span class="compact-test-time">测试时间 {{ compactTestTime }}</span>
-                <span v-if="busy || latestRecord || autoTestEnabled" class="compact-request-details">
-                    <span v-if="busy || latestRecord">耗时 {{ requestDuration }}</span>
-                    <span v-if="autoTestEnabled" class="auto-countdown"
-                        >{{ busy || latestRecord ? ' · ' : '' }}下次 {{ autoCountdown }}</span
-                    >
-                </span>
-            </div>
-            <button
-                class="button compact-primary"
-                :class="{ secondary: busy }"
-                :disabled="cancelling || selecting || (busy && !snapshot?.running)"
-                @click="primaryAction"
-            >
-                <X v-if="busy" :size="13" /><RotateCw v-else-if="latestRecord" :size="13" /><Play
-                    v-else
-                    :size="13"
-                />
-                {{ primaryLabel }}
-            </button>
-        </div>
-    </main>
+        </main>
+    </PetStage>
 </template>

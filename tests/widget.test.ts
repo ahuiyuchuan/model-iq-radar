@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Widget from '../src/components/Widget.vue';
 import type { AppSnapshot } from '../src/types';
 import { formatTime, formatRelativeTime } from '../src/useProbe';
+import { defineComponent, h, onMounted } from 'vue';
 
 const fake = vi.hoisted(() => ({
     call: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('../src/bridge', () => ({
     call: fake.call,
     subscribe: fake.subscribe,
     dragWindow: vi.fn(),
+    dragPetWindow: vi.fn(),
     openSettings: vi.fn(),
     resizeWidget: fake.resize,
     subscribeDock: fake.subscribeDock,
@@ -64,6 +66,94 @@ beforeEach(() => {
 afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+});
+
+it('桌宠两态共用两行选择器，详情按纵向排列，菜单扩场景而不撑卡片', async () => {
+    fake.snapshot.config.profiles[0].rulePresetId = 'bound-rule';
+    fake.snapshot.config.rulePresets = [
+        { id: 'bound-rule', name: '绑定规则', prompt: '绑定题目', keyword: '绑定答案' },
+    ];
+    const togglePanel = vi.fn();
+    const Stage = defineComponent({
+        name: 'PetStage',
+        props: ['floatingBounds', 'contentHeight', 'stale'],
+        emits: ['active', 'visible'],
+        setup(_props, { slots, emit, expose }) {
+            expose({ syncLayout: vi.fn().mockResolvedValue(undefined) });
+            onMounted(() => {
+                emit('active', true);
+                emit('visible', true);
+            });
+            return () => h('div', { class: 'pet-stage' }, slots.default?.({ togglePanel }));
+        },
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+        const menu = this.classList.contains('model-menu');
+        const height = menu ? 140 : this.classList.contains('expanded') ? 546 : 176;
+        return {
+            x: menu ? 130 : 100,
+            y: menu ? 280 : 100,
+            left: menu ? 130 : 100,
+            top: menu ? 280 : 100,
+            width: menu ? 200 : 360,
+            height,
+            right: menu ? 330 : 460,
+            bottom: (menu ? 280 : 100) + height,
+            toJSON: () => ({}),
+        } as DOMRect;
+    });
+    const wrapper = mount(Widget, { global: { stubs: { PetStage: Stage } } });
+    await flushPromises();
+    // 两种展开状态复用真实选择器实例，不能为恢复旧布局再创建第二套业务入口。
+    const selectors = wrapper.findAll('[role="combobox"]');
+    expect(selectors.map((item) => item.attributes('aria-label'))).toEqual([
+        '当前模型配置',
+        '当前分组模型',
+        '当前测试规则',
+        '当前思考等级',
+    ]);
+    expect(wrapper.findAll('.widget-model-row .model-select')).toHaveLength(2);
+    expect(wrapper.findAll('.widget-rule-row .model-select')).toHaveLength(2);
+    expect(wrapper.get('[aria-label="当前测试规则"]').text()).toContain('绑定规则');
+    expect(wrapper.find('.compact-actions').exists()).toBe(true);
+    const stage = wrapper.findComponent(Stage);
+    expect(stage.props('contentHeight')).toBe(176);
+    await wrapper.get('[aria-label="当前模型配置"]').trigger('click');
+    await flushPromises();
+    expect(stage.props('floatingBounds')).toEqual([[27, 177, 206, 148]]);
+    expect(stage.props('contentHeight')).toBe(176);
+    expect(fake.resize).not.toHaveBeenCalled();
+    await wrapper.get('[aria-label="当前模型配置"]').trigger('keydown', { key: 'Escape' });
+    await flushPromises();
+    expect(stage.props('floatingBounds')).toEqual([]);
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.compact-actions').exists()).toBe(false);
+    expect(wrapper.find('.pet-summary,.pet-question,.pet-verdict').exists()).toBe(false);
+    const expandedSelectors = wrapper.findAll('[role="combobox"]');
+    expect(expandedSelectors).toHaveLength(selectors.length);
+    expandedSelectors.forEach((item, index) => expect(item.element).toBe(selectors[index].element));
+    // DOM顺序是可访问阅读顺序；视觉位置仍须由浏览器验收，jsdom不冒充几何验证。
+    expect([...wrapper.get('.result-content').element.children].map((item) => item.classList[0])).toEqual([
+        'result-heading',
+        'answer-label',
+        'answer-box',
+        'metadata',
+        'expanded-actions',
+        'rule-note',
+        'scope-note',
+    ]);
+    expect(wrapper.get('.result-heading').text()).toContain('配置好接口');
+    expect(wrapper.get('.metadata').text()).toContain('测试时间');
+    expect(wrapper.get('.metadata').text()).toContain('请求耗时');
+    expect(wrapper.get('.metadata').text()).toContain('下次测试');
+    expect(wrapper.findAll('.expanded-actions .button')).toHaveLength(2);
+    expect(wrapper.get('.rule-note').text()).toBe('文字按连续字符串判定；HTML 仅展示效果');
+    expect(stage.props('contentHeight')).toBe(546);
+    await wrapper.get('[aria-label="收起为桌宠"]').trigger('click');
+    expect(togglePanel).toHaveBeenCalledOnce();
+    wrapper.unmount();
 });
 
 it('Markdown 只改变显示，复制仍为原文且状态仍使用后端结论', async () => {
@@ -510,6 +600,65 @@ it('打开四种下拉菜单均保留同一 HTML 会话，不因菜单重建回�
     }
     expect(fake.call.mock.calls.filter(([command]) => command === 'prepare_html_preview')).toHaveLength(1);
     expect(fake.call.mock.calls.some(([command]) => command === 'release_html_preview')).toBe(false);
+    wrapper.unmount();
+});
+
+it('HTML原始回答切回经典皮肤仍可恢复沙箱预览，且不触发测试', async () => {
+    const source = '<div>原始HTML回答</div>';
+    fake.snapshot.history.push({
+        id: 'html-skin-fallback',
+        profileId: 'one',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: '2026-10-27T00:00:00Z',
+        durationMs: 20,
+        status: 'html',
+        answer: source,
+        error: null,
+        prompt: '问题',
+        keyword: '答案',
+        ruleVersion: 'literal-contains-v1',
+        conditionFingerprint: 'fixture-v1',
+        answerType: 'html',
+    });
+    fake.call.mockImplementation(async (command: string) =>
+        command === 'prepare_html_preview'
+            ? 'http://html-preview.localhost/fallback-fixture'
+            : structuredClone(fake.snapshot),
+    );
+    const Stage = defineComponent({
+        name: 'PetStage',
+        emits: ['active', 'visible'],
+        setup(_props, { slots, emit }) {
+            onMounted(() => {
+                emit('active', true);
+                emit('visible', true);
+            });
+            return () => h('div', { class: 'pet-stage' }, slots.default?.({ togglePanel: vi.fn() }));
+        },
+    });
+    const wrapper = mount(Widget, { global: { stubs: { PetStage: Stage } } });
+    await flushPromises();
+    await wrapper.get('[aria-label="展开测试详情"]').trigger('click');
+    await flushPromises();
+    const sourceToggle = wrapper.get('.answer-label-tools button');
+    expect(sourceToggle.text()).toBe('原始回答');
+    await sourceToggle.trigger('click');
+    await flushPromises();
+    expect(wrapper.get('.pet-raw-answer').text()).toBe(source);
+    expect(wrapper.find('iframe').exists()).toBe(false);
+    // 换肤或资源故障会让宿主退回经典布局；返回入口必须独立于桌宠是否激活。
+    wrapper.findComponent(Stage).vm.$emit('active', false);
+    await flushPromises();
+    expect(wrapper.get('.answer-label-tools button').text()).toBe('返回预览');
+    await wrapper.get('.answer-label-tools button').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.pet-raw-answer').exists()).toBe(false);
+    expect(wrapper.get('iframe').attributes('src')).toBe('http://html-preview.localhost/fallback-fixture');
+    expect(wrapper.get('.answer-label-tools button').text()).toBe('原始回答');
+    expect(fake.call.mock.calls.some(([command]) => ['start_test', 'cancel_test'].includes(command))).toBe(
+        false,
+    );
     wrapper.unmount();
 });
 

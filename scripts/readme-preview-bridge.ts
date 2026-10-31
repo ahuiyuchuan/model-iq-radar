@@ -185,6 +185,16 @@ export async function protectWindowClose(_handler: () => Promise<void>): Promise
 }
 export async function resizeWidget(_expanded: boolean, _menuHeight = 0, _tucked = false): Promise<void> {}
 export async function dragWindow(): Promise<void> {}
+export async function dragPetWindow(): Promise<void> {}
+/** 文档预览不调整原生 Region；仍允许场景注册与卸载，兼容桌宠组件导入。 */
+export function registerSceneLayout(
+    _handler: (expanded: boolean, menuHeight: number) => Promise<void>,
+): () => void {
+    return () => {};
+}
+export async function subscribeDragEnd(_handler: () => void): Promise<() => void> {
+    return () => {};
+}
 export async function openSettings(): Promise<void> {}
 export async function windowAction(_action: 'close' | 'minimize' | 'maximize'): Promise<void> {}
 export async function closeSettingsWindow(): Promise<void> {}

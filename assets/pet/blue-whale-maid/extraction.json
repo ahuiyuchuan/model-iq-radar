@@ -1,0 +1,316 @@
+{
+    "author": "ahui",
+    "workingSize": [
+        2048,
+        1152
+    ],
+    "canvasSize": 320,
+    "targetHeadWidth": 140,
+    "footBaseline": 304,
+    "poses": {
+        "idle": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                75,
+                85,
+                450,
+                520
+            ],
+            "headSpan": 207,
+            "scale": 0.6763285024154589,
+            "origin": [
+                98,
+                94
+            ],
+            "placedAt": [
+                43,
+                26
+            ],
+            "visibleBounds": [
+                43,
+                26,
+                277,
+                304
+            ]
+        },
+        "wave": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                580,
+                85,
+                950,
+                520
+            ],
+            "headSpan": 205,
+            "scale": 0.6829268292682927,
+            "origin": [
+                597,
+                98
+            ],
+            "placedAt": [
+                45,
+                25
+            ],
+            "visibleBounds": [
+                45,
+                25,
+                274,
+                304
+            ]
+        },
+        "stretch": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                1070,
+                85,
+                1465,
+                520
+            ],
+            "headSpan": 203,
+            "scale": 0.6896551724137931,
+            "origin": [
+                1091,
+                96
+            ],
+            "placedAt": [
+                40,
+                21
+            ],
+            "visibleBounds": [
+                40,
+                21,
+                280,
+                304
+            ]
+        },
+        "petting": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                1570,
+                85,
+                1950,
+                520
+            ],
+            "headSpan": 209,
+            "scale": 0.6698564593301436,
+            "origin": [
+                1583,
+                104
+            ],
+            "placedAt": [
+                42,
+                35
+            ],
+            "visibleBounds": [
+                42,
+                35,
+                278,
+                304
+            ]
+        },
+        "dragging": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                75,
+                545,
+                445,
+                1000
+            ],
+            "headSpan": 203,
+            "scale": 0.6896551724137931,
+            "origin": [
+                103,
+                558
+            ],
+            "placedAt": [
+                47,
+                16
+            ],
+            "visibleBounds": [
+                47,
+                16,
+                272,
+                304
+            ]
+        },
+        "landing": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                580,
+                620,
+                950,
+                1060
+            ],
+            "headSpan": 196,
+            "scale": 0.7142857142857143,
+            "origin": [
+                596,
+                640
+            ],
+            "placedAt": [
+                40,
+                19
+            ],
+            "visibleBounds": [
+                40,
+                19,
+                280,
+                304
+            ]
+        },
+        "seated": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                1080,
+                630,
+                1460,
+                1065
+            ],
+            "headSpan": 203,
+            "scale": 0.6896551724137931,
+            "origin": [
+                1122,
+                656
+            ],
+            "placedAt": [
+                49,
+                30
+            ],
+            "visibleBounds": [
+                49,
+                30,
+                270,
+                304
+            ]
+        },
+        "bow": {
+            "source": "source-actions.png",
+            "sourceBox": [
+                1570,
+                615,
+                1950,
+                1060
+            ],
+            "headSpan": 199,
+            "scale": 0.7035175879396985,
+            "origin": [
+                1595,
+                625
+            ],
+            "placedAt": [
+                48,
+                12
+            ],
+            "visibleBounds": [
+                48,
+                12,
+                272,
+                304
+            ]
+        },
+        "working": {
+            "source": "source-states.png",
+            "sourceBox": [
+                80,
+                20,
+                650,
+                600
+            ],
+            "headSpan": 261,
+            "scale": 0.5363984674329502,
+            "origin": [
+                123,
+                41
+            ],
+            "placedAt": [
+                26,
+                7
+            ],
+            "visibleBounds": [
+                26,
+                7,
+                294,
+                304
+            ]
+        },
+        "success": {
+            "source": "source-states.png",
+            "sourceBox": [
+                1050,
+                25,
+                1625,
+                600
+            ],
+            "headSpan": 273,
+            "scale": 0.5128205128205128,
+            "origin": [
+                1076,
+                58
+            ],
+            "placedAt": [
+                26,
+                30
+            ],
+            "visibleBounds": [
+                26,
+                30,
+                293,
+                304
+            ]
+        },
+        "failed": {
+            "source": "source-states.png",
+            "sourceBox": [
+                90,
+                600,
+                650,
+                1130
+            ],
+            "headSpan": 253,
+            "scale": 0.5533596837944664,
+            "origin": [
+                136,
+                608
+            ],
+            "placedAt": [
+                23,
+                25
+            ],
+            "visibleBounds": [
+                23,
+                25,
+                297,
+                304
+            ]
+        },
+        "error": {
+            "source": "source-states.png",
+            "sourceBox": [
+                1050,
+                605,
+                1625,
+                1140
+            ],
+            "headSpan": 272,
+            "scale": 0.5147058823529411,
+            "origin": [
+                1068,
+                615
+            ],
+            "placedAt": [
+                36,
+                46
+            ],
+            "visibleBounds": [
+                36,
+                46,
+                283,
+                304
+            ]
+        }
+    },
+    "sources": {
+        "source-actions.png": "6509b6a41e3b99ad3a0c32ed9c615cb9622308d1c1da3a25b91a03f2688132fc",
+        "source-states.png": "f1c641bcecbac78c910444c43dd7332fe82fabcc176dcf10016291edf32fd902"
+    }
+}

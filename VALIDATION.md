@@ -1,6 +1,266 @@
-# 测智雷达 v1.0.6 本地复核记录
+# 测智雷达 v1.1.0 验证记录
 
-作者：ahui。日期：2026-10-28。环境：Windows x64，Vue 3 / TypeScript / Tauri 2 / Rust / SQLite。
+## v1.1.0 发布前检查（2026-10-31）
+
+- 范围：按用户批准的文案发布桌宠与皮肤管理。README重组为正式功能介绍、启用方式、交互表和下载入口，移除“尚未发布”及开发排错叙述；CHANGELOG以相对v1.0.6的新增能力编写，不把开发期间的问题列为发布修复。新增 `docs/release-notes/v1.1.0-zh.md`，同步使用手册、贡献指南及当前版本说明。
+- 版本：`npm version 1.1.0 --no-git-tag-version --ignore-scripts`更新npm清单／锁文件；Cargo和Tauri清单同步，Cargo锁文件由离线metadata重新生成，仅根包版本变化。`node scripts/generate_notices.mjs`离线重建第三方声明，37个前端包与315个crate，第三方许可证正文不变。没有新增依赖、配置或数据库迁移。`.gitignore`补充Python字节码缓存，原缓存和所有旧交付物保留在本机，不纳入提交。
+- 自动检查：v1.1.0下重新执行 `npm test -- --reporter=dot`，335项／12文件通过；隔离 `run-build.ps1 -Action test`，111＋18＋22共151项通过。`npm run format:check`及专项文档／脚本Prettier、`cargo fmt --check`、`run-build.ps1 -Action clippy`全目标-D warnings通过。沿用项目Vue／TypeScript／Rust规范，Java/JVM/MyBatis专属要求不适用。
+- 完整浏览器重跑：`node scripts/verify_pet_ui.mjs`，`C:/tmp/model-iq-radar-v110-release-20261031-r1/`，89主截图＋12顶部裁切，三尺寸三边、四种业务结果、十二姿态、48次快速状态、菜单／选择器、云朵、默认动作预览保存、换肤及HTML回归通过；0页面错误／远程请求／矩形拒绝。67.28秒录像 `video/page@5db067ccc03aed69170bc7be622a5c32.webm`，另导出20时刻总览与采样JSON。README桌宠截图直接取本轮 `pet-details-192.png`，展示确认云朵后的真实侧坐详情；其他经典预览保留其v1.0.4来源标识，不冒充本轮模型测试。
+- README检查：本机离线Markdown渲染，本地图片无缺失、1200px视口无横向溢出，已查看顶部与桌宠预览，证据 `readme-preview.png`／`readme-top.png`在上述目录；网络徽章仅用本地占位验证排版，不声称已联网验证徽章。首次临时预览脚本因Windows路径斜杠比较错误拒绝静态资源，修正该验收辅助脚本后通过，README资源本身没有缺失。README相对文件链接核对通过。
+- 生产构建：复用既有隔离MSVC／Windows SDK，`run-build.ps1 -Action build`完成TypeScript／Vite与Windows x64 release，Rust编译3分56秒；仅既有chunk体积与链接器导入库提示。最终dist执行 `node scripts/verify_pet_csp.mjs`，12动作解码、待机出画、坏资源阻止保存及经典回退通过，0页面错误。未启动正式应用、访问正式凭据、调用真实模型或发送邮件。
+- 发布输入：只交付 `Model-IQ-Radar-v1.1.0-Windows-x64.exe`，由 `package_exe.ps1`校验版本、PE x64、生产输入新鲜度与复制摘要。代码、Tag、Release和EXE版本统一为v1.1.0；EXE为19,236,864字节，SHA-256 `b3769a7ca386116148e157b01c8e043bbe6886b3a20bc1b9e0b0fedad3596ef4`，文件／产品版本均为1.1.0，与release构建源摘要一致。GitHub自动生成的Source code归档不属于手工上传附件。
+- 安全与范围：提交候选源码／文档严格UTF-8无BOM／LF及替换字符检查通过；191份仓库候选文件凭据模式扫描0匹配，无超过50MiB文件，源图／脚本与提取记录一并保留以便追溯。Git diff检查通过；不提交生产凭据、数据库、EXE、依赖缓存或临时验收录像。
+- 未覆盖：原生窗口穿透／移动、物理多屏DPI、真实重启位置、偶发顶部合成残块和长期CPU／内存仍未实机验收；现有额外姿态为静态原画与短溶解，未制作连续全身动画。下文顶部锚点及菜单等专项的最终代码与本轮业务源码一致，历史专项结果保留，不把旧脚本记录表述为此次逐一重跑。
+
+## 顶部锚点恢复与本轮全面复查（2026-10-31）
+
+- 范围：处理右侧角色拖至顶部收起、悬停展开后位置错误，并按用户要求再次全面检查。保留全部既有未提交工作；不更换二维资源、渲染方案或数据库。最后一次生产修改仅在 `src-tauri/src/pet_window.rs`，对应组件回归为 `tests/pet-stage.test.ts`，新增 `scripts/verify_pet_top_restore.mjs`。这一轮累计改动大纲、文件职责和兼容性见 [DESKTOP_PET_CHANGE_SUMMARY](docs/DESKTOP_PET_CHANGE_SUMMARY.md)。Java/JVM专属规范不适用于当前Vue/TypeScript/Rust栈，遵循项目注释和格式约定。
+- 证据与根因：原位置算法在进入探头时直接保留窗口原点；人物处于卡片右侧时，该原点比角色锚点偏左数百逻辑像素。恢复又读取旧normal原点，未以实际可见探头位置恢复。提取同一位置数学逻辑后新增Rust回归，修改前过滤运行 `right_actor_top_peek --lib` 实际失败在进入后的横向锚点断言，非仅凭截图猜测。
+- 修复：纯函数 `transition_position` 在顶部进入时按前后角色逻辑锚点差×DPI换算物理横坐标；从顶部恢复时使用当前探头横坐标及前后锚点差。纵向、左右贴边、拖动独占与最终 `scene_position` 工作区夹紧沿用原规则。角落云朵夹紧后不返回过期卡片原点；完整卡片空间不足仍作必要向内夹紧，不承诺所有角落完全不移动。无配置、依赖、皮肤契约或数据库迁移；回滚可切回经典后使用保留旧EXE，未覆盖旧交付物。
+- 自动测试：`npm test -- --reporter=dot`，12文件335项通过；左右方位回归补充两次完整顶部收纳／悬停恢复，核对提交锚点、主体范围、吸附范围及侧坐姿态。隔离 `run-build.ps1 -Action test`，111库＋18数据完整性＋22回归，共151项通过；新增真实生产几何测试覆盖100/125/150/200%数学缩放、负原点工作区及角落探头恢复，不冒充物理跨屏。`npx vue-tsc --noEmit`、`run-build.ps1 -Action clippy`全目标-D warnings、`cargo fmt --check`、项目与专项Prettier、`git diff --check`通过。
+- 顶部专项：`node scripts/verify_pet_top_restore.mjs`，证据 `C:/tmp/model-iq-radar-top-anchor-20261031-r1/`。真实组件与鼠标拖动启动，使用原生等价原点／工作区夹紧的浏览器替身；左右人物×96/144/192尺寸×顶部中间／右角共12组，36次收纳恢复通过，右侧恢复锚点一致，三次横坐标无累计漂移，角色原侧不变。192用展开详情，其余用紧凑卡片；全程保留running云朵。24张前后截图、`result.json`含每次转换前后锚点，0页面错误／远程请求／矩形拒绝；此脚本不移动真实OS窗口。
+- 完整浏览器：`node scripts/verify_pet_ui.mjs`，`C:/tmp/model-iq-radar-top-anchor-full-20261031-r1/`，89主截图＋12顶部裁切通过。覆盖四状态、取消／HTML／条件过期、三尺寸三边、十二动作点播、48次快速业务切换、慢速斜向与键盘菜单、选择器真实点击、测试／取消／倒计时、默认动作预览保存、HTML预览恢复、换肤异常回退。0页面错误／远程请求，矩形拒绝列表为空。截图和录像抽帧已查看；快速切换仍使用现有96ms短溶解，不把其混合帧解释为新制作连续动作。
+- 菜单专项：`node scripts/verify_pet_picker.mjs`，`C:/tmp/model-iq-radar-top-anchor-picker-20261031-r1/`。24次选择器、4种气泡确认动作、5种菜单布局、三侧主动动作与回答中打开详情、二级自动关闭、4次经典换肤往返通过；记录0拒绝／0错误，保持下拉菜单无阴影。
+- 贴边专项：`node scripts/verify_pet_dock.mjs`，`C:/tmp/model-iq-radar-top-anchor-dock-20261031-r1/`。静止指针下收纳稳定，三侧×动画开关共18轮，6次直接点击、6次探头云朵拖动与完整／展开云朵短按、小抖动、长按拖动均通过；0错误。
+- 动态证据：顶部专项47.56秒 `video/page@806a7f633eea618ecfcbb24e6075f237.webm`；完整UI61.16秒 `video/page@420689ef5ae55aefff4eacc80bc47c63.webm`；菜单68.28秒 `video/page@cd6c3c71ea8fadde0683f0b1c3a024eb.webm`；贴边29.36秒 `video/page@755b92248a42e9fdb24c6c3e902d8abe.webm`。各目录均输出20个采样时刻的 `video-frames.json` 与 `video-contact-sheet.jpg`；已查看顶部／完整／菜单抽帧总览及右侧192右角恢复原截图，保留视频供连续回放。录屏及有限抽帧不能证明所有中间帧、物理窗口与长期性能均无问题。
+- 构建与交付：复用既有隔离MSVC／Windows SDK，`run-build.ps1 -Action build`完成TypeScript／Vite及Windows x64 release，Rust编译2分36秒；仅既有chunk体积和链接器导入库提示。最终dist执行 `node scripts/verify_pet_csp.mjs`，12动作解码、待机出画、坏资源阻止保存与经典回退通过，0页面错误。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-top-anchor-test-20261031`校验版本、PE x64、源输入新鲜度和复制摘要通过。新包 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-top-anchor-test-20261031/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,236,864字节，SHA-256 `226cf773c711f77f094110837fdbab1bb4d46a6289f6516bc75d0c8a0d42b27e`，与release源一致；构建后只整理QA与文档，未改生产源码、未启动正式程序、未提交／发布。
+- 文档与安全：README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG、本记录与新增改动大纲同步。检查本轮UTF-8无BOM／LF和替换字符，源码／脚本／文档／素材提示词凭据模式扫描0匹配。保留原有修改、历史证据和无关文件，未删除用户数据。
+- 未覆盖／已知限制：依用户要求仅浏览器验收，未启动原生界面。Win32实际移动／穿透、多屏物理DPI、真实重启位置、偶发顶部合成残块及长期CPU／内存仍未实机覆盖；浏览器替身和Rust数学回归不能取代这些检查。未调用正式模型或邮件。现有额外姿态仍主要是静态图＋短溶解，未制作连续全身动画或Live2D绑定，不能承诺与连续透明动画素材相同的运动质量。
+
+## 全动作默认外观与下拉菜单去阴影（2026-10-31）
+
+- 用户明确要求放开默认待机选择，覆盖此前仅五种日常姿态的限制；同时去除截图中模型／规则下拉菜单的外侧阴影。保留现有未提交工作，不调整角色资源、渲染方案、业务请求或动画交接。Java专属规范不适用于当前Vue／TypeScript／Rust，沿用现有注释与格式约定。
+- 根因与修改：`SkinManager.vue` 使用五种日常姿态白名单，`src/pet/types.ts`／`controller.ts` 和Rust `conditions.rs` 同样限制保存值，单改前端会造成保存失败。本轮前后端统一接受契约内全部十二动作，设置仅列当前皮肤实际有资源的动作；缺字段／缺资源仍回退idle。常态可为摸头、悬空、测试／结果姿态，但仅绘图，不派发输入、修改业务结论或发出请求；实际拖动、测试反馈、卡片侧坐仍优先。配置字段与包版本不变，回滚到仅支持五种姿态的测试版前先保存普通待机；更早不认识字段的版本仍按原规则忽略它。
+- 阴影：`src/style.css` 共用 `.model-menu` 的外阴影和内高光改为none，覆盖接口／模型／规则／强度与设置共用下拉；保留背景、边框、选中态、滚动和焦点，不修改其他控件阴影。
+- 测试：`pet.test.ts` 检查十二动作准入与业务优先级；`pet-stage.test.ts` 新增十二种默认姿态的真实组件挂载，验证尚未测试结论不变且不调用真实拖动／开始测试；`data_integrity.rs` 对新增结果姿态执行备份与隔离SQLite关闭重开，并验证十二白名单及非法值拒绝。`verify_pet_ui.mjs` 逐一预览十二种默认动作，`verify_pet_picker.mjs` 在24组真实下拉打开路径检查computed boxShadow为none。
+- 自动检查：`npm test`12文件335项、`npx vue-tsc --noEmit`、项目与专项Prettier、`cargo fmt --check`、`git diff --check`通过；16份本轮文件UTF-8无BOM／LF及凭据模式检查无异常。复用隔离MSVC／SDK的 `run-build.ps1 -Action test`，Rust110＋18＋22共150项通过；`-Action clippy`全目标-D warnings通过。README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG同步全部动作、业务隔离、去阴影和旧测试版回滚条件。
+- 完整浏览器：`verify_pet_ui.mjs`输出 `C:/tmp/model-iq-radar-all-idle-full-20261031-r2/`，89主截图＋12顶部裁切、十二种默认动作逐一预览、保存／返回回显、三尺寸与三边／业务状态等流程通过，0页面错误／远程请求、矩形拒绝记录为空。完整录像为同目录 `video/page@1e9097fd30d08ae014a9b02bcffaa84c.webm`。r1在顶部恢复后抽样期间鼠标仍留原探头坐标，实际落在透明空白并合理再次收纳，脚本随后等待卡片超时；保留失败证据，r2在恢复后立即把真实指针移入卡片，重跑通过，无产品状态逻辑修改。
+- 专项浏览器：`verify_pet_picker.mjs`，`C:/tmp/model-iq-radar-no-shadow-picker-20261031-r1/`，24组下拉实际打开后的computed boxShadow均为none；5种菜单空间、三边手动动作及菜单详情、确认与换肤恢复通过，无页面错误、远程请求或矩形拒绝。已实际查看picker-3.png，菜单边缘没有外阴影。录像为同目录 `video/page@619f27e471aae3933fb51f5cb2810ec0.webm`。
+- 新选择保存补查：临时 `verify-all-idle-saved.mjs`确认选项12个、测试失败姿态预览、保存快照idleAction=error、离开分类再返回保持该选择，0页面错误；截图 `C:/tmp/model-iq-radar-all-idle-full-20261031-r2/settings-all-idle-saved.png`已查看。后端隔离SQLite重开也验证该新增值。最终dist的 `verify_pet_csp.mjs`十二动作解码、待机、损坏资源阻止保存与经典回退通过，0页面错误。
+- 构建与交付：`run-build.ps1 -Action build`，TypeScript／Vite与Windows x64 release通过，Rust编译2分54秒，仅既有chunk体积和链接器导入库提示。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-all-actions-no-shadow-test-20261031`校验版本、PE架构、输入新鲜度和复制摘要通过；未覆盖旧交付物。EXE为 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-all-actions-no-shadow-test-20261031/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,237,888字节，SHA-256 `354b7104352cbbf7a1679c1086a1b7de0717dbafb4fee9d1039571f6ab554481`，与release源一致。构建后未修改生产源码；未启动正式EXE、提交或发布。
+- 边界：按用户要求只做隔离浏览器界面验收，不读取正式凭据，不请求真实模型或发送邮件；原生合成、点击穿透、物理拖拽、跨屏DPI及长期驻留性能不在本轮结论内。
+
+## 菜单避让、详情等高、默认待机与回答进度修复（2026-10-31）
+
+- 范围：合并菜单遮挡角色、HTML与文字详情统一缩短50px、皮肤默认待机动作，以及回答中展开面板后贴边进度气泡消失四项需求。保持现有二维PNG／Canvas方案，保护所有既有未提交工作，无素材或渲染引擎变更。按用户要求仅浏览器验收，不访问正式凭据或真实模型／邮件。Java专属规范不适用于本项目Vue／TypeScript／Rust。
+- 菜单根因：仅按工作区夹紧整棵菜单，靠底边时上移穿过人物与云朵。`contextMenuLayout` 生成上下／左右候选，整体评估工作区溢出、完整角色画布与云朵重叠、移动距离和二级方向，继续复用会话预留几何；96／144／192和左右角色、角落回归通过。极小工作区不能保证容纳整棵菜单，按最少越界／重叠回退；没有引入窗口平移之外的新机制。
+- 高度：`src/style.css` 桌宠文字、HTML预览、原始回答统一546px，以此前文字596px为基准缩短50px；`PetStage.vue` 同步默认测量值，测试同步实际尺寸。经典仍572px，紧凑仍176px，回答区吸收差值，选择器、时间信息、底部按钮、放大预览保留。已查看实际文字和HTML截图，按钮与说明未裁切。
+- 默认待机：`SkinManager.vue` 仅列当前皮肤实际提供的idle／seated／wave／stretch／bow日常动作，选择立即预览、保存后应用；`src/pet/types.ts` 新增可选idleAction，`controller.ts` 和PetStage在更高优先级动作缺省时采用。Rust `SkinPreferences.idle_action` 缺省idle，`conditions.rs` 对所有保存与导入入口校验白名单；旧配置兼容、缺资源运行时回退、不更改条件指纹。`data_integrity.rs` 验证备份、重置与隔离SQLite关闭重开后的持久化；`pet_window.rs` 验证旧字段缺省。旧版本可忽略此字段，旧程序再保存可能丢失该选择，无数据库／皮肤包／备份版本升级。
+- 回答进度根因与证据：点击云朵展开面板记录dismissedCloud，自动收纳复用同一确认身份，导致卡片和进度提示同时不可见。修复前左／右／顶部三项新增回归均在“探头云朵应显示”断言失败。现在任务进行中且docked时强制显示云朵，包含命中与吸附范围；恢复面板保留原确认状态，新结果重新显示。不重启／取消任务、不额外请求。测试明确检查v-show样式；真实可见性由隔离浏览器三边完整交互验证，不能只凭DOM文字判断通过。
+- 自动检查：`npm test`12文件323项通过；`npx vue-tsc --noEmit`、Prettier、`cargo fmt --check`、`git diff --check`通过。复用隔离 `run-build.ps1 -Action test`，Rust110＋18＋22共150项通过；`-Action clippy` 全目标-D warnings通过。最初测试误用未安装的tempfile，改为已有uuid与标准库临时路径后重跑通过，未新增依赖；TS测试夹具的字面量类型已修正并实际重跑静态检查。
+- 专项浏览器：`verify_pet_picker.mjs`，`C:/tmp/model-iq-radar-menu-avoid-20261031-r2/`，24次选择器、5种菜单空间、4种气泡确认、3侧手动动作及菜单详情、4次经典换肤通过，rejectedScenes为0、无页面错误或远程请求。已查看menu-bottom-right／menu-bottom-left实际图片，菜单避开角色和云朵。r1脚本固定鼠标坐标落入上移后的菜单，错误地等待自动关闭；r2使用人物中心作为菜单外目标，保留旧记录。
+- 完整浏览器r2：`C:/tmp/model-iq-radar-menu-idle-full-20261031-r2/`，89主截图＋12顶部裁切，三尺寸／三边／十二动作、48次快速状态、菜单慢速斜向及键盘、HTML放大恢复／源文等高、设置默认待机预览保存通过，0页面错误／远程请求，原生等价矩形拒绝记录为空。已查看文字与HTML详情和右／顶部已确认回答中的收纳截图。最终r3增加关闭临时互动提示时进度可见、设置页离开重进后的默认姿态回显和选项截图，89主截图＋12顶部裁切全部通过，结果见 `C:/tmp/model-iq-radar-menu-idle-full-20261031-r3/result.json`。录像为同目录 `video/page@3f9c15890bafc5329c57217ca09abdd2.webm`；r3完整76.56秒、r2完整66.6秒与专项69.72秒录像均已抽20帧生成并实际查看总览；帧图位于各自video-frames目录。
+- 文档同步：README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG说明默认待机配置、兼容性、云朵确认例外、546px统一高度和菜单避让；旧验证章节保留历史事实。
+- 设置视觉补查：选择器统一深色输入外观，300×36px；临时专项 `verify-default-idle-styled.mjs` 选择鞠躬、预览、保存、离开设置分类再返回均通过，0页面错误，截图 `C:/tmp/model-iq-radar-menu-idle-full-20261031-r3/settings-default-idle-styled.png`。最终dist的 `verify_pet_csp.mjs` 12动作解码、动画、坏资源阻止保存与经典回退通过，0页面错误。
+- 构建与最终包：复用 `run-build.ps1 -Action build`，最终TypeScript／Vite及Windows x64 release通过，Rust编译2分22秒，仅既有chunk体积和链接器导入库提示。第一次构建后补查设置选择器外观，重新完整构建后才交付。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-menu-idle-test-20261031` 校验版本、PE x64、输入新鲜度及复制摘要通过，不覆盖旧交付物。新EXE为 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-menu-idle-test-20261031/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,237,888字节，SHA-256 `dcb212ee49bba2cc189cc8a9ee8dc879a8a94841403ffd37baab15f7ac1e36c4`，与release源一致。未启动正式EXE、未提交或发布。
+- 收尾：21份本轮源码、测试、QA、文档均严格UTF-8无BOM／LF，未发现替换字符或凭据模式；Prettier与git diff --check通过。保留工作区既有改动和文件；除上述范围不作清理。注释、配置契约及验证记录已同步。
+- 未覆盖：按用户要求未验收原生界面合成残块、物理点击穿透／拖动、真实跨屏DPI；未使用正式模型／SMTP，未做长期CPU／内存驻留观察。静态姿态交接仍沿用现有短溶解，不代表制作了连续肢体动画。回滚可保存经典外观并使用保留的旧EXE。
+
+## 二级自动收起、手动动作与详情越界回退修复（2026-10-31）
+
+- 范围：处理用户连续反馈的二级菜单不自动关闭、贴边手动动作被探头抢占、测试中出现“桌宠角色或吸附轮廓超出场景”并退回经典的问题。保持二维素材和既有技术方案，保护全部未提交工作；只在隔离浏览器与本地替身验收，不读正式凭据、调用模型或发送邮件。Java专属规范不适用，按项目Vue／TypeScript规范实现。
+- 二级菜单根因：此前为解决移入途中误关，取消了离开后的关闭逻辑，变为只能点击／键盘退出。本轮采用唯一600ms计时器：移到其他一级项或离开整棵菜单后只收二级，进入动作入口／子菜单取消计时，子菜单持有键盘焦点时不关闭；父菜单关闭、换肤与卸载清理。保留上轮两层预留几何，二级自动关闭不缩放窗口。
+- 手动动作根因：原180ms收纳计时不区分主动动作，菜单点播后菜单消失即可将2600ms姿态改为探头。`PetStage.vue` 新增进程内手动呈现所有权，点播／摸头期间暂停收纳，动作结束重新判断；拖动、隐藏、面板切换、换肤清空姿态时释放，不延长模型任务。测试结算不抢占用户动作，真实结果仍更新，结束后再读取当前结论。
+- 越界已复现：保留菜单退场几何的两帧内，从角色菜单打开596px详情，提交场景373×480，却包含右缘415／底缘709的卡片；Rust据真实边界拒绝并触发经典回退。修改前新增用例实际失败并记录该场景。`fitSceneLayout` 在保留菜单坐标期间纳入当前卡片高度／浮层，必要时统一平移负坐标并扩展场景，人物与卡片相对位置不变；没有放松Rust校验或吞掉错误。四组左右方位／176和596高度回归均通过。
+- 修改文件：`PetStage.vue`、`src/pet/layout.ts`、`tests/pet-stage.test.ts`；`pet-preview-bridge.ts` 新增与Rust一致的矩形边界拒绝检查和拒绝场景记录，`verify_pet_picker.mjs`／`verify_pet_ui.mjs` 增加真实交互与跨页面检查。只修改上述生产前端和对应验证／文档，不改Rust、依赖、皮肤契约或数据库格式。README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG同步实际行为。回滚可选择经典后换保留的旧EXE，不覆盖旧交付物。
+- 自动检查：`npm test -- --reporter=dot`，12文件315项通过；菜单关闭和三侧动作在修复前新增四项实际失败，修复后通过。`npx vue-tsc --noEmit`、项目及专项文档／脚本Prettier、`git diff --check`通过。Rust无本轮修改，未重复执行其150项测试／Clippy；上节结果为历史检查，不冒充本轮重跑。
+- 专项浏览器：`node scripts/verify_pet_picker.mjs`，输出 `C:/tmp/model-iq-radar-menu-hold-20261031-r2/`。24次选择器、四种气泡确认、三种菜单选边场景全部通过；真实鼠标停留其他一级／离开菜单自动收二级、键盘子菜单保护通过，1510个可见菜单矩形采样无越出视口。左／右／顶部手动招手在700ms仍显示完整动作、结算后500ms仍保持招手，播完后正常收纳。另三次“测试中收起详情→菜单打开详情”无经典回退，拒绝场景记录为空，三侧气泡与四次经典换肤回归通过，0页面错误／远程请求。
+- 专项证据：上述目录的 `result.json`、`menu-frames.json`、`manual-edge-left.png`／`manual-edge-right.png`／`manual-edge-top.png`；61.2秒录像 `video/page@cce01d89c8f947200288ab72d77e0342.webm`，已抽20帧检查总览 `video-frames/contact-sheet.jpg`，并查看左右／顶部动作实际截图。r1脚本直接右击正在被悬停恢复移除的探头，未可靠打开菜单而超时；r2按真实流程先移动恢复角色，再右击完整角色，保留失败记录，不将旧脚本失败冒充产品已通过。
+- 全面浏览器：`node scripts/verify_pet_ui.mjs`，`C:/tmp/model-iq-radar-menu-hold-full-20261031-r2/`，86主截图＋12顶部裁切，三尺寸、三边、十二动作、48次快速状态、菜单慢速斜向与键盘、测试／取消／倒计时／条件过期、HTML与换肤恢复通过，0页面错误／远程请求。悬浮页与设置页分别检查拒绝矩形列表为空；61.6秒录像 `video/page@cd43c267b191349df9395b5a7e98d794.webm`，已抽20帧查看 `video-frames/contact-sheet.jpg`。full-r1在所有交互完成后错误地于context关闭后读取桥接记录，脚本报页面关闭；r2把读取移到页面切换及关闭之前，重跑完整流程通过，保留旧失败现场。
+- 生产与构建：最终dist执行 `node scripts/verify_pet_csp.mjs`，12动作解码、待机、损坏资源阻止保存和经典回退通过，0页面错误。复用隔离 `run-build.ps1 -Action build`，TypeScript／Vite与Windows x64 release通过，Rust编译2分32秒，仅既有chunk体积及链接器导入库提示。`package_exe.ps1` 校验版本、PE x64、输入新鲜度和复制摘要通过；新包 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-menu-hold-test-20261031/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,229,184字节，SHA-256 `a352d8cadf1900227dc7e6e345b9b43b574e3c255437021fab8c30d387a87d76`，与release源摘要一致。构建后只整理QA／文档，未改生产源码；未启动正式EXE、提交或发布。
+- 收尾：检查工作区与diff，保留所有既有改动和无关文件。12份本轮源码、测试、QA及文档严格UTF-8无BOM／LF、替换字符及凭据模式检查均无异常；最终文档Prettier和 `git diff --check`通过。
+- 未覆盖：按用户要求不做原生界面验收；原生合成残块、窗口实际穿透／移动、物理跨屏DPI与位置重启恢复仍不在浏览器结论内。业务使用替身，未检查真实模型／邮件或长期CPU／进程内存。现有短溶解不是新增连续动作制作；模拟120ms异步宿主调整的录像包含主动快速切换过程，稳定内容与矩形校验不能替代原生每帧合成验收。
+
+## 气泡确认复位、角色蓝框与菜单交接修复（2026-10-31）
+
+- 范围：继续当前二维 PNG／Canvas 方案，不生成素材或改角色设计。保留所有既有未提交工作；隔离浏览器只使用本地内存替身，不读取正式凭据、调用真实模型或发送邮件。Java/JVM/MyBatis 专属规范不适用于本栈，按项目 Vue／TypeScript／Rust 注释与格式规范执行。
+- 气泡根因与复现：此前只比较气泡确认身份来隐藏文案，`chooseAction` 仍接收同一结果姿态与 busy 工作姿态。新增四状态回归在修改前分别得到 success／failed／error／working，而期望 idle，实际四项失败后才修复。`PetStage.vue` 的结果姿态和短暂庆祝反馈现在与该确认身份共用呈现生命周期；点击后面板侧坐、收起待机，轮询、摸头／拖动收尾不复活旧表情。新记录／任务恢复真实表情，确认 running 不取消实际任务，也不修改卡片结论。
+- 蓝框根因：全局 `button:focus-visible` 在透明角色画布上绘制矩形轮廓，超出宿主后被截成蓝色折线。角色按钮局部取消 outline，以透明角色轮廓柔光保留键盘焦点提示；菜单按钮和其他控件的键盘焦点样式保留。
+- 菜单根因：原场景将一级和二级菜单一并按人物方向反射，固定右侧角色就向左；actionMenu 显隐直接参与场景宽高，DOM 先变、异步窗口后变，产生加载／销毁裁切帧。新增 `contextMenuLayout` 按工作区剩余空间优先右侧、右侧不足向左，底边向上避让；一级菜单会话预留两层范围，宿主确认后显示，二级显隐只改变命中掩码；整棵菜单移除并经过绘制后再缩窗。代次校验防止取消／换肤／卸载后的迟到回调重开，菜单已有焦点时不被就绪回调抢回首项。
+- 原生适配：新增只读 `get_pet_menu_bounds`，限 widget 窗口，复用实际工作区、窗口原点和 DPI 换算，返回左／上／右／下逻辑边界，允许负值；不读写业务数据。`lib.rs` 注册命令，QA 桥接仅模拟边界与宿主延迟。无依赖、数据库、配置或皮肤格式迁移，旧皮肤无需重做；回滚选择经典外观后换保留的旧 EXE，前端与原生程序须配套。
+- 自动检查：`npm test -- --reporter=dot`，12文件307项通过，新增四种确认表情／摸头／拖动收尾、新结果恢复、左右角色菜单选边、宿主等待、二级稳定几何与取消迟到回调回归。`npx vue-tsc --noEmit` 通过。隔离 `run-build.ps1 -Action test`：110+18+22共150项通过；`-Action clippy` 全目标 `-D warnings` 通过，rustfmt 检查通过。只使用既有 MSVC／Windows SDK 环境。
+- 专项浏览器：`node scripts/verify_pet_picker.mjs`，`C:/tmp/model-iq-radar-ack-menu-20261031-r2/`。24次三尺寸／左右选择器打开、4种确认动作、3种菜单空间、气泡位置、左右方位和4次经典／桌宠切换通过。模拟120ms宿主扩高，菜单出画／关闭累计采样268个可见菜单矩形，无越出视口裁切帧；二级打开和关闭的视口尺寸不变。截图实际检查了右展开、左展开、底边避让与确认后待机，无透明画布矩形焦点框。0页面错误／远程请求；41.76秒录像 `video/page@b195eeadc3e793d0e6d60683d212d3d0.webm`，抽20帧检查总览 `video-frames/contact-sheet.jpg`，逐帧几何为 `menu-frames.json`。
+- QA修正记录：专项 r1 的换肤检查沿用固定300ms等待，在新增异步布局队列尚未完成时读取328px旧高度而失败；r2改为等待真实宿主高度156／572到位，再检查完整内容与截图。保留 `C:/tmp/model-iq-radar-ack-menu-20261031-r1/failure.json` 与截图，不将其当作原生已复现的换肤错误或掩盖失败记录。旧 r1 气泡专项的304项测试／录像不作为最终代码的检查数字。
+- 完整浏览器：`node scripts/verify_pet_ui.mjs`，`C:/tmp/model-iq-radar-ack-menu-full-20261031-r1/`，86张主截图＋12张顶部裁切，覆盖三尺寸、三侧、十二动作、48次快速状态、二级斜向路径与键盘返回、测试／取消／倒计时／条件过期、HTML与换肤异常恢复，0页面错误／远程请求。62.76秒录像 `video/page@410859c6624f0968ac4cca64a946907b.webm` 已抽20帧查看总览；原有96ms姿态短溶解仍非新制作的连续肢体动画。
+- 贴边与生产：`node scripts/verify_pet_dock.mjs`，`C:/tmp/model-iq-radar-ack-menu-dock-20261031-r1/`，静止指针收纳、三侧18轮、6次探头点击、6次贴边云朵拖动和完整／展开拖动通过；录像 `video/page@60087b264033c868b702112e607f6063.webm`。最终 dist 执行 `node scripts/verify_pet_csp.mjs`，12动作解码、待机、损坏资源阻止保存与经典回退通过，0页面错误。
+- 文档同步：README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG及本记录同步确认复位、选边、菜单窗口生命周期和内部命令；移除当前文档中固定“右侧二级必向左”的旧描述。既有历史验证章节保留原记录。
+- 交付构建：复用 `run-build.ps1 -Action build`，TypeScript／Vite及Windows x64 release通过，最终Rust编译2分31秒；仅既有chunk体积与链接器导入库提示。较早的仅气泡复位构建在菜单整改前完成，未当作最终包。`scripts/package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-ack-menu-test-20261031` 校验版本、PE x64、应用输入新鲜度与复制摘要通过。新EXE：`D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-ack-menu-test-20261031/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,229,184字节，SHA-256 `6ea7c9eec300a506121c065a8c625246741c0086dbb9f6702b73caa7009566b5`；再次计算与release源文件一致。未覆盖旧交付物、未启动正式EXE、未提交或发布；使用前从托盘退出旧实例。
+- 收尾检查：项目源文件／测试／根文档及本轮专项文档、QA桥接和脚本的Prettier通过；`git diff --check`通过。14份本轮源码、测试、脚本和文档通过严格UTF-8无BOM／LF、替换字符与凭据模式检查，无异常。检查工作区后保留用户原有修改和无关文件；构建后只同步文档，未改生产代码。
+- 未覆盖：按用户要求未启动原生界面，浏览器采样不能证明 Win32 合成残块、物理窗口移动／穿透或跨屏 DPI 已根治；未测正式模型、邮件、真实位置重启和长期进程 CPU／内存。原生新增几何命令已编译／静态检查，但未进行物理多屏端到端验收。
+
+## 选择器跳位、气泡确认与换肤裁切修复（2026-10-31）
+
+- 范围：保留当前二维 PNG／Canvas 角色、卡片和边饰；保护既有未提交工作。只使用隔离浏览器与内存替身，不读取正式凭据、调用模型或发送邮件。Java/JVM/MyBatis 专属规范不适用于本项目，通用注释、格式与边界规范按 Vue／TypeScript／Rust 实现。
+- 选择器根因与证据：按实际窗口尺寸模拟 120ms 原生扩高延迟，修改前 `C:/tmp/model-iq-radar-picker-before-20261031-r2/picker-frames.json` 记录卡片顶部 113→1→113。菜单先出画及选中项 `scrollIntoView` 滚动隐藏祖先共同造成跳位。`ModelPicker.vue` 现在先隐藏挂载菜单，等待 `Widget.vue` 测量并通过 `PetStage.syncLayout` 完成宿主布局后才显示；仅滚动菜单自身，代次检查阻止关闭后的迟到展开，布局失败关闭菜单并反馈错误。普通非场景选择器保留原使用方式。
+- 气泡与方位：短按结果气泡确认并隐藏本次结果，同时保留原面板切换；拖动不确认，轮询、动作或面板切换不重新显示已确认结果，新任务／新记录／状态变化重新显示。隐藏后同步移除命中与贴边边界，保留角色布局空间并将键盘焦点交还角色。左右角色方位独立于当前贴边方向，拖离边缘和顶部停靠保持原方位；到另一水平边缘后在松手时更新。顶部气泡图形仍翻转、文字正向，通过相反内边距使文字居中。
+- 换肤根因：`clear_pet_scene` 原先固定按紧凑高度恢复经典窗口，但 Vue 仍显示展开内容。`PetStage.restoreClassicLayout` 传入实际 `contentExpanded`，Rust `pet_window.rs` 新增可选 `expanded` 参数，缺省仍为 false，兼容旧调用。无数据库、皮肤格式或依赖迁移；可选择经典外观并换回保留的旧 EXE 回滚，旧交付物未覆盖。
+- 同步文件：上述组件、Rust 窗口模块、相关组件回归；新增 `scripts/verify_pet_picker.mjs`，更新内存 QA 桥接及全面浏览器脚本；README、USER_GUIDE、DESKTOP_PET_DESIGN、SKIN_PACKS、CHANGELOG 与本记录同步。QA 观察器只用于替身，不进入生产程序。
+- 自动检查：`npm test -- --reporter=dot`，12 文件 300 项通过；`npx vue-tsc --noEmit` 通过。复用隔离 `run-build.ps1 -Action test`，110+18+22 共 150 项通过；`-Action clippy` 全目标 `-D warnings` 通过；隔离工具链 rustfmt 检查通过。最终生产构建再次执行 TypeScript／Vite 与 Windows x64 release，Rust 编译 4分02秒，仅既有 chunk 体积与导入库提示。
+- 选择器及换肤专项：`node scripts/verify_pet_picker.mjs`，输出 `C:/tmp/model-iq-radar-picker-after-20261031-r3/`。96／144／192 × 左右 × 四个选择器共24次打开，延迟扩高时首帧卡片位置稳定；气泡确认／轮询不重现／新结果重现、实际指针拖动后方位保持、三侧气泡文字位置均通过。紧凑／展开经典与桌宠四次往返恢复正确，经典高度分别156／572，0页面错误与远程请求。已查看气泡、选择器及经典展开截图，并抽取28.44秒录像36帧检查总览；录像 `video/page@305cad50de557244b2e95eb4ec639d18.webm`，总览 `video-frames/contact-sheet.jpg`。r2捕获时尚在替身窗口调整过程中，r3改为等待实际视口尺寸稳定后截图，未将该旧截图冒充最终结果。
+- 全面回归：同隔离环境执行 `node scripts/verify_pet_ui.mjs`，输出 `C:/tmp/model-iq-radar-detail-full-20261031-r1/`，86张主截图＋12张顶部裁切、70.56秒录像，0页面错误与远程请求。覆盖三尺寸、三侧、十二动作、48次快速状态、二级菜单、测试／取消／倒计时／条件过期、HTML放大恢复及皮肤保存与异常恢复。气泡确认后改由实际角色键盘入口打开面板，不依赖已隐藏气泡；结果准确性仍检查实际状态。录像 `video/page@733a8d7a1ed67fe56fffc0a923be8096.webm`，已抽36帧查看总览。
+- 贴边回归：`node scripts/verify_pet_dock.mjs` 输出 `C:/tmp/model-iq-radar-detail-dock-20261031-r1/`，静止指针重排、三侧×动画开关×三轮共18轮、6次探头点击、6次贴边云朵拖动，以及完整／展开云朵拖动通过；录像 `video/page@bd303886c47a725ba7c3e8e7da686054.webm`。最终 dist 执行 `node scripts/verify_pet_csp.mjs`，12动作解码、待机、损坏资源阻止保存和经典回退通过，0页面错误。
+- 交付：`scripts/package_exe.ps1` 校验 PE x64、版本、应用输入新鲜度及复制摘要通过。新包 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-detail-fixes-test-20261031-1350/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,215,360字节，SHA-256 `4bbc341d9dae3e7ae12365a3b473c845079ae42c3b09815ae157ec1799a074d0`。构建后只整理文档与 QA，不改生产源码；正式程序标识不变，未启动 EXE、提交或发布。使用前从托盘退出旧实例。
+- 收尾核对：项目格式检查范围及本轮三份专项文档／四份 QA 脚本通过 Prettier；`git diff --check` 通过。17份本轮源码、测试、脚本与文档严格 UTF-8 无 BOM／LF、替换字符及凭据模式检查无异常；再次计算交付 EXE 的 SHA-256 与打包回执一致。检查工作区状态后保留全部既有改动，不清理无关文件。
+- 未覆盖：按用户要求未做原生界面验收，浏览器替身不能证明 Win32 穿透、原生窗口拖动／顶部合成残块、物理跨屏 DPI、实际重启位置恢复。真实模型／邮件及长期 CPU／进程内存未测。现有姿态短溶解仍不是新制作的连续动作帧，本轮未扩大暂缓的动画素材路线。
+
+## 录屏收纳反弹与结果云朵拖动（2026-10-31）
+
+- 范围：继续当前二维PNG／Canvas方案，不启动暂缓的连续素材路线，不改角色与卡片设计、不改Rust代码。保护既有未提交工作，未reset/clean；仅隔离浏览器验收，不读取正式凭据、请求模型或发送邮件。遵循Vue/TypeScript的注释与格式约定；Java手册的Java/JVM/MyBatis专属条目不适用。
+- 复现与根因：实际抽取用户 `QQ20261031-114129.mp4` 的36帧；右侧面板收纳后窗口原点／大小变化，探头移到静止鼠标下，pointerenter被误认为主动悬停，于约1.3秒内连续四次收起／恢复。之前固定页面原点的QA遗漏该路径。新增 `scripts/verify_pet_dock.mjs` 依据每次scene的actorBounds模拟工作区对齐，真实鼠标位于(815,132)；修改前失败记录 `C:/tmp/model-iq-radar-reflow-before-20261031/stationary-pointer-trace.json` 明确显示四对true/false。用户视频抽帧在 `C:/tmp/model-iq-radar-user-video-20261031/video-frames/`。
+- 修改 `PetStage.vue`：探头enter只记录screenX/Y，继续移动至少2逻辑像素才恢复，避免client坐标随窗口重排变化而误判。无动画时同样生效；点击、右键和键盘无需等待。鼠标pointerdown阻止默认focus提前移除探头，避免mouseup/click落空；键盘聚焦仍交接到云朵，Enter打开卡片。
+- 结果云朵与角色共用6逻辑像素阈值、捕获与原生拖动链路，禁用云朵长按菜单；短按仍切换面板，右键有菜单入口。贴边云朵按下先恢复完整场景再拖动；若只是短按则打开已有卡片，不误关。拖动期间不接受激活，松手后220ms吞鼠标合成click，键盘在松手后可立即操作。展开卡片仍侧坐，拖动不改写真实结论。隐藏后丢失pointerup会清除过期按下，换肤清除云朵来源。
+- 同步：`tests/pet-stage.test.ts`；QA内存桥接增加scene观察和拖动请求记录，未进入生产包；更新全面QA的真实鼠标路径、README、用户手册、设计、皮肤契约和CHANGELOG。无依赖、素材、皮肤schema、数据库或备份迁移。回滚先选择经典外观，再换保留的旧EXE；本轮不会删除旧包。
+- 自动检查：`npm test -- --reporter=dot`，12文件292项通过；`npx vue-tsc --noEmit`与生产构建内相同检查通过。`npx prettier --check src tests *.json *.ts *.md index.html scripts/pet-preview-bridge.ts scripts/verify_pet_ui.mjs scripts/verify_pet_dock.mjs`与 `git diff --check`通过；当前任务文本UTF-8无BOM／LF及替换字符、凭据模式检查通过。Rust无本轮修改，未重复执行Rust测试／Clippy；上一节150项仅为历史结果。
+- 坐标专项：设置PET_PLAYWRIGHT_MODULE为现有Playwright路径、PET_CHROMIUM_EXECUTABLE为现有Edge、PET_QA_SCREENSHOT_DIR为 `C:/tmp/model-iq-radar-reflow-after-20261031-r4`，执行 `node scripts/verify_pet_dock.mjs`。三侧×动画开关×三轮，共18轮真实悬停恢复及重新收纳通过；另6组直接点击、6组贴边气泡拖动、完整桌宠／展开面板两种云朵拖动均通过。静止指针重排只记录一次true，不弹回；真实移动恢复。小抖动不启动、长按600ms不抢菜单、拖后不误切面板、状态不变，0页面／远程错误。替身只记录拖动调用，不移动系统窗口，不证明Win32实际抓取点或穿透。
+- 全面浏览器：同环境变量，输出改为 `C:/tmp/model-iq-radar-reflow-full-20261031-r3`，执行 `node scripts/verify_pet_ui.mjs`。86张主截图＋12张顶部裁切、67.6秒录像，0页面错误和0远程请求；覆盖96／144／192尺寸，三边四状态，十二动作真实点播，48次快速状态竞争、双击／长按／二级菜单斜向路径、测试／取消、倒计时、真实模型选择使结果过期、HTML放大恢复、皮肤预览保存与异常回退。保留原32次Canvas交接采样和三侧每侧30次滑入采样；无透明闪空，短溶解仍非连续肢体动画。
+- QA发现并处理的失败现场：full-r1揭示鼠标focus提前删除探头导致点击丢失，产品已修复；full-r2在右侧恢复后的截图耗时中已自动收纳，脚本却尝试点击隐藏角色。右侧恢复会移动角色，鼠标原位置变成透明空白，本应收起；现脚本先真实移到云朵再截图／操作，不以透明空白锁住窗口。均保留失败记录，不冒充全部首次通过。
+- 生产资源：最终dist执行 `node scripts/verify_pet_csp.mjs` 通过，十二动作解码、待机播放、坏图／坏描述阻止保存及经典回退，0页面错误。录像各抽36帧并检查总览，另查看右侧展开卡片图；专项31.96秒录像含完整循环与云朵拖动，文件 `video/page@93c748f1ceb4270ab642f48b4a285885.webm`；全面录像 `video/page@84333c01496ad8c95d0c475049120c81.webm`。各自证据目录包含result.json、video-frames/contact-sheet.jpg；全面目录另有dock-scenes、dock-motion-samples、actor-motion-samples、rapid-switch-samples等JSON。初始加载前空帧与QA主动快速换肤不当作产品闪空。
+- 构建：复用 `C:/Users/Admin/.codex/tmp/model-iq-radar-mail-build/run-build.ps1 -Action build`，TypeScript/Vite与Windows x64 release通过，Rust编译2分30秒；仅既有Vite chunk体积和链接器导入库提示。`scripts/package_exe.ps1`校验PE、版本、输入新鲜度及复制摘要通过。新包 `D:/other/ahui/model-iq-radar/release-artifacts/desktop-pet-reflow-cloud-test-20261031-1318/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19214848字节；SHA-256 `eced9d585efeef6b0d1e174f6fadc4b065d03a794d38cdfad06bedf108c9ad8c`。正式程序标识不变，未覆盖旧包、未启动原生EXE、未发布或提交。
+- 未覆盖：按用户要求不做原生界面验收，因此Win32穿透、原生窗口拖动／合成残块、物理跨屏DPI、真实位置保存及重启恢复未复验；正式模型／邮件与长期驻留CPU／进程内存亦未测。当前静态姿态仍为96ms溶解，大幅姿态没有真实连续动作帧；本轮未承诺解决暂缓素材方案的限制。
+
+## 右侧卡片触边与菜单路径整改（2026-10-31）
+
+- 用户本轮要求保留现有动画方案，只在隔离浏览器验收。未生成新素材、未改角色外观、未增加渲染引擎，未读取正式凭据或调用真实模型/SMTP。已有未提交工作全部保留；Java手册的一般注释与边界规范适用，Java/JVM/MyBatis专属规则不适用于本栈。
+- 根因：原生只用 `actorBounds` 检测触边，卡片右侧已到工作区边缘时，左上方角色仍离边缘很远。新增可选私有scene字段 `dockBounds`，前端只合并角色、常驻云朵和已打开的卡片，排除临时菜单/选择器；Rust在初始、查询和松手检测统一使用它，最终位置仍按角色轮廓对齐。字段缺省兼容旧前端，重复校验有限矩形，无皮肤/数据库迁移。另将整个stage的hover保护收窄到实际交互对象，透明空白不阻止收纳。
+- 菜单根因：离开“动作”包装区域或经过其他一级菜单行即关闭二级。修改 `PetStage.vue`，两层作为共同交互树，鼠标斜向经过其他一级项仍保持展开；选择、外部点击、Escape/左方向键和父菜单关闭负责退出。右侧向左展开、滚动、掩码及业务隔离保持原规则。
+- 修改范围：`PetStage.vue`、`pet_window.rs`；`tests/pet-stage.test.ts`及Rust内嵌回归；`scripts/verify_pet_ui.mjs`、`scripts/pet-preview-bridge.ts`；同步README、用户手册、设计、皮肤契约、CHANGELOG和本记录。QA替身补齐实际按钮所需的内存测试/取消、自动测试倒计时及模型条件变更，只用于本地验收，不进入生产包。
+- 修改前斜向路径实际失败证据：`C:/tmp/model-iq-radar-boundary-before-20261031/failure.json`、`failure.png`，明确记录“经过一级菜单时动作子菜单自动收起”。修复后扩大矩阵，r1/r2/r3/r4保留了脚本问题的失败现场：旧用例依赖透明stage:hover阻止收起、默认自动测试开启却预期点击后开启、固定等待未跨越整秒采样。QA替身此前还返回固定剩余137秒，已改为截止时间快照；这些不冒充生产倒计时缺陷。
+- 自动检查：`npm test -- --reporter=dot`，12文件282项通过；`npm run build` TypeScript/Vite通过。隔离工具链 `run-build.ps1 -Action test`：110+18+22，共150项通过；新回归包含卡片右侧触边但角色未触边、1/1.5/2倍率、负工作区、关闭吸附、缺字段和坏矩形。`-Action clippy` 全目标 `-D warnings`通过。Prettier、rustfmt、diff、UTF-8无BOM/LF检查通过；Vite仅既有chunk体积提示，链接器仅导入库提示。
+- 最终隔离浏览器命令：设置 `PET_PLAYWRIGHT_MODULE` 指向现有Playwright、`PET_CHROMIUM_EXECUTABLE` 指向现有Edge、`PET_QA_SCREENSHOT_DIR=C:/tmp/model-iq-radar-boundary-audit-20261031-r5` 后运行 `node scripts/verify_pet_ui.mjs`。完整86主截图+12顶部裁切、64.28秒交互录像，0页面错误、0远程请求。真实慢速鼠标斜向进入菜单、来回路径和三边展开均通过；十二项点播实际点击（含滚动）、长按/双击/外部关闭、三尺寸控件九点命中、紧凑/展开、HTML沙箱放大恢复、皮肤预览保存、坏资源/CSP回退均有独立覆盖。`node scripts/verify_pet_csp.mjs`在最终生产dist通过：12动作解码、待机播放、坏图/坏描述阻止保存、经典恢复，0页面错误。
+- 收纳验证：先打开实际卡片，读取其独立dockBounds；在角色尚未靠边的前提下用逻辑工作区替身计算right通知，而非直接强制宣告right通过。Rust真实判定另有上述回归。鼠标留在场景透明上方空白仍能收纳；三边面板恢复保持侧坐，四状态云朵常驻、顶部轮廓倒转但文字正向；测试中拖拽与结算、快速方向竞争、暂停和换肤清理通过。浏览器替身不移动系统窗口，不能据此声称原生实机吸附已验证。
+- 动画证据：32个画布交接采样Alpha总量最小/最大约0.9344；三边每边30个滑入样本透明度均1。48次35ms间隔业务状态切换均有非空画布、最后error有效、无额外播放器节点。关闭自主仍可摸头；先等待idle真实稳定再观察7—16秒自主活动，避免把旧姿态当新动作。单帧姿态继续使用原96ms溶解，并非新增连续动作。浏览器GC后JS堆从约13.26MiB到13.99MiB，仅作短时采样，不能证明长时间无泄漏或进程CPU/总内存合格。
+- 本地功能替身实测：真实点击“重新测试→取消测试”，状态正确；自动测试开关、倒计时推进、实际选择demo-model后旧结果过期。只有明确点击产生一次start_test及一次cancel_test，其他桌宠交互不触发测试/邮件；不对真实服务接口做结论。
+- 已抽取录像36帧并查看总览，同时检查右侧紧凑卡片、向左二级菜单、自主坐姿和四状态截图。证据：`result.json`、`dock-scenes.json`、`dock-motion-samples.json`、`actor-motion-samples.json`、`rapid-switch-samples.json`；录像 `video/page@a2ec5d3617f758900587a51be2aab5e3.webm`；抽帧 `video-frames/contact-sheet.jpg`，均在上述r5目录。初始页面加载前的录像首帧为空不属于动作闪空。
+- 交付构建：`run-build.ps1 -Action build`成功，release编译3分39秒。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-boundary-audit-test-20261031-1120`核对版本、PE x64、应用输入新鲜度和复制摘要通过。EXE为 `release-artifacts/desktop-pet-boundary-audit-test-20261031-1120/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,214,848字节，SHA-256 `441c73e0f0efb3e055f949e1b5a1bbdfae62d07cfc093b7a9a8e0dbdfbae3a27`；正式标识不变，未覆盖旧包，未启动原生EXE、未提交或发布。测试前从托盘退出旧实例。
+- 未覆盖/限制：原生偶发顶部合成残块、透明穿透、物理跨屏DPI、真实重启位置、正式服务与邮件、长时间驻留CPU/进程内存。现有静态姿态短溶解仍可能看到不同轮廓的重影，大幅姿态并无真实连续动作；用户本轮明确暂缓连续素材方案，不把此次稳定性回归表述为动画制作完成。回滚先保存经典，再换保留的旧EXE。
+
+## 闪空、贴边排队与原生残块规避（2026-10-31）
+
+- 用户复现：动作切换闪空、贴边要等待多个姿态、顶部云朵方向不对，以及头发/气泡上方残块随轻微原生移动消失。本轮新增截图 `codex-clipboard-6cbf25d1-bb89-4c01-86f9-a343e880e81f.png` 与 `codex-clipboard-e2657fa4-fc55-4624-96c0-2bc56c16582b.png` 为用户实机证据；本轮未启动原生程序，不将浏览器无残块等同于实机已根治。
+- 已确认闪空根因：上一轮播放器在100ms中点将旧、新画面都变为全透明，贴边另有退场/隐藏阶段，叠加放下和反馈计时。现改为就绪后96ms预乘Alpha加权，双方权重之和为1；贴边180ms离开后直接接管，以最终布局内160ms不透明滑入呈现，跳过landing/庆祝驻留，自主动作在贴边让位。关闭动画直接呈现。未制作连续肢体帧，短溶解不代表完整动作制作。
+- 顶部探头维持头朝右，云朵轮廓上下翻转、尾巴朝角色，文字和图标保持可读。普通面板可收纳，恢复同一详情状态；菜单、浮层、按住、键盘焦点及HTML放大仍保护输入。真实浏览器又发现并修复550ms补接点击吞掉卡片按钮的问题，新增立即操作卡片按钮的回归。
+- 原生疑点与处理：之前反复把复杂命中轮廓传入SetWindowRgn，同时改变透明WebView2的显示裁剪。改用 `src-tauri/src/pet_input.rs`，保留矩形透明合成表面，仅由掩码控制鼠标穿透；首次启用移除旧裁剪。采样由主线程处理，显示约60Hz、隐藏5Hz，每次确认后才排下一帧；自有按下/拖动保留输入，释放恢复，预览/退出递增世代取消旧任务。未新增依赖或配置字段。此为规避可疑合成路径，不宣称已证明唯一根因或已原生验收。
+- 联网读取两参考项目实际播放器和帧缓存，主分支SHA及文件记录于设计文档：dsh-pet前后台透明视频就绪交接、单待切换目标与迟到加载隔离；indesktop播放实际PNG连续帧、预取、缺帧等待及超时回退。完整动画来自制作好的视频/连续帧。当前十一种额外姿态仍为单帧，没有复制第三方角色素材，也没有假定静态生图能生成已验证视频或Live2D。
+- 自动验证：`npm test` 最终12文件277项通过；隔离环境 `run-build.ps1 -Action test` 109+18+22共149项通过（含物理命中/DPI取整、自有按下保留和外部按住不锁定）；`-Action clippy` 全目标 `-D warnings` 通过。Prettier、rustfmt、TypeScript/Vite及 `git diff --check` 通过。首次直接cargo调用因PATH未加载失败，随后使用既有工具链/构建脚本成功，未安装工具。
+- 第一轮浏览器暴露卡片补接点击缺陷，保留失败证据于 `C:/tmp/model-iq-radar-no-flash-20261031/`；修复后第二轮 `C:/tmp/model-iq-radar-no-flash-20261031-r2/` 完整通过：66主截图、12顶部裁切、34.84秒交互视频，0页面错误、0远程请求、0额外模型/邮件命令。三边每边30个滑入采样，透明度均为1；32个实际角色画布采样的Alpha总量最低/最高约0.9344，无闪空。数据在 `dock-motion-samples.json`、`actor-motion-samples.json`、`result.json`；视频 `video/page@d730de04823bff815ca48203b1d13708.webm`，已离线抽帧并查看总览及顶部气泡、右侧恢复面板截图。
+- 最终生产dist的 `verify_pet_csp.mjs` 再次通过：十二动作解码、待机播放、坏描述/坏图片阻止保存和经典恢复，0页面错误。本轮不读取正式配置或凭据，不发送模型请求或SMTP；Java/JVM/MyBatis专属规范不适用于Vue/TypeScript/Rust。
+- 未覆盖：用户所示原生残块的修复后实机复验、原生穿透与点击延迟、物理跨屏/DPI、重启位置及长时间资源驻留；浏览器仅验证组件、事件和布局。新增输入监视路径需特别复验透明处点击、拖动按住、释放和HTML放大恢复。皮肤schema1、数据库/备份v3、业务结论和接口流程不变；回滚先保存经典，再换旧EXE，旧交付物保留。
+
+### 同轮补充：右键动作二级菜单
+
+- 按用户追加要求，实际读取参考项目相同SHA的 `runtime/electron-helper/sprite/menu.js`，借鉴工具与动作树分离、菜单输入保护及关闭收尾，未引入其业务请求。当前一级保留面板、设置、当前状态、动作、隐藏；二级按当前皮肤资源列出动作，内置十二项，旧皮肤缺动作不列出。
+- 修改 `PetStage.vue` 与 `src/pet/layout.ts`：一级/二级菜单独立矩形和掩码，右侧二级菜单向左展开，限高滚动；悬停/点击打开、方向键及Home/End导航、Escape/左方向键返回、外部点击关闭。动作点播收起卡片后预览，真实结果保持不变，不模拟真实拖动或额外测试。同步菜单回归、浏览器脚本、README、用户手册、设计、皮肤契约与变更记录，无皮肤/数据库格式迁移。
+- `npm test` 最终12文件280项、TypeScript检查通过。第一轮实际浏览器发现子菜单因一级1px边框使显示和掩码错位，已修复并重跑；失败证据保留在 `C:/tmp/model-iq-radar-no-flash-submenu-20261031/`。
+- 最终浏览器 `C:/tmp/model-iq-radar-no-flash-submenu-20261031-r2/`：70主截图+12顶部裁切，0页面错误/远程请求；新增十二动作列表、点击/悬停、分层键盘返回、三边子菜单显示范围与输入掩码断言，原有完整流程继续通过。视频 `video/page@8156f84408ed3d54d3a74a41a9328e17.webm`，已查看右侧向左展开的双层菜单截图。该最终前端不影响此前149项Rust测试和Clippy的实际覆盖；原生残块和点击穿透依然未实机复验。
+
+- 最终交付：复用隔离MSVC/SDK执行 `run-build.ps1 -Action build`，包含二级菜单的最终release成功（5分09秒，JS580.69kB，仅既有chunk体积和MSVC导入库提示）。最终dist再次通过生产CSP检查，Prettier/rustfmt、diff、限定范围UTF-8无BOM/LF与凭据模式扫描通过。`package_exe.ps1` 的版本、PE x64、应用输入新鲜度和复制摘要校验通过。
+- 新测试包：`release-artifacts/desktop-pet-no-flash-submenu-test-20261031-104212/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,208,704字节；SHA-256 `8bb7a85dfeefa297f3a89c1b4f634e58e4b27d0773500065e8479a0c8b17ba79`。正式应用标识不变，未覆盖旧交付物、未启动原生EXE、未提交或发布。测试前应从托盘退出旧实例，避免单实例机制仍唤起旧程序。
+
+## 历史：全动作交接、面板收纳和顶部朝右（2026-10-31）
+
+- 根因：`PetStage.vue` 直接切换探头节点和窗口尺寸，且把 `panel` 作为禁止收纳条件；`PetActor.vue` 的单帧姿态绕过交接，只有部分连续图集使用短合成。本轮按用户最新要求更新，不再沿用下方历史记录的“面板打开不收纳／静态直接交接／顶部原旋转方向”结论。
+- `PetStage.vue` 加入可取消的120ms退场→等待最终布局→200ms进场，沿屏边平移10逻辑像素并淡出淡入，不缩放或扭曲脸部。动画中途返回鼠标可取消退场，禁用吸附、暂停动画、换肤、隐藏和卸载正确清理。过渡期间临时扩当前场景输入轮廓，完成后恢复精确轮廓。普通卡片打开时仍可收纳，恢复保留同一控件和紧凑／详情状态；下拉浮层、右键菜单、按住鼠标、键盘焦点和HTML放大仍保护输入。
+- `PetActor.vue` 对全部不同动作（含单帧）统一解码预载后的100ms淡出＋100ms淡入，同一帧仅绘制一种姿态，不叠脸、不旋转；静态循环姿态交接后停止重绘，非循环片段只结算一次。此为呈现过渡，没有新增连续肢体补帧或绑定。`controller.ts` 使面板显示时固定侧坐，包括标题栏拖动、测试和结果变化；业务结论仍独立显示。
+- `layout.ts` 将顶部固定变换改为 `scaleX(-1) rotate(90deg)`，头朝右；点击区域使用同一坐标变换。没有修改源图、皮肤schema、业务请求、数据库或Rust。旧包沿用新宿主统一过渡，无需新增资源字段；关闭动画直接交接，旧交付物保留。
+- 更新 `tests/pet-actor.test.ts`、`tests/pet-stage.test.ts`、`tests/pet.test.ts` 与 `scripts/verify_pet_ui.mjs`；同步README、CHANGELOG、用户手册、设计文档及皮肤契约。`npm test -- --reporter=dot`：12文件275项通过，覆盖十二单帧动作交接不叠脸、三方向面板收纳恢复、退场打断、浮层／按住／HTML保护、面板固定侧坐及顶部非对称热区。
+- 最终浏览器验收 `C:/tmp/model-iq-radar-motion-panel-20261031-pass2/`：66主截图＋12顶部裁切、连续视频，0页面错误、0远程请求、0额外模型或邮件命令。新增三边已打开详情面板收纳／悬停恢复、四状态保持侧坐与真实CSS中间帧采样；每边30个采样，分别有22／23／23个中间透明度，业务结果不变，记录于 `dock-motion-samples.json`。视频 `video/page@e96752f417d2b3c063932bb21099dea7.webm`。已查看顶部头朝右、右侧恢复卡片截图；全量原有交互验收继续通过。
+- TypeScript／Vite生产构建与格式检查通过，仅既有chunk体积提示。生产CSP脚本12动作解码、待机播放、坏资源阻止保存和经典恢复通过，0页面错误。本轮未改Rust，不重复声称重新执行了Rust测试；未启动原生EXE，Windows窗口动画合成、点击穿透、跨屏／DPI和此前偶发顶部问题仍未实机验证。没有读取正式凭据或发送模型／邮件请求；Java／JVM／MyBatis专属规范不适用于本轮Vue／TypeScript修改。
+- 最终代码复用隔离MSVC／SDK构建成功（最终release 2分33秒，JS577.48kB，仅既有chunk及MSVC导入库提示）；`package_exe.ps1` 核对版本、PE x64、输入新鲜度及复制摘要通过。新版测试包 `release-artifacts/desktop-pet-motion-panel-test-20261031-095557/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,177,472字节，SHA-256 `358e9d743f5d8f9d934114af80ff0d6febd3535d6f746f0ebd591efe67e876b1`。正式标识不变，未覆盖旧包、未启动原生程序、未提交或发布。最终源码／文档UTF-8无BOM及LF、限定凭据模式扫描、格式与diff检查通过。
+
+## 三边探头与贴边状态云朵（2026-10-31）
+
+- 用户明确授权同一探头调整角度用于右侧和顶部，覆盖上一轮“仅左侧”范围。未新增生图或角色素材：左侧原样、右侧水平镜像、顶部顺时针90度；固定宿主变换与命中区域使用相同公式，不拉伸脸部。`docking.left` 保留为历史通用源字段，schema1及旧包兼容不变。
+- 三边收起均显示常驻正向状态云朵，测试中／不降智／降智／测试失败由实际业务驱动；云朵不随头旋转，右侧仅调整轮廓尾巴，文字不翻转。关闭临时互动气泡不隐藏结论；云朵和变换后的角色轮廓均进入原生Region。
+- 松手先按未夹紧角色轮廓检测顶部／左／右，角落顶部优先；方向缓存等待前端右侧布局调整后再次对齐，避免云朵占宽使右侧永远不可达。按全部可见区域夹紧，保云朵屏内。右侧完整卡片向角色左边展开，恢复使用原位置和锚点；拖动中方向事件暂存到松手再应用，避免抢夺抓取点。
+- 位置保存使用一次待保存意图，真实拖动松手后才建立，最终普通场景精确对边后消费，探头临时位置不落盘。`canonicalAnchor` 为可选私有场景字段，不是皮肤字段；将反射后原点换算回默认布局，首次几何提交完成后再订阅方向。新增五次右侧保存／重启往返不漂移、旧字段兼容和非法锚点拒绝回归。
+- 独立审计发现并修复释放监视器与新拖动／取消之间的保存竞态：释放携带原世代，后台入口排原生事件线程，保存与取消／新拖动通过同一门禁串行，写盘前复查意图身份、场景版本和世代，成功后按身份消费；失败保留重试，旧回调不删除新意图。活动皮肤更换即使已松手也先取消原生意图。门禁内不调用窗口API或事件，独立只读复核未见新增死锁。
+- `npm test -- --reporter=dot`：12文件257项通过；格式、TypeScript／Vite及diff检查通过。隔离原生测试106＋18＋22＝146项通过，严格clippy及rustfmt通过；新增三边、角落、禁用、负屏坐标／DPI、云朵范围、变换热区、旧包和保存竞态回归。生产CSP验证12动作解码、待机播放、坏资源阻止保存及经典恢复通过，0页面错误。
+- `verify_pet_ui.mjs` 最终三边pass4通过：63主截图＋12头顶裁切＋1联系表，三边四状态对照图及连续视频，0页面错误、0远程请求、0额外测试／邮件命令。覆盖三方向深浅背景、真实hover／点击／Enter、恢复重收起、收起时切方向、拖动优先／换肤，以及右侧96／144／192紧凑／详情布局九点工具和选择器命中。证据 `C:/tmp/model-iq-radar-three-edge-browser-20261031-pass4/`，视频 `video/page@2d9f6c06894cb88f5c8e7e816d7d149f.webm`；`dock-scenes.json` 仅记录方向、轮廓与云朵Region几何。已查看三边12状态及右侧／顶部深浅背景。
+- 浏览器不能代替Windows屏幕坐标、点击穿透、真实窗口拖动或物理跨屏／DPI验证；此前偶发顶部异常本轮仍未原生复现。静态探头方向转换不等于制作新的连续动作。无真实模型／邮件／正式凭据读写，无数据库迁移，旧包保留。
+- 最终代码复用隔离MSVC／SDK执行 `run-build.ps1 -Action build` 成功，Windows x64 release编译2分16秒；TypeScript／Vite生产构建通过，JS576.19kB，仅既有chunk体积及MSVC导入库提示。`package_exe.ps1` 核对版本、PE x64、源码新鲜度与复制摘要通过，最终测试包 `release-artifacts/desktop-pet-three-edge-test-20261031-005654/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,177,472字节，SHA-256 `293bd1365e2d2fe9fab1e966e3f7f9c3a8b81e2ac02dbf60fd8b617f4121c69a`。正式应用标识不变，未覆盖旧交付物、未启动原生EXE、未提交／推送／发布；最终源码与文档UTF-8无BOM／LF，限定密钥模式及diff检查通过。
+
+## 左侧探头与顶部偶发现象排查（2026-10-31）
+
+- 使用用户批准的探头原透明图，原图、处理参数和摘要保留在 `assets/pet/blue-whale-maid/edge-left-source.png`、`edge-extraction.json`。仅清理 alpha 1—3 外围杂点并等比归一到320方形，可见边界 `[0,4,209,316]`；`--edge-only` 两次生成摘要一致，未重制角色或改动其他姿态。深浅及紫绿背景检查未见白底、棋盘格或卡片碎片。
+- 加入可选 schema1 `docking.left`，旧包缺省仍显示完整角色。开启吸附后按角色实际轮廓判左侧16逻辑像素，离开500ms收为65×96逻辑像素探头；悬停恢复、真实点击与键盘Enter展开，面板／菜单／拖动优先。修复鼠标焦点残留、窗口缩放漏发离开事件和探头节点替换吞点击；关闭吸附、换肤、隐藏及时清理。
+- 对用户正常／异常截图逐张比较，确认偶发顶部断层不能仅归因于PNG。修复代码可证明的Region缓存缺陷：窗口宽高或DPI变化必须重新应用区域；HTML预览恢复后释放布局锁，再以最终DPI重建Region并同步缓存。云朵禁用原生按钮外观、SVG改为明确的非负层叠。按官方Win32行为保留 `SetWindowRgn(..., TRUE)`，没有盲加重绘消息。
+- 取消桌宠拖动时同时撤销原生60Hz循环和220ms延迟移动回调；换肤、退出场景和隐藏不再让旧拖动移动新窗口或写位置，重复取消幂等。测试业务、邮件、规则和凭据路径未变。
+- `npm test -- --reporter=dot`：12文件247项通过，0未处理错误；TypeScript、Vite生产构建、Prettier、Node脚本语法、Python编译及 `git diff --check` 通过。复用隔离MSVC／SDK的 `-Action test`：100单元＋18数据完整性＋22本机替身回归，共140项通过；`-Action clippy`（all-targets，warnings拒绝）通过。新增契约、迟到回调、关闭吸附、重收起、换肤取消等回归。
+- 最终浏览器验收 `verify_pet_ui.mjs`：42张主截图＋12张头顶裁切与连续视频，0页面错误、0远程请求、0额外测试或邮件命令。覆盖96／144／192尺寸、四状态、悬停／真实点击／键盘恢复、暂停、拖动结算、换肤、HTML放大恢复和保存。证据目录 `C:/tmp/model-iq-radar-dock-browser-20261031-pass7/`；视频 `video/page@8d90f5c0962cb7de59668469535056dc.webm`。逐格查看顶部对照图，本轮浏览器未见所报断层。生产CSP解码12动作、坏资源阻止保存和经典恢复通过。
+- 本轮遵循用户指定的浏览器验收范围，未启动原生EXE复现；因此不能宣称Windows偶发顶部异常已彻底解决。Windows底层点击穿透、原生拖动合成、物理跨屏／DPI、休眠和长期性能仍未覆盖。无真实模型调用、邮件或正式凭据读写；无数据库迁移，Java／JVM／MyBatis专属条款不适用。旧交付物保留，回滚先保存经典皮肤再更换旧EXE。
+- `run-build.ps1 -Action build` 完成生产Windows x64构建，Vite JS 575.01 kB，仅既有chunk体积和MSVC导入库提示。`package_exe.ps1` 核对版本、PE x64、应用输入新鲜度和复制摘要通过；测试包 `release-artifacts/desktop-pet-edge-fix-test-20261031-002226/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,159,552字节，SHA-256 `97a706585e3dbb96280485b577d15ba0d2b9d069444b82ea9f6a1e1600a103d6`。未覆盖旧文件、未启动交付程序、未提交／推送／发布。构建后生产CSP验收再跑通过。
+
+## 原布局与当前桌宠外观整合（2026-10-30）
+
+- 以用户最新两张紧凑／展开截图为布局基准，恢复360px宽、两行四独立选择器（接口／模型、规则／强度，默认70%／30%）；桌宠与经典模式共用结果、回答、元信息及操作模板。保留当前桌宠、常驻云朵、海洋配色与边饰；桌宠卡片176px紧凑、596px详情、660px HTML详情。左上角色避让标题，选择器位于完整透明角色按钮下方；菜单仍独立扩场景、不撑卡片。
+- `npm test -- --reporter=dot`：12文件239项通过；`npm run format:check`、`git diff --check`通过。已确认源码与相关文档UTF-8无BOM、LF；前端TypeScript及Vite生产编译成功，JS 571.21 kB，仍有既有chunk体积提示。
+- `node scripts/verify_pet_ui.mjs`：独立内存桥接、回环服务，23张截图＋连续交互视频，0页面错误、0远程请求。96／144／192三尺寸分别验证紧凑和展开，顶栏按钮和四选择器九点命中、两行列对齐、正文纵向顺序、底部无遮挡；保留四结果／条件过期／取消、拖动后反馈、菜单不撑卡、静态动作、皮肤保存和HTML放大恢复。证据目录：`C:/tmp/model-iq-radar-vertical-layout-20261030-final/`，视频：`video/page@b5122a89c998cffb1756fa1cb06b034b.webm`。README桌宠截图已同步最终浏览器画面。
+- 独立复核实际复现并修复HTML源码切换后回退经典模式无法返回预览的问题；新增单元回归，并在本地真实iframe恢复SVG预览。`node scripts/verify_pet_csp.mjs`在最终生产dist及实际CSP下通过12动作解码、坏图／坏描述阻止保存与经典恢复，0页面错误。
+- 用户要求贴边收起的小脑袋先做设计，本轮不改该逻辑：经典模式保留小标签，桌宠模式仍仅收起卡片、保留角色与结果。没有生图调用、真实模型请求、邮件或正式凭据读写；未启动原生界面，未验证Windows穿透／跨屏DPI／长期性能。本轮未修改Rust，不重复声称已执行Rust测试。
+- 复用隔离MSVC／SDK执行 `run-build.ps1 -Action build`，最终Windows x64生产构建成功，保留既有MSVC导入库提示。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-vertical-test-20261030-223214` 核对版本、PE x64、源码新鲜度与复制摘要通过：`Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,039,744字节，SHA-256 `eb3385f0123bc3767d449db1c6778326c5bf7f32ffd8446bf270709685d9b441`。未覆盖旧包、未启动EXE、未提交或发布。
+
+## Windows x64 测试包（2026-10-30）
+
+- 用户要求打当前四组定稿桌宠测试版。复用 `C:/Users/Admin/.codex/tmp/model-iq-radar-mail-build/run-build.ps1 -Action build`，TypeScript/Vite 和 Tauri release 编译成功；前端 JS 575.85 kB，仅既有 chunk 体积及 MSVC 导入库提示。生产标识为 `com.ahui.model-probe`，未混入独立 QA 标识或验收桥接。
+- `pwsh -NoProfile -File scripts/package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-test-20261030-2134` 核对版本、PE x64、应用输入新鲜度和复制摘要通过。产物为 `Model-IQ-Radar-v1.0.6-Windows-x64.exe`，19,039,744 字节，SHA-256 `6e95efb73882c9146b2bac1a8a6143bdd167a1aea7d433f5b46a9d38d3f85f95`。新目录保留旧交付物，未提交、推送或发布。
+- 本次只进行编译及交付核验，未重新运行测试或启动 EXE；沿用下方浏览器及自动测试证据，不把打包成功描述为原生界面验收通过。未读写正式配置或凭据。
+
+## 四组定稿桌宠与卡片复核（2026-10-30）
+
+- 以用户确认的四状态、紧凑卡片、展开详情和额外姿态设计图为基准，实际浏览器检查了头部结果云朵、卡片搭接、海洋边饰、十二动作资源、96/144/192 三种角色尺寸及 HTML 详情。独立雷达球、全息入口和旧气泡已从组件、样式与资源引用中移除。
+- `npm test -- --reporter=dot`：12 个文件、238 项通过；`npm run build` 通过（最终 Vite JS 575.85 kB，保留既有 chunk 体积提示）；`git diff --check`、Prettier、TypeScript 检查通过。新增动作契约后实际复用隔离环境执行 `-Action test`：95+18+22 共 135 项通过；`-Action clippy` 的 `--all-targets -- -D warnings` 通过。
+- `node scripts/verify_pet_ui.mjs` 使用独立本地替身和回环服务：20 张截图、0 页面错误、0 远程请求；覆盖四种结果、待重新测试、关闭临时气泡仍保留结论、菜单不撑卡片、三种尺寸九点选择器命中、拖动放下后反馈、静态招手/伸懒腰、HTML 放大恢复、皮肤预览保存。连续交互视频证据：`C:/tmp/model-iq-radar-approved-design-20261030-r2/video/page@21673f2b7720979df753dd9cfe2594c4.webm`。
+- `node scripts/verify_pet_csp.mjs`：十二动作完整解码、待机轻移、坏描述/坏图片阻止保存、经典恢复通过，0 页面错误。素材审计见 `C:/tmp/pet-assets-20261030/asset-validation.json`；所有姿态 320×320、透明 Alpha，静态姿态不使用整图旋转或交叉淡入。未制作专用闭眼素材，因此不宣称已完成眨眼动画。
+- 视觉检查发现并修复了同一记录从通过变为失败时旧庆祝姿态残留，以及拖动放下期间迟到结果复活的问题；回归用例覆盖 ID 和状态双重校验。未启动原生程序、未重新打 Windows EXE、未读取正式凭据/数据库、未调用真实模型或 SMTP；Windows 点击穿透、跨屏/DPI、休眠和长期性能仍未覆盖。
+
+## 旧版桌宠恢复与必要文件清理（2026-10-30）
+
+- 按用户最新四组设计恢复二维蓝鲸女仆、头部结果云朵、十二动作 PNG 图集、新卡片及海洋边饰，独立雷达球已移除。来源为目标时段历史源码与资源；不宣称重建源码与原 EXE 逐字节相同。已移除后续试验资源及实现，保留运行、构建、测试、原设计与素材重建依赖。
+- 从用户最新列出的文件中清理 15 项：11 张未被 README 引用的桌宠截图、未引用的 preview 拼图、2 个后续卡片效果文件及原生临时替身。清理采用 Windows 回收站；README 引用的 pet-expanded.png 保留。验收脚本默认将新截图写入系统临时目录，旧条目的图片和临时脚本路径仅是历史记录，不是当前运行入口。
+- 实际执行 `npm test -- --reporter=dot`：12 文件、221 项通过；复用既有隔离环境 `run-build.ps1 -Action test`：95 单元、18 完整性、22 regression，共 135 项通过。`npm run build` 通过；`verify_pet_ui.mjs` 12 张截图、0 页面错误、0 远程请求，浏览器 smoke 通过。恢复后运行 `verify_pet_csp.mjs`：八动作完整解码、待机动画、描述/图片损坏阻止保存、经典恢复通过，0 页面错误。
+- 原图集离线重建的 16 张 PNG 与目标素材逐字节及像素一致。浏览器恢复证据位于 `C:/tmp/pet-restore-20261030/browser/`；未重新启动原生应用、读写正式配置、调用真实模型或 SMTP。
+- 沿用当时原包 `release-artifacts/desktop-pet-atlas-20261029/Model-IQ-Radar-v1.0.6-Windows-x64.exe`，32,723,968 字节，SHA-256 `5cd84d0b3d92dee924f8df6d63214627b341668706fb336ad678edb90dfa9b6f`；本轮未重新打包，不用后续 QA 程序冒充原版。原生透明边界、跨屏/DPI、休眠与长时性能未重验。姿态合成等旧版限制随回退保留。
+- 同步皮肤契约、使用手册、设计说明和贡献指南。项目为 Vue/TypeScript/Rust，Java/JVM/MyBatis 专属条款不适用；沿用当前代码风格、UTF-8 无 BOM 和 LF。
+
+## 2026-10-29：恢复原画图集并优化动画
+
+- 用户明确要求恢复之前的二维原画方式，并删除全部三维相关内容。已删除对应播放器/加载器/姿态辅助、模型/纹理/建模脚本、专属测试/方案/对照文档、原交付包和本轮临时验收包；卸载运行依赖并重新生成锁文件。皮肤格式只接受 PNG 图集，内置 ID 不变，配置与数据库无需迁移。
+- 新播放器在同一画布上预载后交接，加载期间旧动作继续；动作间 160ms 可打断合成、普通图集帧间插值、暂停/隐藏后保留进度，拖动速度驱动受限阻尼悬摆。两姿态轮廓在过渡期合并，结束恢复当前轮廓。它是二维关键姿态过渡，不宣称完整肢体补帧或骨骼动画。
+- 六状态按定稿源像素统一缩放；坐姿不再为了铺满画布而扩大头部。原生直接拖动、皮肤保存前全动作解码、启动位置与故障恢复时序修复保留。
+- 新增皮肤可选 `decorations: none/ocean/stars`：蓝鲸皮肤四角鲸尾、两侧水纹、底部铃铛；沿用配色，旧包缺省不绘制，不改数据库。装饰位于卡片内缘，完全不接收指针/辅助功能输入、不扩大原生 Region；动画开关、页面隐藏和系统减少动态效果均可停止底部低频明暗变化。前端、Rust 和打包脚本同步约束预设值。
+- `python scripts/build_pet_assets.py` 重新生成原画八动作、描述和预览；`package_skin.py` 打出 19,647,947 字节的含边饰 QA 包，用于真实导入/预览/确认移除。未调用生图接口，未增加新的角色造型。
+- `npm test -- --reporter=dot`：12 个文件、224 项通过。新增真实播放器的预载期间继续绘制、可见画布不重设、快速打断/迟到解码、轮廓交接、暂停/隐藏进度、非循环一次结算与卸载后错误抑制回归；新增边饰预设兼容及不受信输入验证。
+- 复用既有隔离 MSVC/SDK 的 `run-build.ps1 -Action test`：95 单元 + 18 数据完整性 + 22 本机请求回归，共 135 项通过；`-Action clippy` 的 `--all-targets -- -D warnings` 通过。Java/JVM/MyBatis 专属规范不适用于 Vue/TypeScript/Rust，遵循现有 Prettier/rustfmt 与文档约定。
+- `node scripts/verify_pet_ui.mjs`：12 张真实组件截图，0 页面错误、0 远程请求；验证四角装饰/无鼠标拦截、选择器未遮挡、同一角色画布、拖中通过松手后反馈、八动作、自主活动向测试让位、暂停冻结、真实资源包导入与确认移除、HTML 放大 Escape 恢复。实际截图见 `docs/screenshots/pet-*.png`，已替换旧渲染截图。
+- `node scripts/verify_pet_csp.mjs`：生产 dist/CSP 下八图集实际解码、持续待机、整套保存、后续动作 PNG 损坏/描述读取失败均阻止保存及经典恢复通过。最终移除不再需要的 `blob:` 图片权限后再次执行通过。构建不包含 Three/模型加载分块；删除 Three、对应类型包及仅用于旧试验的直接 Node 类型依赖，第三方声明由生成器更新（37 前端生产包、315 Cargo 包）。
+- 原生验收使用独立 `com.ahui.model-probe.petqa-20261028` 标识、虚构本机配置和 `127.0.0.1:19339` 替身。设置实际保存 192px 成功，重启含边饰验收 EXE 后仍为蓝鲸原画/192px；位置保留 `(1151,45)`。实际拖动从 `(1135,6)` 移到 `(1151,45)`，松手后原画仍可交互。原生截图观察到四角/侧边/底纹、测试中书写与“正在测试…”、约 5.02 秒后庆祝与“本次通过！”，再回侧坐；按钮可正常触发。未调用真实模型/SMTP、未读取正式数据库/凭据；验收和替身进程已停止。
+- `npm run format:check`、受影响脚本/文档 Prettier、`cargo fmt -- --check` 和 `git diff --check` 通过。变更文本严格 UTF-8 无 BOM/LF、无替换字符；凭据模式扫描及桌宠文档本地链接检查通过。注释、使用说明、皮肤契约、变更日志与第三方声明同步。
+- 最终 `run-build.ps1 -Action build` 完成生产标识 Windows x64 `tauri build --no-bundle`（JS 562.60 kB/gzip 202.12 kB；保留既有 chunk 大小与 MSVC 导入库提示）。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-atlas-20261029` 核验版本、PE x64、输入新鲜度和复制摘要：`Model-IQ-Radar-v1.0.6-Windows-x64.exe`，32,723,968 字节，SHA-256 `5cd84d0b3d92dee924f8df6d63214627b341668706fb336ad678edb90dfa9b6f`。二进制包含生产标识、不含独立 QA 标识；目录只交付 EXE，未提交/推送/发布。
+- 未覆盖物理多屏/跨 DPI、休眠与长时驻留性能；原生透明区域仍为保守横带，未逐点验收全部底层穿透。原画之间仍是短姿态合成，可能短暂出现轮廓叠影，没有连续全身补帧。悬空原画中的外部示意手在画布上沿裁切，以保持角色本体与其他动作统一缩放。无数据库迁移；回滚先切经典再换旧 EXE。以下较早二维验收记录仅作历史。
+
+## 桌宠正向流程修复与原生复核（2026-10-28）
+
+- 用户反馈打包程序皮肤预览报 `TypeError: Failed to fetch`，保存成功后桌面仍为经典外观。根因是 Tauri CSP 的 `connect-src` 未包含 `'self'`，阻止同源皮肤 JSON，图片的 `img-src` 因而仍可显示卡片缩略图；此前 Vite/内存桥接验证没有覆盖生产 CSP，原交付不能视为桌面正向流程通过。
+- 修复 `tauri.conf.json` 同源读取、`skinLoader.ts` 可读错误、Settings 保存前全部动作解码与失败不写盘/清除旧成功提示；删掉用户指定说明。角色动画由本应用的明确开关控制，默认开启，待机持续呼吸/摆尾/眨眼，测试与交互切换原图动作。未替换已确认的六姿态或引入第三方角色素材。
+- 原生实测发现快速拖动接管前的位移会被消费；`PetStage` 保留拖中完整输入区域，`prepare_widget_drag` 接收可选逻辑位移并按 DPI 补偿，松手恢复轮廓与持久位置。省略参数维持经典标题栏行为。配置、数据库、备份和条件指纹无迁移。
+- `npm test -- --reporter=dot`：11 文件、216 项通过；新增描述失败/后续动作损坏不保存及经典恢复，覆盖拖中完整区域、松手恢复和位移传递。复用原隔离环境 `run-build.ps1 -Action test`：93 + 18 + 22，共 133 项通过；`-Action clippy` 的 `--all-targets -- -D warnings` 通过。
+- `node scripts/verify_pet_csp.mjs` 使用实际生产 dist 与生产 CSP：六种动作真实解码、两次画布不同、模拟系统减少动态效果仍持续动画、资源失败阻止保存与经典恢复，0 page error。`node scripts/verify_pet_ui.mjs`：8 张最新组件截图、0 page error、0 远程请求、控件无遮挡、拖中结算松手反馈与 HTML Escape 恢复通过；本轮未重复导入包浏览器用例，上一轮记录保留。
+- 使用独立 Tauri identifier `com.ahui.model-probe.petqa-20261028` 构建并实际启动 Windows EXE，通过 Windows Computer Use 点击：打开设置 → 皮肤管理 → 选择 → 预览出现 → 保存成功 → 桌面完整角色。只读独立数据库确认皮肤已保存；重启后仍显示该角色。摸头出现闭眼姿态与气泡，雷达可展开侧坐搭接面板。未读取/修改正式数据库或真实模型凭据。
+- 通过 `scripts/pet-native-mock.mjs` 的回环替身，独立配置空 Key/虚构模型，真实按钮执行两次测试，分别约 5.02 秒，历史均为 passed；定时原生截图实际观察到写字姿态与“正在测试…”，随后腾空庆祝与“本次通过！”，再回侧坐。快速拖动实测窗口从 `(1433,220)` 移至 `(1446,255)`，松手恢复待机，独立数据库记录同一新位置。未调用真实模型或 SMTP；验收进程与替身在收尾后停止。
+- 最终 `run-build.ps1 -Action build` 完成生产 identifier 的 Windows x64 构建（JS 554.18 kB/gzip 199.15 kB）；仅既有 chunk 大小与 MSVC 导入库提示。`package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-fix-20261028` 核验输入新鲜度、版本、PE x64 与复制摘要。产物 `Model-IQ-Radar-v1.0.6-Windows-x64.exe`，29,985,280 字节，SHA-256 `d95f98d88dd5ea98e5c11a1e6bf59506c9839b6959238f3c008ba0c026fe983c`。保留旧预览、不提交/推送/发布；Java 专属规范不适用于 Vue/TS/Rust。
+- 仍未覆盖物理多屏/DPI 切换、休眠、长时驻留性能与全部透明边界的底层点击；不宣称不存在任何问题。Windows 单屏正向流程的本次实际结果不能扩大为这些项目通过。动画仍是原图局部形变与帧动画，未制作视频级连续全身补帧。回滚先切经典，再更换旧 EXE。
+
+## 初次桌宠预览交付（2026-10-28，后续修复见上）
+
+- 以用户六状态定稿制作，后续明确纠正与原图不一致的素材：运行资源全部直接从 `assets/pet/blue-whale-maid/design.png` 提取，保留眨眼托腮侧坐、腾空庆祝及对应手势；不使用此前重新生成的六格替代图。展开角色搭接 420px 面板左侧，76px 留白保护原控件；经典布局仍为 360px。素材仅含局部呼吸/摆尾、待机眨眼和庆祝轻跳，不宣称已完成视频级全身补帧。
+- 新增 `src/pet`、`PetActor/PetStage/SkinManager`、`pet_window.rs`、内置资源与生成/打包/验收脚本；修改窗口桥接、Widget、Settings、外观类型与校验。配置 `preferences.skin` 缺省经典；备份 v3 与重置、条件指纹独立性已有回归。未新增依赖、数据库表或 schema 迁移，未使用参考仓库角色资源，未将用户生图接口密钥写入项目。
+- `npm test -- --reporter=dot`：11 个文件、214 项通过，0 失败。包含动作优先级、恢复/重复历史、拖中结算、拖后 click、资源迟到释放/坏资源回退、轮廓/预算、皮肤草稿保存/放弃；保留原测试/HTML/邮件/历史组件回归。同步修正历史页测试对异步分页的等待，以及 Vitest 5 把 beforeEach 返回函数当清理回调的测试夹具问题，未改对应 Markdown 业务逻辑。
+- 复用用户指出的 `C:/Users/Admin/.codex/tmp/model-iq-radar-mail-build/run-build.ps1` 隔离 MSVC/SDK 环境，无需安装。`-Action test`：93 单元 + 18 数据完整性 + 22 本机请求回归，共 133 项通过；`-Action clippy` 使用 `--all-targets -- -D warnings` 通过。测试仅使用虚构数据、本机 HTTP Mock 与临时数据库，不调用真实模型或 SMTP，不读取生产凭据。
+- `node scripts/verify_pet_ui.mjs` 配合已有 Playwright/Chrome：生成 8 张真实组件截图，0 page error、0 远程请求；检查选择器中心未被角色覆盖、拖动中通过在松手后反馈、HTML 放大后 Escape 恢复。用 `package_skin.py` 打出 16,292,596 字节的 QA 自包含包，浏览器实际解码全部 PNG 并验证导入、预览和确认移除，所有安装写入仅在独立 QA 内存。截图见 `docs/screenshots/pet-*.png`。
+- `npm run format:check`、受影响文档/脚本 Prettier、rustfmt 和 `git diff --check` 通过。`-Action build` 完成 TypeScript/Vite 与 Windows x64 `tauri build --no-bundle`；JS 554.05 kB / gzip 199.13 kB，保留既有 chunk 大小和 MSVC import library 提示。构建使用真实生产桥接，QA 内存桥接不会进入 EXE。
+- 最终编码审计发现生成的 `skin.json` 使用 Windows 默认 CRLF；已在生成脚本显式固定 `newline="\n"`，重新生成资源并完成原生构建。35 个变更文本均为严格 UTF-8 无 BOM/LF、带结尾换行，无替换字符；常见凭据模式扫描及方案文档本地链接检查通过。
+- `scripts/package_exe.ps1 -OutputDirectory release-artifacts/desktop-pet-preview-20261028-r2` 已核对 PE x64、版本、源码/静态资源输入时间与复制 SHA-256。最终产物为 `Model-IQ-Radar-v1.0.6-Windows-x64.exe`，29,982,720 字节，SHA-256 `09efe37c1e772263912c304443c5b42304e104e3e596e31aae4dfc021457983d`。工程版本保持 1.0.6，目录明确为未发布预览；不覆盖旧正式交付物和前一轮预览，未提交、推送、Tag 或发布。
+- 尚未启动本次 EXE、执行 Windows 真正点击穿透/原生拖动、DPI/物理多屏、休眠和长时驻留性能验收；这些不由浏览器或编译成功代替。已保留经典回退，不能把本轮描述为原生桌面全量验收通过。首次启用在设置 → 皮肤管理保存“蓝鲸女仆”；回滚先切经典，再更换旧 EXE。文档/注释同步见 `docs/DESKTOP_PET_DESIGN.md`、`docs/SKIN_PACKS.md`、使用手册、贡献指南和 CHANGELOG。
 
 ## v1.0.6 正式发布复核（2026-10-28）
 

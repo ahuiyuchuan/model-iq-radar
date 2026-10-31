@@ -1,6 +1,6 @@
 [package]
 name = "model-probe"
-version = "1.0.6"
+version = "1.1.0"
 description = "自定义题目与连续字符串规则的桌面测智雷达"
 authors = ["ahui"]
 license = "GPL-3.0-only"
@@ -45,7 +45,7 @@ windows-registry = "0.6.1"
 # 只为既有主 WebView 安装 iframe 导航保护，不创建原生预览窗口。
 webview2-com = "=0.39.1"
 windows = "=0.62.2"
-windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
 [profile.release]
 strip = true

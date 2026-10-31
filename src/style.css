@@ -13,10 +13,10 @@
     --text: #e5edf8;
     --muted: #9fadc0;
     --blue: #2886ff;
-    --green: #37d68b;
+    --green: #020504;
     --amber: #f6c453;
     --red: #ff808b;
-    --line: rgba(164, 193, 226, 0.13);
+    --line: rgb(50 52 55 / 0.13);
     --panel-opacity: 0.97;
     /* HTML 未声明背景时回退到卡片深色；有纯色背景时由沙箱消息同步到预览留边。 */
     --html-preview-background: #1c2c3d;
@@ -339,9 +339,8 @@ summary:focus-visible {
     border: 1px solid #58769875;
     border-radius: 9px;
     background: #1a2b3e;
-    box-shadow:
-        0 10px 22px #07132166,
-        inset 0 1px 0 #d4e9ff0a;
+    /* 下拉菜单使用实色底与边框分层，避免透明悬浮窗口外侧出现深色阴影块。 */
+    box-shadow: none;
 }
 .model-menu.opens-up {
     top: auto;
@@ -2616,5 +2615,356 @@ textarea {
     .history-answer-preview {
         width: 34%;
         flex-basis: 34%;
+    }
+}
+
+/* 互动桌宠在同一透明场景组合；经典布局不继承皮肤颜色，HTML 内容维持自身样式。 */
+.pet-stage {
+    position: relative;
+    isolation: isolate;
+}
+.pet-panel {
+    position: absolute;
+    z-index: 1;
+}
+/* 恢复360px纵向信息结构；保留当前皮肤配色、描边和装饰，浮层不改变主体高度。 */
+.pet-stage .widget {
+    width: 360px;
+    height: 176px;
+    padding: 12px 14px 26px;
+    border: 1px solid #68b4f2;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #213e67, var(--pet-panel) 55%, #142d51);
+    color: var(--pet-text);
+    box-shadow:
+        inset 0 0 0 1px #a3ddff6b,
+        inset 0 1px 14px #54a9ff20;
+}
+.pet-stage .widget.expanded {
+    /* 文字、HTML预览与原始回答共用高度：原文字卡596px统一缩短50px，回答区吸收差值。 */
+    height: 546px;
+}
+.pet-stage .widget-header {
+    height: 28px;
+    /* 标题避让角色；192px时选择器从角色完整按钮底边下方开始，不改变两行列宽。 */
+    margin: 0 0 6px max(0px, calc(var(--pet-size, 192px) * 0.62 - 14px));
+    padding: 0;
+}
+.pet-stage .widget-header .brand {
+    font-size: 11px;
+    gap: 5px;
+}
+.pet-stage .brand-mark {
+    width: 17px;
+    height: 17px;
+    color: #a9e1ff;
+}
+.pet-stage .widget .drag-grip {
+    width: 14px;
+    left: 45%;
+    color: #6ba8e67a;
+}
+.pet-stage .widget-tools {
+    gap: 1px;
+}
+.pet-stage .widget-tools .icon-button {
+    padding: 5px;
+    color: #b0c9e8;
+}
+/* 与最新两态截图一致：两行各自独立边框，接口/规则宽列，模型/推理强度窄列。 */
+.pet-stage .widget-model-row,
+.pet-stage .widget-rule-row {
+    gap: 5px;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
+}
+.pet-stage .widget-model-row.with-fetch {
+    grid-template-columns: minmax(0, 65fr) minmax(0, 25fr) 25px;
+}
+.pet-stage .widget-rule-row {
+    margin-top: 5px;
+}
+.pet-stage .model-select {
+    --picker-height: 29px;
+    --picker-font-size: 11px;
+    background: #365a863d;
+    border-color: #5982b16b;
+    border-radius: 6px;
+}
+.pet-stage .model-trigger,
+.pet-stage .widget-model-picker .model-trigger,
+.pet-stage .widget-effort-picker .model-trigger {
+    padding: 0 4px;
+    gap: 5px;
+    font-weight: 500;
+}
+.model-prefix {
+    flex-shrink: 0;
+    font-weight: 600;
+}
+.pet-stage .model-trigger > svg {
+    width: 15px;
+    color: #bfdbf5;
+}
+.pet-stage .model-select:hover,
+.pet-stage .model-select.picker-open {
+    border-color: #91c7f4;
+    background: #426b954f;
+}
+.pet-stage .widget-model-picker .model-menu,
+.pet-stage .widget-effort-picker .model-menu {
+    min-width: 240px;
+    right: -1px;
+}
+.pet-stage .widget-model-row > .model-select:first-child .model-menu {
+    width: 300px;
+}
+.pet-stage .model-menu {
+    background: #1c3555;
+    border-color: #78a8d6;
+}
+.pet-stage .widget-fetch-models {
+    height: 29px;
+}
+.pet-stage .compact-actions {
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+.pet-stage .compact-status {
+    font-weight: 600;
+}
+.pet-stage .compact-timing {
+    flex-basis: auto;
+    font-size: 9px;
+}
+.pet-stage .widget .button:not(.secondary):not(.subtle) {
+    background: linear-gradient(180deg, #36a5ff, var(--pet-primary));
+    border-color: #76bfff9c;
+}
+.pet-stage .result-heading {
+    margin: 20px 0 18px;
+}
+.pet-stage .answer-box {
+    border-color: #86b5de20;
+    background: #355b853d;
+}
+.pet-stage .metadata {
+    background: #355b853d;
+}
+.pet-stage .metadata,
+.pet-stage .expanded-actions,
+.pet-stage .rule-note,
+.pet-stage .scope-note,
+.pet-stage .answer-label,
+.pet-stage .result-heading {
+    flex-shrink: 0;
+}
+.pet-stage .rule-note {
+    font-size: 9px;
+    color: #aac2dd;
+}
+.answer-label-tools {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.answer-label-tools .icon-button {
+    padding: 0 2px;
+    font-size: 9px;
+}
+.pet-raw-answer {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font:
+        11px/1.6 Consolas,
+        monospace;
+}
+.pet-stage .inline-error {
+    font-size: 10px;
+    flex-shrink: 0;
+    max-height: 42px;
+    overflow: auto;
+}
+.pet-character {
+    position: absolute;
+    z-index: 2;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+.pet-character:active {
+    cursor: grabbing;
+}
+.pet-actor {
+    display: block;
+    pointer-events: none;
+}
+.pet-context-menu {
+    position: absolute;
+    z-index: 6;
+    border: 1px solid #496b91;
+    border-radius: 9px;
+    background: #172b44;
+    padding: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    box-shadow: 0 4px 15px #0005;
+}
+.pet-context-menu button {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 36px;
+    padding: 6px 9px;
+    border: 0;
+    border-radius: 5px;
+    text-align: left;
+    background: transparent;
+    font-size: 12px;
+}
+.pet-context-menu button:hover {
+    background: #304c70;
+}
+.skin-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+.skin-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 14px;
+}
+.skin-card {
+    position: relative;
+    border: 1px solid #47617d;
+    border-radius: 12px;
+    background: #1c2d42;
+    overflow: hidden;
+}
+.skin-card.selected {
+    border-color: #66c8ff;
+    box-shadow: 0 0 0 1px #66c8ff;
+}
+.skin-card > button:first-child {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px;
+    gap: 7px;
+    border: 0;
+    background: transparent;
+}
+.skin-card img,
+.skin-card-symbol {
+    width: 112px;
+    height: 112px;
+    object-fit: contain;
+}
+.skin-card-symbol {
+    display: grid;
+    place-items: center;
+    color: #78cfff;
+    font-size: 64px;
+}
+.skin-card strong {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.skin-card span {
+    color: #b4c4d6;
+    font-size: 12px;
+}
+.skin-delete {
+    position: absolute;
+    right: 6px;
+    top: 6px;
+    border: 0;
+    background: #14243b;
+    border-radius: 5px;
+    padding: 6px;
+}
+.skin-preview-section {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.75fr) minmax(260px, 1.25fr);
+    margin-top: 24px;
+    border: 1px solid #41566e;
+    border-radius: 12px;
+    overflow: hidden;
+}
+.skin-live-preview {
+    display: grid;
+    place-items: center;
+    min-height: 260px;
+    background: #e6edf4;
+    color: #273c54;
+}
+.skin-preview-controls {
+    padding: 18px;
+}
+.skin-preview-controls h2 {
+    margin: 0 0 7px;
+    font-size: 15px;
+}
+.skin-action-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 16px 0;
+}
+.skin-action-list .active {
+    border-color: #73c7ff;
+    color: #ccefff;
+}
+.skin-size {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    margin-bottom: 18px;
+}
+/* 保留原生选择器的键盘语义，同时与皮肤设置的深色输入框和间距一致。 */
+.skin-idle-label {
+    display: block;
+    margin-bottom: 8px;
+}
+.skin-idle-select {
+    width: 100%;
+    max-width: 300px;
+    min-height: 36px;
+    padding: 7px 10px;
+    color: var(--text);
+    background: #1c3047;
+    border: 1px solid #49647f;
+    border-radius: 8px;
+}
+.skin-size input {
+    grid-column: 1 / -1;
+    width: 100%;
+    accent-color: #57afff;
+}
+.skin-option {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 12px 0;
+}
+.skin-option input {
+    accent-color: #57afff;
+}
+@media (max-width: 850px) {
+    .skin-preview-section {
+        grid-template-columns: 1fr;
+    }
+    .skin-toolbar {
+        align-items: flex-start;
     }
 }

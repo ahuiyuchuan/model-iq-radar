@@ -6,6 +6,9 @@ src-tauri/gen/
 *.log
 .env*
 coverage/
+# Python素材脚本的本机字节码缓存不属于可复现源文件。
+__pycache__/
+*.py[cod]
 # 发布包、用户数据库、系统临时文件和编辑器私有状态不进入开源仓库。
 release-artifacts/
 *.db

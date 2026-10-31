@@ -33,7 +33,7 @@ if ($peOffset -lt 0 -or $peOffset -gt $bytes.Length - 6 -or
     [BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) { throw 'EXE 必须为 Windows x64 PE。' }
 
 # 公开说明可以晚于编译；应用源码/清单不能晚于 EXE，以免误交付上轮构建。
-$inputs = @('src', 'src-tauri/src', 'src-tauri/assets', 'src-tauri/icons', 'src-tauri/capabilities') | ForEach-Object {
+$inputs = @('src', 'public', 'src-tauri/src', 'src-tauri/assets', 'src-tauri/icons', 'src-tauri/capabilities') | ForEach-Object {
     Get-ChildItem -LiteralPath (Join-Path $projectRoot $_) -File -Recurse
 }
 $inputs += @('package.json', 'package-lock.json', 'vite.config.ts', 'index.html',

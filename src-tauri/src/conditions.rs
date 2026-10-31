@@ -115,6 +115,30 @@ pub fn validate_id(id: &str) -> Result<(), String> {
 /// 所有保存/导入入口复用的偏好边界；None 表示不使用相应用户限制，硬上限始终存在。
 pub fn validate_preferences(preferences: &Preferences) -> Result<(), String> {
     validate_timeout_seconds(preferences.timeout_seconds)?;
+    if !(96..=192).contains(&preferences.skin.size)
+        || !crate::pet_window::valid_skin_id(&preferences.skin.id)
+    {
+        return Err("皮肤标识无效或角色尺寸不在 96—192 像素范围。".into());
+    }
+    // 允许皮肤契约内的全部动作作为空闲外观；仅保存名称，不执行该动作对应的业务事件。
+    if !matches!(
+        preferences.skin.idle_action.as_str(),
+        "idle"
+            | "petting"
+            | "dragging"
+            | "working"
+            | "success"
+            | "seated"
+            | "wave"
+            | "stretch"
+            | "landing"
+            | "bow"
+            | "failed"
+            | "error"
+    ) {
+        return Err("默认待机动作无效，请选择皮肤支持的动作。".into());
+    }
+
     if !(80..=100).contains(&preferences.opacity)
         || !(1..=1440).contains(&preferences.auto_test_interval_minutes)
         || preferences

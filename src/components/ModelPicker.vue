@@ -4,7 +4,7 @@
 -->
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from 'vue';
-import { Box, Check, ChevronDown } from 'lucide-vue-next';
+import { Box, Brain, Check, ChevronDown, ListChecks, SlidersHorizontal } from 'lucide-vue-next';
 import { resizeWidget } from '../bridge';
 import type { ModelProfile } from '../types';
 
@@ -14,8 +14,12 @@ const props = withDefaults(
         selectedId: string | null;
         expanded: boolean;
         disabled: boolean;
-        /** 设置页复用外观和键盘逻辑，但不调整悬浮窗尺寸。默认 widget。 */
-        context?: 'widget' | 'settings';
+        /** widget 自行调整经典窗口；settings 限制在滚动视口；scene 由宿主测量浮层后统一提交窗口。 */
+        context?: 'widget' | 'settings' | 'scene';
+        /** 桌宠场景显式显示字段名；值仍由真实选项决定，不把设计稿文字作为数据。 */
+        prefix?: string;
+        /** 同一套线性图标，缺省沿用分组图标；不接受外部 SVG 或脚本。 */
+        icon?: 'box' | 'brain' | 'list' | 'sliders';
         /** 当前值没有对应选项时的触发器文案；仅说明空态/草稿，不作为可选列表项。 */
         placeholder?: string;
         /** 触发器的可访问名称，区分切换当前模型和编辑接口。 */
@@ -28,6 +32,8 @@ const props = withDefaults(
         description?: string;
         /** 打开前关闭同组其他菜单；在窗口扩高前等待，避免两层菜单或旧尺寸互相覆盖。 */
         beforeOpen?: () => Promise<void>;
+        /** 场景菜单隐藏挂载后测量并等待宿主扩窗；拒绝时关闭菜单，不能展示被裁切的半成品。 */
+        prepareSceneMenu?: () => Promise<void>;
         /** 卡片模型菜单的规则/强度摘要；只展示元数据，不改变选择行为或其他页面布局。 */
         summaries?: Record<string, { rule: string; effort: string }>;
         /** 设置页模型名称复用同一列表，可手输任意模型 ID；不因失焦自动选择候选。 */
@@ -54,6 +60,7 @@ const root = ref<HTMLElement>();
 const pickerId = useId();
 const open = ref(false);
 const opening = ref(false);
+const menuReady = ref(false);
 let selecting = false;
 const activeIndex = ref(0);
 const opensUp = ref(false);
@@ -86,6 +93,7 @@ async function close(): Promise<void> {
     if (!open.value && !opening.value) return;
     generation++;
     open.value = false;
+    menuReady.value = false;
     filterText.value = null;
     emit('openChange', false);
     if (props.context === 'widget') await resizeWidget(props.expanded);
@@ -124,7 +132,7 @@ async function toggle(): Promise<void> {
         if (props.context === 'widget') {
             // 五行 + 上下内边距 8px + 边框 2px，不能因漏算边框出现仅 2px 的滚动条。
             await resizeWidget(props.expanded, Math.min(options.value.length, 5) * 40 + 10);
-        } else if (root.value) {
+        } else if (props.context === 'settings' && root.value) {
             // 设置页只滚动主体。靠近底栏时向上打开，菜单仍限制在可见滚动视口，不能被裁切。
             const rect = root.value.getBoundingClientRect();
             const scroll = root.value.closest('.settings-scroll, .dialog-body')?.getBoundingClientRect();
@@ -137,9 +145,19 @@ async function toggle(): Promise<void> {
             settingsMenuHeight.value = Math.max(50, Math.min(210, opensUp.value ? above : below));
         }
         if (current !== generation || props.disabled) return;
+        menuReady.value = props.context !== 'scene';
         open.value = true;
         emit('openChange', true);
+        if (props.context === 'scene') {
+            await nextTick();
+            await props.prepareSceneMenu?.();
+            if (current !== generation || props.disabled || !open.value) return;
+            menuReady.value = true;
+        }
         await scrollActive();
+    } catch (cause) {
+        if (current === generation) await close();
+        throw cause;
     } finally {
         opening.value = false;
     }
@@ -166,12 +184,18 @@ async function choose(index: number): Promise<void> {
     }
 }
 
-/** 保持键盘高亮项在五行滚动视口内。 */
+/** 只滚动列表自身；scrollIntoView会连带滚动overflow:hidden的宿主，扩窗前把整张卡片推走。 */
 async function scrollActive(): Promise<void> {
     await nextTick();
-    root.value
-        ?.querySelector(`[data-option-index="${activeIndex.value}"]`)
-        ?.scrollIntoView?.({ block: 'nearest' });
+    const menu = root.value?.querySelector<HTMLElement>('.model-menu');
+    const item = menu?.querySelector<HTMLElement>(`[data-option-index="${activeIndex.value}"]`);
+    if (!menu || !item) return;
+    const outer = menu.getBoundingClientRect();
+    const row = item.getBoundingClientRect();
+    const top = outer.top + menu.clientTop;
+    const bottom = top + menu.clientHeight;
+    if (row.top < top) menu.scrollTop -= top - row.top;
+    else if (row.bottom > bottom) menu.scrollTop += row.bottom - bottom;
 }
 
 /** 普通选择支持首尾/空格；可编辑模式保留文本操作和输入法，只用上下/Enter 选择。 */
@@ -291,7 +315,21 @@ defineExpose({ close });
             @click="toggle().catch(report)"
             @keydown="onKey($event).catch(report)"
         >
-            <Box v-if="showIcon" :size="16" aria-hidden="true" />
+            <component
+                :is="
+                    icon === 'brain'
+                        ? Brain
+                        : icon === 'list'
+                          ? ListChecks
+                          : icon === 'sliders'
+                            ? SlidersHorizontal
+                            : Box
+                "
+                v-if="showIcon"
+                :size="16"
+                aria-hidden="true"
+            />
+            <strong v-if="prefix" class="model-prefix">{{ prefix }}</strong>
             <span>{{ selectedLabel }}</span>
             <ChevronDown :size="15" class="picker-chevron" aria-hidden="true" />
         </button>
@@ -300,7 +338,10 @@ defineExpose({ close });
             :id="`${pickerId}-options`"
             class="model-menu"
             :class="{ 'opens-up': context === 'settings' && opensUp }"
-            :style="context === 'settings' ? { maxHeight: `${settingsMenuHeight}px` } : undefined"
+            :style="{
+                ...(context === 'settings' ? { maxHeight: `${settingsMenuHeight}px` } : {}),
+                visibility: menuReady ? undefined : 'hidden',
+            }"
             role="listbox"
             :aria-label="`${label}列表`"
         >
