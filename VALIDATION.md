@@ -1,4 +1,23 @@
-# 测智雷达 v1.1.0 验证记录
+# 测智雷达 v1.1.1 验证记录
+
+## v1.1.1 发布前检查（2026-11-02）
+
+- 范围：用户已确认下文v1.1.0修复测试包无明显问题，并授权提交、推送、Tag和Release。正式补丁版为v1.1.1，沿用上一版的中文分段提交、带注释Tag、中文发布标题与单个Windows x64 EXE交付规范；测试包反馈不等同于原生全路径自动验收。
+- 版本与生成：`npm version 1.1.1 --no-git-tag-version --ignore-scripts` 更新npm清单及锁文件；Cargo/Tauri清单同步，Windows目标的离线Cargo metadata更新根包版本。`node scripts/generate_notices.mjs` 收录37个前端包、315个crate；对比确认锁文件仅项目版本变化，第三方许可证正文保持原样，无依赖升级、配置项或数据库迁移。首次全平台离线metadata因未缓存Android依赖退出，限定实际Windows目标后通过，没有下载或引入额外依赖。
+- 最终版本检查：v1.1.1下 `npm test -- --reporter=dot` 的340项/12文件、隔离MSVC/SDK环境 `run-build.ps1 -Action test` 的111＋18＋22共151项通过。`npm run format:check` 及专项文档/桥接Prettier、`cargo fmt --check`、`run-build.ps1 -Action clippy` 全目标 `-D warnings` 通过。修复专项Chromium证据见下文；最终dist另执行 `node scripts/verify_pet_csp.mjs`，十二动作解码、待机动画、坏资源阻止保存及经典回退通过，0页面错误。
+- 正式构建：`run-build.ps1 -Action build` 完成Vue/TypeScript/Vite及Windows x64 release，Rust编译2分55秒；仅既有chunk体积与链接器导入库提示。`scripts/package_exe.ps1` 校验工程/文件/产品版本1.1.1、PE x64、构建输入新鲜度和复制前后SHA-256通过，唯一交付文件为 `release-artifacts/v1.1.1/Model-IQ-Radar-v1.1.1-Windows-x64.exe`，19,243,520字节，SHA-256 `fd716823ceb99a924948d8299e79f2c3a1435664315a59c6bff17c7cbc1d20b4`；旧测试包和v1.1.0产物保留。
+- 文档与范围：README下载入口、USER_GUIDE当前版本/兼容范围、CHANGELOG及新增 `docs/release-notes/v1.1.1-zh.md` 同步。只纳入20份本次变更文件；只读审计确认严格UTF-8无BOM/LF、无替换字符、无凭据模式匹配、无超限文件，`git diff --check`通过。正式凭据、数据库、测试录像、临时发布脚本和EXE不进入源码提交；包内仍使用原有存储标识，不启动正式桌面应用或调用模型/SMTP。
+
+## v1.1.1 修复：HTML 误报超时与模型选项同步（2026-11-02）
+
+- 根因证据：新增回归先复现失败。实际生成的 HTML 引导脚本在绘制帧暂停时只发送 background，不发送 dimensions/content/ready；补充未完成字体场景也复现同样阻断。模型目录复用缓存句柄，原 `fetch_models` 不通知卡片，卡片只监听接口身份，无法感知同一句柄的正文替换。
+- 实现：`src/htmlSandbox.ts` 正常等待两帧，每阶段 200ms 兜底，字体就绪最多等 500ms；完成路径互斥，迟到字体/绘制帧不重复握手。`src-tauri/src/lib.rs` 在提交和释放 store 锁后统一广播快照及 `model-catalog-changed` 随机句柄；`src/bridge.ts` 封装订阅，`src/components/Widget.vue` 使同目录重新读取并原地更新菜单，隔离旧读取/卸载，处理自身拉取通知的加载锁。文档/桌宠浏览器桥接同步新增导出。
+- 回归：`tests/html-answer.test.ts` 覆盖暂停帧、未完成字体及迟到回调；`tests/widget.test.ts` 覆盖同句柄菜单更新、其他目录通知、旧读取、读取失败保留目录、自身拉取通知及监听清理。`npm test -- --reporter=dot` 全量 340 项/12 文件通过。隔离 MSVC/SDK 环境下 `run-build.ps1 -Action test` 的 111＋18＋22 共151项通过；`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`run-build.ps1 -Action clippy` 全目标 `-D warnings` 通过。
+- 构建：`npm run build` 的 Vue/TypeScript 检查与 Vite 生产构建通过，仅保留既有大 chunk 提示；Rust 测试链接仅有既有导入库提示。按用户要求执行隔离环境 `run-build.ps1 -Action build`，Windows x64 release 编译2分37秒完成；随后 `scripts/package_exe.ps1 -OutputDirectory release-artifacts/html-catalog-fixes-test-20261102` 校验版本、PE x64、输入新鲜度及复制前后摘要通过。测试包为 `Model-IQ-Radar-v1.1.0-Windows-x64.exe`，19,243,520字节，SHA-256 `d07aa205ab1a605dda37daee5d92102872f355531ebbc9712270acb09382c01e`；保留旧交付物，不启动正式应用。没有修改依赖、锁文件、版本、数据库 schema、备份格式或正式数据。
+- 浏览器证据：`node C:/tmp/model-iq-radar-async-qa.mjs` 使用真实 Vue/Chromium、回环服务与独立内存替身验证同时暂停 iframe 绘制帧和字体就绪、超过12秒无误报、放大/收回、测试结算后新回答、设置页刷新同一句柄后卡片选项更新，以及正常绘制帧路径；0页面错误/远程请求。截图与报告在 `C:/tmp/model-iq-radar-async-qa-20261102/`，已查看预览和新选项截图。模型提交替身在通知前更新接收页缓存，避免浏览器 LocalStorage 复制与 BroadcastChannel 的无序送达干扰验证；这不代表运行过原生事件端到端验收。
+- 最终检查：`npm run format:check`、两份浏览器桥接及 USER_GUIDE 的专项 Prettier 检查、`git diff --check` 通过；12份变更文件保持 UTF-8 无 BOM、LF，无替换字符、锁文件变动或额外生成文件进入变更范围。
+- 文档与兼容：同步 CHANGELOG、USER_GUIDE、CONTRIBUTING 及代码注释；正常帧等待、12秒真正未就绪的超时、消息来源/令牌校验和画布上限保留。用户选择、推理请求、历史判定、凭据和周期不变；新事件仅限包内刷新，回滚时一并恢复前后端代码，无数据迁移。
+- 限制：未启动正式桌面应用、读取正式配置/凭据、调用真实模型、发送邮件或执行原生 WebView2 跨窗口端到端验收。Java/JVM/MyBatis 专属规范不适用于此 Vue/TypeScript/Rust 项目；采用既有格式、中文业务注释与已阅读手册中的通用要求。
 
 ## v1.1.0 发布前检查（2026-10-31）
 

@@ -7,6 +7,8 @@
 import html from '/scripts/fixtures/pelican-coast.html?raw';
 import { CANDY_PROMPT, DEFAULT_PROMPT, PELICAN_PROMPT } from '/src/bridge.ts?readme-original';
 export { CANDY_RULE_ID, CANDY_PROMPT, DEFAULT_PROMPT, PELICAN_PROMPT } from '/src/bridge.ts?readme-original';
+// 静态文档预览不拉取目录，复用普通浏览器的空订阅，保证与生产桥接导出兼容。
+export { subscribeModelCatalog } from '/src/bridge.ts?readme-original';
 
 // 只模拟桌面组件的展示状态；原生窗口动作均为空实现，不启动或操控桌面程序。
 export const desktop = true;

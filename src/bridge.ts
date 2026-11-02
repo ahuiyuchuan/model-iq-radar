@@ -244,6 +244,17 @@ export async function subscribe(handler: () => void): Promise<() => void> {
 }
 
 /**
+ * 订阅成功提交的模型目录更新；同一句柄的缓存正文变化也必须使选择器重新读取。
+ * @param handler 接收不含凭据的随机缓存句柄；调用方只刷新当前关联目录，不发起网络请求。
+ * @returns 解除监听函数，组件卸载或订阅迟到时必须调用；普通浏览器没有目录写入，返回空清理。
+ * @throws 原生事件注册失败时拒绝，由调用方显示错误并保留当前选项。
+ */
+export async function subscribeModelCatalog(handler: (token: string) => void): Promise<() => void> {
+    if (desktop) return listen<string>('model-catalog-changed', (event) => handler(event.payload));
+    return () => {};
+}
+
+/**
  * 订阅进程级更新缓存；先监听后读取，避免打开设置时旧缓存撤销刚收到的新版本标记。
  * @param handler 仅呈现更新标记，不弹窗、不触发网络请求；null 表示尚无成功检查结果。
  * @returns 卸载设置页时必须调用的清理函数；浏览器只提供空缓存预览。

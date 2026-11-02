@@ -405,6 +405,40 @@ it('首帧等待超时只释放本次文档并提供重载，不改变测试结�
     wrapper.unmount();
 });
 
+it.each(['ready', 'pending'])('绘制帧暂停且字体 %s 时仍完成就绪握手，迟到回调不重复发送', async (fonts) => {
+    vi.useFakeTimers();
+    await preparePreview('<div>后台完成的回答</div>');
+    const doc = fake.call.mock.calls.find(([cmd]) => cmd === 'prepare_html_preview')![1].document;
+    const bootstrap = doc.match(/<script>([\s\S]*?)<\/script>/)![1];
+    const postMessage = vi.fn();
+    const listeners = new Map<string, () => void>();
+    const frames: FrameRequestCallback[] = [];
+    let finishFonts: (() => void) | undefined;
+    const fontReady =
+        fonts === 'ready' ? Promise.resolve() : new Promise<void>((resolve) => (finishFonts = resolve));
+    // 执行真正生成的引导脚本，但保留浏览器绘制帧，复现不可见 iframe 的帧暂停。
+    new Function('parent', 'addEventListener', 'requestAnimationFrame', 'document', bootstrap)(
+        { postMessage },
+        (type: string, handler: () => void) => listeners.set(type, handler),
+        (handler: FrameRequestCallback) => frames.push(handler),
+        { body: document.body, documentElement: document.documentElement, fonts: { ready: fontReady } },
+    );
+    listeners.get('load')!();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(postMessage.mock.calls.map(([data]) => data.type)).toEqual([
+        'background',
+        'dimensions',
+        'content',
+        'ready',
+    ]);
+    // 页面再次可见后，已被定时兜底结算的旧帧不能再次测量或发送 ready。
+    finishFonts?.();
+    for (const frame of [...frames]) frame(performance.now());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(postMessage.mock.calls.filter(([data]) => data.type === 'ready')).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+});
+
 it('历史仅可见行运行，放大期间滚出视口仍保留会话，关闭后释放', async () => {
     let visibility!: (entries: Array<{ isIntersecting: boolean }>) => void;
     vi.stubGlobal(

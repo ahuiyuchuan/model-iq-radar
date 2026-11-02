@@ -18,7 +18,7 @@
 
 </div>
 
-> **v1.1.0：新增可换肤二维桌宠、统一状态云朵与左／右／顶部探头。** [查看发布说明](docs/release-notes/v1.1.0-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.0/Model-IQ-Radar-v1.1.0-Windows-x64.exe)
+> **v1.1.1：修复 HTML 预览误报超时与设置刷新后卡片模型选项不更新。** [查看发布说明](docs/release-notes/v1.1.1-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.1/Model-IQ-Radar-v1.1.1-Windows-x64.exe)
 
 ## 为什么选择测智雷达？
 
@@ -113,13 +113,13 @@
 
 ## 下载安装
 
-当前正式版为 **v1.1.0**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.0) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.0/Model-IQ-Radar-v1.1.0-Windows-x64.exe)**。
+当前正式版为 **v1.1.1**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.1) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.1/Model-IQ-Radar-v1.1.1-Windows-x64.exe)**。
 
 下载后直接运行，无需安装或解压。系统需安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；使用远程模型时需能访问配置的 API，费用由对应服务商收取。
 
 更新时完全退出旧版后运行新版，配置、历史和系统凭据继续沿用，建议先备份完整应用数据目录。更换 EXE 路径后，已启用自启的用户应重新设置自启路径。GitHub 自动生成的 Source code 归档是源码，不是可执行程序。
 
-本版新增可换肤二维桌宠、统一结果云朵、三边探头、默认待机姿态及配套测智卡片。详情见 [v1.1.0 发布说明](docs/release-notes/v1.1.0-zh.md)。
+本版修复测试后 HTML 预览误报加载超时，以及设置重新拉取模型后卡片选项不更新；保留当前选中模型、原有测试判定与桌宠交互。详情见 [v1.1.1 发布说明](docs/release-notes/v1.1.1-zh.md)。
 
 ## 快速开始
 
@@ -223,7 +223,7 @@ v1.0.6 对 Responses 增加空前导兼容：仅在前导生命周期、空消�
 
 配置与历史位于 `%APPDATA%\com.ahui.model-probe\probe.db`，API Key 和邮箱授权码在 Windows 凭据管理器；免安装不等于数据随 EXE 保存。迁移前先备份完整数据目录，配置可通过设置导出 / 导入，历史单独导出；配置备份不含凭据，新电脑需要重新填写，邮箱导入后关闭。
 
-当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.0 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
+当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.1 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
 
 </details>
 

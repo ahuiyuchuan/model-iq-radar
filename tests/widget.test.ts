@@ -11,6 +11,7 @@ const fake = vi.hoisted(() => ({
     subscribe: vi.fn(),
     resize: vi.fn(),
     subscribeDock: vi.fn(),
+    subscribeModelCatalog: vi.fn(),
     snapshot: {} as AppSnapshot,
 }));
 vi.mock('../src/bridge', () => ({
@@ -22,6 +23,7 @@ vi.mock('../src/bridge', () => ({
     openSettings: vi.fn(),
     resizeWidget: fake.resize,
     subscribeDock: fake.subscribeDock,
+    subscribeModelCatalog: fake.subscribeModelCatalog,
 }));
 
 beforeEach(() => {
@@ -61,6 +63,7 @@ beforeEach(() => {
     fake.subscribe.mockReset().mockResolvedValue(() => {});
     fake.resize.mockReset().mockResolvedValue(undefined);
     fake.subscribeDock.mockReset().mockResolvedValue(() => {});
+    fake.subscribeModelCatalog.mockReset().mockResolvedValue(() => {});
 });
 
 afterEach(() => {
@@ -972,6 +975,113 @@ it('开始请求尚未同步运行令牌时禁止提前取消和重复开始', a
 });
 
 /** 快捷模型只写当前分组的单字段，不自动测试或更改规则；目录非空隐藏拉取入口。 */
+it('设置刷新同一句柄的模型目录后立即更新已打开菜单，卸载解除监听', async () => {
+    fake.snapshot.config.profiles[0].catalogToken = 'persisted-catalog';
+    let models = [{ id: 'old-model', ownedBy: null }];
+    let catalogChanged!: (token: string) => void;
+    const cleanup = vi.fn();
+    fake.subscribeModelCatalog.mockImplementation(async (handler: typeof catalogChanged) => {
+        catalogChanged = handler;
+        return cleanup;
+    });
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'get_model_catalog') return models;
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('[aria-label="当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="listbox"]').text()).toContain('old-model');
+    const reads = fake.call.mock.calls.filter(([command]) => command === 'get_model_catalog').length;
+    catalogChanged('other-catalog');
+    await flushPromises();
+    expect(fake.call.mock.calls.filter(([command]) => command === 'get_model_catalog')).toHaveLength(reads);
+    models = [{ id: 'new-model', ownedBy: null }];
+    catalogChanged('persisted-catalog');
+    await flushPromises();
+    expect(wrapper.get('[role="listbox"]').text()).toContain('new-model');
+    expect(wrapper.get('[role="listbox"]').text()).not.toContain('old-model');
+    expect(wrapper.get('[aria-label="当前分组模型"]').text()).toBe('fixture');
+    expect(
+        fake.call.mock.calls.some(([command]) => /fetch_models|start_test|set_profile_model/.test(command)),
+    ).toBe(false);
+    wrapper.unmount();
+    expect(cleanup).toHaveBeenCalledOnce();
+});
+
+it('目录通知使迟到旧读取失效，刷新读取失败时保留已更新选项', async () => {
+    fake.snapshot.config.profiles[0].catalogToken = 'persisted-catalog';
+    let catalogChanged!: (token: string) => void;
+    let finishOld!: (models: unknown[]) => void;
+    let reads = 0;
+    fake.subscribeModelCatalog.mockImplementation(async (handler: typeof catalogChanged) => {
+        catalogChanged = handler;
+        return () => {};
+    });
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'get_model_catalog') {
+            reads++;
+            if (reads === 1) return new Promise<unknown[]>((resolve) => (finishOld = resolve));
+            if (reads === 2) return [{ id: 'new-model', ownedBy: null }];
+            throw new Error('缓存读取失败');
+        }
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    catalogChanged('persisted-catalog');
+    await flushPromises();
+    finishOld([{ id: 'old-model', ownedBy: null }]);
+    await flushPromises();
+    await wrapper.get('[aria-label="当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="listbox"]').text()).toContain('new-model');
+    expect(wrapper.get('[role="listbox"]').text()).not.toContain('old-model');
+    catalogChanged('persisted-catalog');
+    await flushPromises();
+    // 错误沿用卡片的展开反馈，会关闭菜单；重新打开后仍应保留上次成功目录。
+    await wrapper.get('[aria-label="当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="listbox"]').text()).toContain('new-model');
+    expect(wrapper.get('.inline-error').text()).toContain('缓存读取失败');
+    wrapper.unmount();
+});
+
+it('卡片拉取收到自身目录通知时，迟到缓存读取不会留下加载锁或覆盖新目录', async () => {
+    fake.snapshot.config.profiles[0].catalogToken = 'empty-catalog';
+    let catalogChanged!: (token: string) => void;
+    let finishFetch!: (catalog: unknown) => void;
+    let finishRead!: (models: unknown[]) => void;
+    let reads = 0;
+    fake.subscribeModelCatalog.mockImplementation(async (handler: typeof catalogChanged) => {
+        catalogChanged = handler;
+        return () => {};
+    });
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'get_model_catalog') {
+            if (++reads === 1) return [];
+            return new Promise<unknown[]>((resolve) => (finishRead = resolve));
+        }
+        if (command === 'fetch_profile_models') return new Promise((resolve) => (finishFetch = resolve));
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('[aria-label="拉取当前分组模型"]').trigger('click');
+    catalogChanged('empty-catalog');
+    await flushPromises();
+    finishFetch({ token: 'empty-catalog', models: [{ id: 'new-model', ownedBy: null }] });
+    await flushPromises();
+    finishRead([]);
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前分组模型"]').attributes('disabled')).toBeUndefined();
+    await wrapper.get('[aria-label="当前分组模型"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="listbox"]').text()).toContain('new-model');
+    wrapper.unmount();
+});
+
 it('空目录显式拉取去重，返回目录不自动选中，换模型只提交 ID 并互斥四个菜单', async () => {
     let finishFetch!: (value: unknown) => void;
     let finishSelect!: () => void;

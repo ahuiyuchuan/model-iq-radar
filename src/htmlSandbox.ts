@@ -69,6 +69,25 @@ export async function preparePreview(source: string): Promise<PreparedPreview> {
         const token = ${JSON.stringify(token)};
         const send = (type, value = '') => parent.postMessage({ token, type, value }, '*');
         const measureContent = ${measurePreviewContent.toString()};
+        // 隐藏、裁剪或被遮住的 iframe 可能暂停绘制帧；布局读取仍可用，不能让 ready
+        // 只依赖 rAF。正常等待两帧，200ms 后兜底测量；两条路径互斥，迟到帧不会重复结算。
+        const afterLayout = callback => {
+            let finished = false;
+            let firstFrame = 0;
+            let secondFrame = 0;
+            const finish = () => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timeout);
+                cancelAnimationFrame(firstFrame);
+                cancelAnimationFrame(secondFrame);
+                callback();
+            };
+            const timeout = setTimeout(finish, 200);
+            firstFrame = requestAnimationFrame(() => {
+                if (!finished) secondFrame = requestAnimationFrame(finish);
+            });
+        };
         // 不跨源读取 DOM；只回传 body/html 的计算背景色，让固定画布两侧沿用作品背景。
         const background = () => {
             for (const node of [document.body, document.documentElement]) {
@@ -85,21 +104,32 @@ export async function preparePreview(source: string): Promise<PreparedPreview> {
             send('background', background());
             // 在完整页面布局后测量一次，不随动画逐帧追逐尺寸，避免 vw/vh 与扩展视口反馈循环。
             // 仅回传数字，宿主不读取跨源 DOM；原始正文、CSS 与作品自身的居中布局均保留。
-            const measure = () => requestAnimationFrame(() => requestAnimationFrame(() => {
-                const root = document.documentElement;
-                const body = document.body;
-                send('dimensions', {
-                    width: Math.ceil(Math.max(${HTML_VIEWPORT.width}, root.scrollWidth, body?.scrollWidth || 0)),
-                    height: Math.ceil(Math.max(${HTML_VIEWPORT.height}, root.scrollHeight, body?.scrollHeight || 0))
+            let measuring = false;
+            let fontDeadline;
+            const measure = () => {
+                if (measuring) return;
+                measuring = true;
+                clearTimeout(fontDeadline);
+                afterLayout(() => {
+                    const root = document.documentElement;
+                    const body = document.body;
+                    send('dimensions', {
+                        width: Math.ceil(Math.max(${HTML_VIEWPORT.width}, root.scrollWidth, body?.scrollWidth || 0)),
+                        height: Math.ceil(Math.max(${HTML_VIEWPORT.height}, root.scrollHeight, body?.scrollHeight || 0))
+                    });
+                    // 先让宿主更新有界视口再测内容位置，避免居中布局在扩展前后产生坐标偏移。
+                    afterLayout(() => {
+                        send('content', measureContent());
+                        afterLayout(() => send('ready', background()));
+                    });
                 });
-                // 先让宿主更新有界视口再测内容位置，避免居中布局在扩展前后产生坐标偏移。
-                requestAnimationFrame(() => requestAnimationFrame(() => {
-                    send('content', measureContent());
-                    requestAnimationFrame(() => requestAnimationFrame(() => send('ready', background())));
-                }));
-            }));
-            if (document.fonts?.ready) document.fonts.ready.then(measure, measure);
-            else measure();
+            };
+            // 字体 ready 也可能等待隐藏文档完成布局；最多等 500ms，再按当前字体测量一次。
+            // 迟到的字体回调不能重新开始握手，原有画布上限和真正未就绪的 12s 超时仍有效。
+            if (document.fonts?.ready) {
+                fontDeadline = setTimeout(measure, 500);
+                document.fonts.ready.then(measure, measure);
+            } else measure();
         }, { once: true });
     })();`;
     const script = (value: string) => `<script>${value.replace(/<\/script/gi, '<\\/script')}</script>`;

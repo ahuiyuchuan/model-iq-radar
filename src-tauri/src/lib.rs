@@ -305,8 +305,10 @@ fn diagnostic_context(
 }
 
 /// 拉取模型仅发 GET，不消耗测智周期，不写入历史；诊断门禁跨窗口去重。
+/// 缓存及关联配置提交后释放 store 锁，再广播快照/目录句柄，避免事件回调重入死锁。
 #[tauri::command]
 async fn fetch_models(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: ProfileInput,
 ) -> Result<discovery::ModelCatalog, String> {
@@ -344,6 +346,11 @@ async fn fetch_models(
             }
         }
     }
+    drop(store);
+    changed(&app);
+    // 复用的随机句柄不会触发前端身份 watcher；正文成功替换也需通知其他窗口重新读取。
+    // 事件仅携带不透明句柄，不发送接口地址、模型正文或凭据；失败路径不发送成功信号。
+    let _ = app.emit("model-catalog-changed", &token);
     Ok(discovery::ModelCatalog { token, models })
 }
 
@@ -388,9 +395,7 @@ async fn fetch_profile_models(
             catalog_token: profile.catalog_token.clone(),
         }
     };
-    let catalog = fetch_models(state, input).await?;
-    changed(&app);
-    Ok(catalog)
+    fetch_models(app, state, input).await
 }
 
 /// 快捷换模型仅写指定分组的 model 字段；校验当前目录与运行门禁，保留凭据及其他设置。

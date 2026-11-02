@@ -25,7 +25,15 @@ import {
     Grip,
     PanelLeftClose,
 } from 'lucide-vue-next';
-import { CANDY_RULE_ID, call, dragWindow, openSettings, resizeWidget, subscribeDock } from '../bridge';
+import {
+    CANDY_RULE_ID,
+    call,
+    dragWindow,
+    openSettings,
+    resizeWidget,
+    subscribeDock,
+    subscribeModelCatalog,
+} from '../bridge';
 import { formatTime, formatRelativeTime, useProbe } from '../useProbe';
 import ModelPicker from './ModelPicker.vue';
 import PetStage from './PetStage.vue';
@@ -128,6 +136,8 @@ const modelPickerOpen = ref(false);
 const catalogModels = ref<FetchedModel[]>([]);
 const catalogLoading = ref(false);
 const fetchingModels = ref(false);
+// 缓存句柄在再次拉取时保持稳定；单独记录正文更新，不能只监听接口身份。
+const catalogRevision = ref(0);
 let catalogGeneration = 0;
 const rulePicker = ref<InstanceType<typeof ModelPicker>>();
 const effortPicker = ref<InstanceType<typeof ModelPicker>>();
@@ -145,6 +155,7 @@ let animationGeneration = 0;
 let hovering = false;
 let tuckTimer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribeDock: (() => void) | undefined;
+let unsubscribeModelCatalog: (() => void) | undefined;
 let disposed = false;
 let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 let motionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -269,6 +280,16 @@ onMounted(async () => {
         uiNow.value = { monotonic: performance.now(), wall: Date.now() };
     }, 1000);
     try {
+        // 先注册目录通知，避免等候停靠 IPC 期间错过已加载目录的成功更新。
+        const cleanup = await subscribeModelCatalog((token) => {
+            if (!disposed && token === profile.value?.catalogToken) catalogRevision.value++;
+        });
+        if (disposed) cleanup();
+        else unsubscribeModelCatalog = cleanup;
+    } catch (cause) {
+        if (!disposed) error.value = String(cause);
+    }
+    try {
         const cleanup = await subscribeDock((dock) => {
             if (petActive.value) return;
             edgeSide.value = dock.side;
@@ -291,6 +312,7 @@ onUnmounted(() => {
     releaseMotion?.();
     clearInterval(clockTimer);
     unsubscribeDock?.();
+    unsubscribeModelCatalog?.();
     cardObserver?.disconnect();
     observedMenus.clear();
     cancelAnimationFrame(measuredFrame);
@@ -513,14 +535,16 @@ const catalogIdentity = computed(() =>
     ]),
 );
 watch(
-    catalogIdentity,
-    async () => {
+    [catalogIdentity, catalogRevision],
+    async ([identity], previous) => {
         const generation = ++catalogGeneration;
-        catalogModels.value = [];
+        // 同一接口的后台缓存刷新保留当前菜单，读取成功后原地替换；失败仍可使用旧选项。
+        // 只有接口身份变化才立即清空，防止其他地址/凭据的候选串入当前分组。
+        if (identity !== previous?.[0]) catalogModels.value = [];
         catalogLoading.value = false;
         const current = profile.value;
         if (!current?.catalogToken) return;
-        catalogLoading.value = true;
+        catalogLoading.value = !catalogModels.value.length;
         try {
             const models = await call<FetchedModel[]>('get_model_catalog', {
                 token: current.catalogToken,
@@ -548,6 +572,8 @@ async function fetchProfileModels(): Promise<void> {
         if (!disposed && identity === catalogIdentity.value) {
             catalogGeneration++;
             catalogModels.value = catalog.models;
+            // 自身拉取也会收到缓存通知；直接应用结果后须结束被世代隔离的旧缓存读取。
+            catalogLoading.value = false;
             if (!catalog.models.length) error.value = '接口未返回可用模型，可在设置中手动填写模型 ID。';
         }
     } catch (cause) {
