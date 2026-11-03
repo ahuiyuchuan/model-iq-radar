@@ -1,4 +1,26 @@
-# 测智雷达 v1.1.1 验证记录
+# 测智雷达 v1.1.2 验证记录
+
+## v1.1.2 发布前复查（2026-11-03）
+
+- 范围与规范：用户授权再次检查，无阻塞问题后提交、推送、带注释Tag及正式Release一并发布。核对 `fe2830c` 的中文分段提交消息、`v1.1.1` 注释Tag及GitHub正式发布说明，沿用“测智雷达 v<版本>”标题和单个Windows x64 EXE资产。本次复查未发现阻塞发布的功能问题；同步修正CONTRIBUTING中仍要求预览无滚动条的旧说明，区分常规作品与超大作品的放大滚动。
+- 版本与生成：`npm version 1.1.2 --no-git-tag-version --ignore-scripts` 更新npm清单与锁文件；同步Cargo/Tauri清单，Windows目标离线Cargo metadata更新根包锁版本。`node scripts/generate_notices.mjs` 收录37个前端包、315个crate；结构比对确认两份锁文件仅项目版本变动，第三方许可证正文不变，无依赖升级、配置或数据库迁移。README下载入口、使用手册、CHANGELOG及新增 `docs/release-notes/v1.1.2-zh.md` 同步。
+- 最终版本回归：v1.1.2下 `npm test -- --reporter=dot` 的341项/12文件，以及隔离MSVC/SDK环境 `run-build.ps1 -Action test` 的113＋18＋23共154项通过；`cargo fmt --check`、`run-build.ps1 -Action clippy` 全目标 `-D warnings`、Prettier和 `git diff --check` 通过。再次执行长响应Chromium专项，大源码加载、放大/收回、纵横滚动至尾部及文档释放通过，0页面错误/远程请求。
+- 生产资源与源码审计：最终dist执行 `node scripts/verify_pet_csp.mjs`，实际生产CSP、十二动作图集解码、待机动画、资源失败阻止保存及经典外观恢复通过，0页面错误。只读审计131份文本，严格UTF-8无BOM、无替换字符或凭据模式匹配，全部候选文件小于50 MiB；生产数据、凭据、EXE及临时验收脚本不进入源码提交。
+- 正式构建与交付：`run-build.ps1 -Action build` 完成Vue/TypeScript/Vite及Windows x64 release，Rust优化编译5分21秒；仅既有chunk体积和链接器导入库提示。`scripts/package_exe.ps1` 校验工程/文件/产品版本1.1.2、PE x64、构建输入新鲜度及复制前后SHA-256通过。唯一交付文件为 `release-artifacts/v1.1.2/Model-IQ-Radar-v1.1.2-Windows-x64.exe`，19,244,544字节，SHA-256 `4bc4cc594ff059a5010539231180884854172e8b8b745c393b132e5b43d2fba4`；保留旧版本及测试包，未启动正式应用。最终文字复查修正USER_GUIDE中残留的“超出容量”描述，明确预览失败仍保留完整原文。
+- 边界：保留下文已说明的真实内存耗尽、大于128 MiB单条历史压力、原生WebView2交互及多屏实机未覆盖范围；自动检查与测试包交付不代表已运行真实模型或SMTP。回退仍需考虑旧版容量策略，先导出重要长记录。
+
+## 长响应与同类容量拦截修复（2026-11-03）
+
+- 根因：截图错误来自 `api.rs` 的 2 MiB 接收中止分支；`git log -S '响应超过 2 MiB'` 与初始提交 `532f8a7` 确认限制从首版即存在。后续 SSE 原始字节还包含推理、事件封装及元数据，不能把总字节预算当作正常回答长度要求。本节更新当前边界，下文各版本验证记录保留当时事实。
+- 文件与行为：`api.rs` 完整接收两协议 JSON/SSE，读取缓冲仅在实际分配失败时报告内存不足；保留 EOF、共享期限、取消、唯一终态与原协议回退。`response_diagnostics.rs` 独立保存最多 2 MiB 失败前缀，网络完整与日志截断分开；先检查全部已收字节中的已知凭据，再裁剪，省略正文时立即释放原容量，不给后台任务保留整段长响应。SSE 注释同步取消过期的正文大小前提。
+- 同类问题：`discovery.rs` 移除模型列表 1 MiB 拦截及前 5000 项截取；`storage.rs` 移除单份缓存大小/数量拦截，本次完整目录可单独超过 16 MiB 清理预算，事务优先保留本次写入，旧缓存继续按预算和份数淘汰。历史移除单条 128 MiB 拒写，最新未过期的完整记录可单独超预算，旧记录按原条数/日期与预算清理。无 schema、配置、依赖或锁文件修改。
+- 预览：`htmlSandbox.ts`、`preview.rs` 移除 1 MiB 候选、2 MiB 文档及仓库总字节门槛；保留十六个并发会话及宿主销毁清理。`HtmlPreview.vue` 将渲染视口保持在 4096×8192 内，更大的页面由沙箱内部滚动，不再报错卸载。保留 CSP、来源/令牌验证、空文档/不完整文档拒绝、12 秒真正未就绪超时和重载；拒绝不安全整数尺寸。Markdown 长回答仍完整回退纯文本，不影响判定、复制和持久化。
+- 回归证据：修改实现前运行 `npm test -- --reporter=dot tests/html-answer.test.ts`，大文档和超大尺寸两项按预期失败，复现原问题。实现后 `npm test -- --reporter=dot` 的 341 项/12 文件通过。隔离 MSVC/SDK 环境 `C:/Users/Admin/.codex/tmp/model-iq-radar-mail-build/run-build.ps1 -Action test` 的 113＋18＋23 共154项通过，覆盖 >2 MiB JSON/SSE/元数据、正常 EOF、读取中断/取消/超时、诊断限额与前缀外凭据、6001 项模型 HTTP 拉取/落盘/重启、90000 项超预算缓存、累计 >16 MiB 预览和低预算下最新完整历史保留。旧集成测试要求拒绝 5001 项目录的断言已改为合法大目录持久化与非法句柄失败保护。
+- 浏览器：`node C:/tmp/model-iq-radar-large-response-qa-20261103.mjs` 使用真实 Vue/Chromium、回环 Vite 和独立 Blob 桥接，注入与原生一致的 CSP，验证 >2 MiB HTML 及放大/收回、12000px 高页面滚到 3808px、6000px 宽页面滚到 1904px，尾部内容均可见。关闭组件后准备/释放次数相等，0页面错误/远程请求；报告和6张截图在 `C:/tmp/model-iq-radar-large-response-qa-20261103/`，已查看大源码小预览和高页面尾部截图。验收脚本最初的临时路由匹配和 Vue 运行时模板用法已修正，不涉及产品源码缺陷。
+- 文档与检查：同步 README、USER_GUIDE、CHANGELOG、设置页预算说明及相关注释；TypeScript/Vue 使用 Prettier，Rust 使用 rustfmt。已执行 `npm run format:check`、USER_GUIDE 专项 Prettier、`git diff --check`，以及隔离 `run-build.ps1 -Action clippy` 全目标 `-D warnings`，均通过。Java/JVM/MyBatis 专属规范不适用于本 Vue/TypeScript/Rust 项目，沿用既有格式及手册通用要求。
+- 构建与交付：隔离 `run-build.ps1 -Action build` 完成 `npm run tauri -- build --no-bundle`，包含 Vue/TypeScript/Vite 检查及 Windows x64 release 编译（3分31秒）；仅既有大 chunk 和链接器导入库提示。`scripts/package_exe.ps1 -OutputDirectory release-artifacts/response-limit-fixes-test-20261103` 校验工程/文件版本 1.1.1、PE x64、应用输入新鲜度及复制前后摘要通过。测试 EXE 为 `release-artifacts/response-limit-fixes-test-20261103/Model-IQ-Radar-v1.1.1-Windows-x64.exe`，19,244,544 字节，SHA-256 `ad2edbc3c0b9a13a94787f22f275a9243f23375a8d460c4ee75570ff07fcd534`；保留原发布包，没有启动应用或发布新版本。本次20份源文件/测试/文档保持严格 UTF-8 无 BOM、LF，无替换字符，无锁文件变动。
+- 额外审计：模型 ID 格式/长度、配置备份 4 MiB、皮肤包 48 MiB/解码资源 64 MiB、并发预览十六份等是配置契约或独立导入/并发边界，未与模型回答接收复用，继续保留。历史列表 180 字符摘要仍能打开完整详情，Markdown 超长只改变显示方式；这些路径不裁剪持久化、复制或导出的回答。
+- 边界与回滚：完整响应、解析和沙箱仍使用进程内存，长度增加会增加实际内存占用；未执行真实内存耗尽、>128 MiB 单条历史的压力测试，历史超预算分支以可注入的小预算验证。未调用真实模型/SMTP、读写正式配置或凭据、启动正式桌面程序，也未执行原生 WebView2 滚动或多屏实机验收。回滚时一并恢复前后端并重新构建，无数据库迁移；旧程序会重新应用旧容量边界，重要长记录应先导出。
 
 ## v1.1.1 发布前检查（2026-11-02）
 

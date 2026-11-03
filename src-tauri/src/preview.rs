@@ -6,17 +6,15 @@ use tauri::{Manager, State, WebviewWindow};
 
 /// 不透明源只允许内联代码和内存媒体，禁止网络、IPC 和嵌套页面。
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
-const MAX_DOCUMENT: usize = 2 * 1024 * 1024;
 // 可见历史行与悬浮卡片共用仓库；保留有界容量，避免六行历史加一张卡片误报忙碌。
 const MAX_DOCUMENTS: usize = 16;
-const MAX_TOTAL: usize = 16 * 1024 * 1024;
 
 struct Document {
     owner: String,
     html: String,
 }
 
-/// 最多十六份/16 MiB；由前端卸载或宿主销毁释放，不设置运行/文档过期时长。
+/// 最多十六份并发文档；由前端卸载或宿主销毁释放，不按正文大小拒绝完整作品。
 /// 保留页面期间允许继续放大、收回；不承诺共享渲染线程的硬终止。
 #[derive(Default)]
 pub struct PreviewState {
@@ -45,7 +43,17 @@ pub fn prepare_html_preview(
     document: String,
     source: String,
 ) -> Result<String, String> {
-    let owner = window.label();
+    prepare_document(&state, window.label(), document, &source)
+}
+
+/// 在同一路径校验宿主、源文档和并发数量；独立于原生句柄以回归验证长文档及资源释放。
+/// 不截断源码，只有已安装导航保护的宿主能够把完整作品登记到临时仓库。
+fn prepare_document(
+    state: &PreviewState,
+    owner: &str,
+    document: String,
+    source: &str,
+) -> Result<String, String> {
     if !matches!(owner, "widget" | "settings")
         || !state
             .secured
@@ -57,24 +65,18 @@ pub fn prepare_html_preview(
     {
         return Err("沙箱安全设置尚未就绪，无法运行预览。".into());
     }
-    if document.is_empty() || document.len() > MAX_DOCUMENT {
-        return Err("HTML 文档为空或超过预览容量。".into());
+    if document.is_empty() {
+        return Err("HTML 文档为空。".into());
     }
-    if source.is_empty() || source.len() > 1024 * 1024 {
-        return Err("HTML 为空或超过 1 MiB 预览上限。".into());
+    if source.trim().is_empty() {
+        return Err("HTML 为空。".into());
     }
-    if let Some(issue) = crate::html::preview_issue(&source) {
+    if let Some(issue) = crate::html::preview_issue(source) {
         return Err(issue.into());
     }
     let mut documents = state.documents.lock().map_err(|_| "预览状态不可用。")?;
-    if documents.len() >= MAX_DOCUMENTS
-        || documents
-            .values()
-            .map(|item| item.html.len())
-            .sum::<usize>()
-            + document.len()
-            > MAX_TOTAL
-    {
+    // 只限制同时存活的预览数量；单篇作品及总正文大小不再触发容量错误。
+    if documents.len() >= MAX_DOCUMENTS {
         return Err("预览正在忙碌，请关闭其他预览后重试。".into());
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -225,6 +227,40 @@ pub fn secure(window: &WebviewWindow) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真正准备路径接受超过旧单篇/总字节预算的文档，权限、空内容与关闭清理仍有效。
+    #[test]
+    fn large_documents_keep_full_source_and_owner_lifecycle() {
+        let state = PreviewState::default();
+        let source = format!("<div>{}</div>", "中".repeat(800_000));
+        assert!(prepare_document(&state, "widget", source.clone(), &source).is_err());
+        state.secured.lock().unwrap().insert("widget".into(), true);
+        assert!(prepare_document(&state, "widget", "".into(), &source).is_err());
+        assert!(prepare_document(&state, "widget", source.clone(), "<div>").is_err());
+        for _ in 0..8 {
+            let url = prepare_document(&state, "widget", source.clone(), &source).unwrap();
+            assert!(allowed(&state, "widget", &url));
+            assert!(!allowed(&state, "settings", &url));
+            assert_eq!(
+                state.documents.lock().unwrap()[document_id(&url).unwrap()].html,
+                source
+            );
+        }
+        assert!(
+            state
+                .documents
+                .lock()
+                .unwrap()
+                .values()
+                .map(|doc| doc.html.len())
+                .sum::<usize>()
+                > 16 * 1024 * 1024
+        );
+        state.release_owner("widget");
+        assert!(state.documents.lock().unwrap().is_empty());
+        assert!(prepare_document(&state, "widget", source.clone(), &source).is_err());
+    }
+
     #[test]
     fn documents_are_owner_bound() {
         let state = PreviewState::default();

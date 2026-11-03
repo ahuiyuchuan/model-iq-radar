@@ -8,7 +8,7 @@ import taskLists from 'markdown-it-task-lists';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
 
-/** 超长回答退回纯文本，避免 2 MiB 响应在同步解析/高亮时长期阻塞桌面交互。 */
+/** 超长回答退回完整纯文本，避免同步解析/高亮阻塞桌面交互；不限制请求、保存或复制长度。 */
 const MAX_MARKDOWN_LENGTH = 200_000;
 const MAX_HIGHLIGHT_LENGTH = 20_000;
 

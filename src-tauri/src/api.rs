@@ -309,7 +309,7 @@ pub async fn complete(
 
 /// 正式测试的可选本地取证入口；None 不写文件，已有调用方沿用 complete。
 /// Responses 异常保留原始字节；两种协议逐次保存纯元数据，以本地 UUID 关联回退，不增加请求头。
-/// 不额外请求、不启用回退、不改变成功标准；后台写入不等待磁盘，EOF/2 MiB 边界保持不变。
+/// 不额外请求、不启用回退、不改变成功标准；后台写入不等待磁盘，诊断限额不约束正常响应。
 pub async fn complete_with_diagnostics(
     profile: &ModelProfile,
     rule: &TestRule,
@@ -391,7 +391,7 @@ struct AttemptDiagnostics<'a> {
     attempt_index: u8,
 }
 
-/// 仅执行所选协议一次，不递归回退；总超时包含响应读取，单次正文上限 2 MiB。
+/// 仅执行所选协议一次，不递归回退；总超时包含完整正文读取，不按固定字节数中止正常响应。
 async fn complete_once(
     profile: &ModelProfile,
     rule: &TestRule,
@@ -446,11 +446,10 @@ async fn complete_once(
         trace
     });
     // 正文缓冲在 select 外持有，取消/超时丢弃网络 future 后仍能保存已经收到的部分。
-    // 不为诊断读取更多字节；与原来一样，超过既有 2 MiB 限制即停止并返回原错误类型。
+    // 完整响应用于协议解析；诊断模块仅截取落盘副本，不能让日志预算中断正常模型请求。
     let mut bytes = Vec::new();
     let mut received_body_bytes = 0_u64;
     let mut body_complete = false;
-    let mut body_truncated = false;
     let mut json_error = None;
     let mut sse_error = None;
     let mut response_metadata = None;
@@ -564,15 +563,14 @@ async fn complete_once(
                         }
                     }
                     received_body_bytes = received_body_bytes.saturating_add(chunk.len() as u64);
-                    let remaining = BODY_LIMIT_BYTES.saturating_sub(bytes.len());
-                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                    if chunk.len() > remaining {
-                        body_truncated = true;
+                    // 仅实际无法分配内存时停止，避免将保护性字节预算变成模型输出长度限制。
+                    if bytes.try_reserve(chunk.len()).is_err() {
                         return with_metadata(Completion::failure(
-                            "response_too_large",
-                            "响应超过 2 MiB，已停止读取，未执行判定。",
+                            "response_memory",
+                            "可用内存不足，无法继续读取完整响应，未执行判定。",
                         ));
                     }
+                    bytes.extend_from_slice(&chunk);
                 }
                 Ok(None) => {
                     body_complete = true;
@@ -595,7 +593,7 @@ async fn complete_once(
         if let Some(trace) = transport.as_mut() {
             trace.stage = "parsing_response".into();
         }
-        // 仍先读取到 EOF：中断、超时或超限不能靠已收到的增量/结束片段绕过完整性检查。
+        // 仍先读取到 EOF：中断或超时不能靠已收到的增量/结束片段绕过完整性检查。
         // 网关忽略 stream:true 返回完整 JSON 时继续兼容；不改用非流式重发请求。
         let event_stream = event_stream || responses_sse::is_event_stream(None, &bytes);
         // 完整 JSON 始终保留原兼容路径，即使网关误标 Content-Type 也不无故破坏旧行为。
@@ -672,7 +670,8 @@ async fn complete_once(
         trace.elapsed_ms = attempt_started.elapsed().as_millis() as u64;
         trace.received_body_bytes = received_body_bytes;
         trace.body_complete = body_complete;
-        trace.body_truncated = body_truncated;
+        // 接收正文不再按大小裁剪；原始诊断文件的前缀截断单独记录在配对元数据中。
+        trace.body_truncated = false;
         trace.error_kind = result.error_kind.clone();
         trace.outcome = if result.cancelled {
             "cancelled"
@@ -712,7 +711,7 @@ async fn complete_once(
                     saved_body_bytes: bytes.len(),
                     body_limit_bytes: BODY_LIMIT_BYTES,
                     body_complete,
-                    body_truncated,
+                    body_truncated: false,
                     json_error,
                     sse_error,
                     body_file: None,

@@ -1,4 +1,4 @@
-//! 核心边界回归：请求隔离、完整性、取消、大小限制和 SQLite 规则快照。
+//! 核心边界回归：请求隔离、完整性、取消、长响应和 SQLite 规则快照。
 //! 仅使用本机随机端口与临时数据库，不访问第三方模型。作者：ahui。
 
 use model_probe_lib::{
@@ -269,18 +269,16 @@ async fn valid_json_wins_wrong_sse_mime_and_chat_rejects_responses_events() {
     assert_eq!(result.error_kind.as_deref(), Some("invalid_event_stream"));
 }
 
-/// 两种流即使带完整结束标记也必须读完 HTTP；错误长度、超限、超时与取消不能成功。
+/// 两种流即使带完整结束标记也必须读完 HTTP；错误长度、超时与取消不能成功。
 #[tokio::test]
-async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
+async fn sse_transport_boundaries_never_accept_partial_body() {
     for (protocol, stream) in [
         ("responses", synthetic_sse()),
         ("chat_completions", synthetic_chat_sse()),
     ] {
         let interrupted = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}", stream.len() + 100);
-        let oversized = format!("{stream}:{}\n\n", "x".repeat(2 * 1024 * 1024));
         for (wire, hold_open, timeout, cancel, expected) in [
         (interrupted, Duration::ZERO, 10, false, "read_interrupted"),
-        (http_body(&oversized, "text/event-stream"), Duration::ZERO, 10, false, "response_too_large"),
         (format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"), Duration::from_secs(2), 1, false, "timeout"),
         (format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{stream}"), Duration::from_secs(2), 10, true, "cancelled"),
     ] {
@@ -297,6 +295,74 @@ async fn sse_transport_boundaries_never_accept_partial_or_oversized_body() {
         assert!(result.answer.is_empty());
         assert_eq!(result.attempted_modes, [protocol]);
     }
+    }
+}
+
+/// 长正文和大量 SSE 元数据都必须读到 EOF 后正常解析；大小不能触发额外收费回退。
+#[tokio::test]
+async fn large_json_and_sse_responses_preserve_complete_answers() {
+    let answer = format!("{}\n尾部判定答案", "长回答".repeat(250_000));
+    for protocol in ["responses", "chat_completions"] {
+        let value = if protocol == "responses" {
+            json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":answer}]}]})
+        } else {
+            json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":answer}}]})
+        };
+        let stream = if protocol == "responses" {
+            format!(
+                "event: response.completed\ndata: {}\n\n",
+                json!({"type":"response.completed","response":value})
+            )
+        } else {
+            format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"id":"large","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":answer},"finish_reason":null}]}),
+                json!({"id":"large","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+            )
+        };
+        for (body, mime, expected) in [
+            (value.to_string(), "application/json", answer.as_str()),
+            (stream, "text/event-stream", answer.as_str()),
+            (
+                format!(
+                    "{}:{}\n\n",
+                    if protocol == "responses" {
+                        synthetic_sse()
+                    } else {
+                        synthetic_chat_sse()
+                    },
+                    "x".repeat(2 * 1024 * 1024)
+                ),
+                "text/event-stream",
+                if protocol == "responses" {
+                    "21颗"
+                } else {
+                    "  21颗\n"
+                },
+            ),
+        ] {
+            assert!(body.len() > 2 * 1024 * 1024);
+            let (base, requests) = wire_fixture(vec![(
+                http_body(&body, mime),
+                Duration::ZERO,
+                Duration::ZERO,
+            )]);
+            let mut selected = profile(base);
+            selected.interface_mode = protocol.into();
+            selected.protocol_fallback_enabled = true;
+            let result = api::complete(
+                &selected,
+                &TestRule::default(),
+                "",
+                10,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert!(result.error.is_none(), "{protocol}: {:?}", result.error);
+            assert_eq!(result.answer, expected);
+            assert_eq!(result.attempted_modes, [protocol]);
+            assert_eq!(requests.try_iter().count(), 1);
+        }
     }
 }
 
@@ -372,7 +438,7 @@ async fn response_diagnostics_capture_original_bytes_and_do_not_poison_next_requ
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// 完整语法错误、短读与超限的标志必须不同；保存量与原始字节均可核对，不能伪装完整正文。
+/// 诊断前缀截断独立于网络完整性；大正文须完成解析，保存量仍受日志预算约束。
 #[tokio::test]
 async fn diagnostic_limits_and_read_completeness_are_explicit() {
     let _test_guard = DIAGNOSTIC_TEST_LOCK.lock().await;
@@ -380,13 +446,7 @@ async fn diagnostic_limits_and_read_completeness_are_explicit() {
     for (body, declared_length, expected, complete, truncated) in [
         ("{broken".to_owned(), 7, "invalid_json", true, false),
         ("{partial".to_owned(), 100, "read_interrupted", false, false),
-        (
-            large.clone(),
-            large.len(),
-            "response_too_large",
-            false,
-            true,
-        ),
+        (large.clone(), large.len(), "invalid_json", true, true),
     ] {
         let directory = std::env::temp_dir().join(format!("probe-http-limit-{}", Uuid::new_v4()));
         let wire = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}");
@@ -410,6 +470,7 @@ async fn diagnostic_limits_and_read_completeness_are_explicit() {
         let saved = std::fs::read(directory.join(metadata["body_file"].as_str().unwrap())).unwrap();
         assert_eq!(saved, body.as_bytes()[..body.len().min(2 * 1024 * 1024)]);
         assert_eq!(metadata["saved_body_bytes"], saved.len());
+        assert_eq!(metadata["received_body_bytes"], body.len());
         if expected == "invalid_json" {
             assert_eq!(metadata["json_error"]["scope"], "response_body");
             assert_eq!(metadata["json_error"]["line"], 1);

@@ -160,7 +160,7 @@ fn get_snapshot(
     let store = lock(&state.store)?;
     // 悬浮窗优先读取当前条件匹配的一条最近记录；无匹配项时保留分组最近时间并提示重测。
     // 设置页改用独立摘要/正文分页；仅明确导出或旧调用方才显式请求完整历史，
-    // 避免自动测试每次广播时反复序列化最多 128 MiB 的原始回答。
+    // 避免自动测试每次广播时反复序列化全部长回答。
     let condition_fingerprints: std::collections::HashMap<_, _> = store
         .config
         .profiles

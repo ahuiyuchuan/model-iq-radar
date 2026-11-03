@@ -18,7 +18,7 @@
 
 </div>
 
-> **v1.1.1：修复 HTML 预览误报超时与设置刷新后卡片模型选项不更新。** [查看发布说明](docs/release-notes/v1.1.1-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.1/Model-IQ-Radar-v1.1.1-Windows-x64.exe)
+> **v1.1.2：移除正常长响应的大小拦截，完善大页面预览、模型目录与历史保存。** [查看发布说明](docs/release-notes/v1.1.2-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.2/Model-IQ-Radar-v1.1.2-Windows-x64.exe)
 
 ## 为什么选择测智雷达？
 
@@ -113,13 +113,13 @@
 
 ## 下载安装
 
-当前正式版为 **v1.1.1**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.1) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.1/Model-IQ-Radar-v1.1.1-Windows-x64.exe)**。
+当前正式版为 **v1.1.2**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.2) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.2/Model-IQ-Radar-v1.1.2-Windows-x64.exe)**。
 
 下载后直接运行，无需安装或解压。系统需安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；使用远程模型时需能访问配置的 API，费用由对应服务商收取。
 
 更新时完全退出旧版后运行新版，配置、历史和系统凭据继续沿用，建议先备份完整应用数据目录。更换 EXE 路径后，已启用自启的用户应重新设置自启路径。GitHub 自动生成的 Source code 归档是源码，不是可执行程序。
 
-本版修复测试后 HTML 预览误报加载超时，以及设置重新拉取模型后卡片选项不更新；保留当前选中模型、原有测试判定与桌宠交互。详情见 [v1.1.1 发布说明](docs/release-notes/v1.1.1-zh.md)。
+本版移除正常响应的 2 MiB 门槛及模型列表、HTML 预览的同类拦截；超大页面可放大滚动，最新完整历史允许单独超出清理预算。保留当前模型选择、原有判定、超时、取消与桌宠交互。详情见 [v1.1.2 发布说明](docs/release-notes/v1.1.2-zh.md)。
 
 ## 快速开始
 
@@ -184,7 +184,7 @@ SMTP 默认填 `smtp.qq.com`、465 / TLS，**通知总开关默认关闭**。支
 
 ### 流式响应与本地诊断
 
-Responses 和 Chat Completions 均主动发送 `stream: true`，界面仍在完整响应后展示结果。Responses 从唯一 `response.completed` 提取最终助手正文；Chat Completions 按同一响应的 `delta.content` 还原正文，并核对 `finish_reason: stop` 与 `[DONE]`，不混入推理、工具参数或其他候选。网关实际返回完整 JSON 时沿用原解析，不另发非流式请求。仍需在总超时内读到 EOF，整段响应不超过 **2 MiB**；中断、超限、损坏、取消等情况不判成功。
+Responses 和 Chat Completions 均主动发送 `stream: true`，界面仍在完整响应后展示结果。Responses 从唯一 `response.completed` 提取最终助手正文；Chat Completions 按同一响应的 `delta.content` 还原正文，并核对 `finish_reason: stop` 与 `[DONE]`，不混入推理、工具参数或其他候选。网关实际返回完整 JSON 时沿用原解析，不另发非流式请求。正常响应不设固定字节上限，长推理与较大的 HTML / SVG 均完整读取；仍需在用户设置的总超时内读到 EOF，中断、损坏、取消等情况不判成功。实际可接收长度受可用内存约束，诊断文件的保存限额不限制测试。
 
 v1.0.6 对 Responses 增加空前导兼容：仅在前导生命周期、空消息及空文本事件全部通过结构/关联校验时，允许一次新的 `response.created` 切换 ID；任何语义输出、未知结构、终态或第二次切换均不适用。Chat 暂无失败原文，仍严格拒绝 ID 变化，补齐诊断后再依据真实证据处理；不降低思考强度或改变回退设置。
 
@@ -223,14 +223,14 @@ v1.0.6 对 Responses 增加空前导兼容：仅在前导生命周期、空消�
 
 配置与历史位于 `%APPDATA%\com.ahui.model-probe\probe.db`，API Key 和邮箱授权码在 Windows 凭据管理器；免安装不等于数据随 EXE 保存。迁移前先备份完整数据目录，配置可通过设置导出 / 导入，历史单独导出；配置备份不含凭据，新电脑需要重新填写，邮箱导入后关闭。
 
-当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.1 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
+当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.2 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
 
 </details>
 
 <details>
 <summary><strong>历史保留与“清除所有数据”有什么区别？</strong></summary>
 
-默认保留最近 **500 条**；可设置最多 5000 条及 1—3650 天，另有 128 MiB 历史 JSON 正文上限，各限制同时生效。缩短保留范围会先预览并确认，清理后 SQLite 文件不保证立即缩小。
+默认保留最近 **500 条**；可设置最多 5000 条及 1—3650 天，以 128 MiB 历史 JSON 正文预算清理旧记录，最新未过期的完整记录可单独超出容量预算。数量与日期设置继续生效。缩短保留范围会先预览并确认，清理后 SQLite 文件不保证立即缩小。
 
 “恢复所有设置”和“清除所有数据”按相同规则工作：选择接口、规则、悬浮设置、历史、邮箱中的分类，可全选；最终确认后立即清空所选分类并恢复初始状态。接口 / 邮箱类别包含对应系统凭据，未勾选类别保留。历史页的普通“清空”保留通知恢复依据；分类清空历史会同时重置该依据。操作范围见使用手册，清空前请备份。
 

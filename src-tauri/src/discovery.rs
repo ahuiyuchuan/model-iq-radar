@@ -76,7 +76,7 @@ pub struct ModelCatalog {
     pub models: Vec<FetchedModel>,
 }
 
-/// GET /models，仅列表请求，无模型推理；15秒总体超时、1MiB上限、不重定向、不重试。
+/// GET /models，仅列表请求，无模型推理；15秒总体超时、不重定向、不重试，不按大小丢弃目录。
 pub async fn fetch_models(base: &str, key: &str) -> Result<Vec<FetchedModel>, String> {
     let address = models_endpoint(base)?;
     let work = async {
@@ -108,8 +108,8 @@ pub async fn fetch_models(base: &str, key: &str) -> Result<Vec<FetchedModel>, St
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| "模型列表读取中断。")? {
-            if bytes.len() + chunk.len() > 1024 * 1024 {
-                return Err("模型列表超过 1 MiB，已停止读取。".into());
+            if bytes.try_reserve(chunk.len()).is_err() {
+                return Err("可用内存不足，无法读取完整模型列表。".into());
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -129,7 +129,8 @@ fn parse_models(bytes: &[u8], key: &str) -> Result<Vec<FetchedModel>, String> {
         .or_else(|| value.get("models").and_then(Value::as_array))
         .ok_or("模型列表缺少 data 或 models 数组。")?;
     let mut models = BTreeMap::new();
-    for item in items.iter().take(5000) {
+    // 聚合服务目录可能超过五千项；按全部项目校验和去重，不静默丢弃靠后的合法模型。
+    for item in items {
         let Some(id) = item
             .get("id")
             .and_then(Value::as_str)
@@ -349,9 +350,16 @@ mod tests {
             io::{Read, Write},
             net::TcpListener,
         };
-        for (status, body, success) in [
-            ("200 OK", r#"{"data":[{"id":"one"}]}"#, true),
-            ("401 Unauthorized", "fixture-secret", false),
+        // 真正 HTTP 路径同时超过旧 1 MiB 和五千项边界，尾部模型必须仍可选择。
+        let large = serde_json::json!({"data": (0..6001).map(|index| serde_json::json!({
+            "id": format!("model-{index:05}"), "metadata": "x".repeat(200)
+        })).collect::<Vec<_>>()})
+        .to_string();
+        assert!(large.len() > 1024 * 1024);
+        for (status, body, expected_count) in [
+            ("200 OK", r#"{"data":[{"id":"one"}]}"#.to_owned(), Some(1)),
+            ("200 OK", large, Some(6001)),
+            ("401 Unauthorized", "fixture-secret".to_owned(), None),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -368,9 +376,17 @@ mod tests {
                 stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
             });
             let result = fetch_models(&base, "fixture-secret").await;
-            assert_eq!(result.is_ok(), success);
-            if let Err(error) = result {
-                assert!(!error.contains("fixture-secret"));
+            match result {
+                Ok(models) => {
+                    assert_eq!(Some(models.len()), expected_count);
+                    if models.len() > 1 {
+                        assert_eq!(models.last().unwrap().id, "model-06000");
+                    }
+                }
+                Err(error) => {
+                    assert!(expected_count.is_none());
+                    assert!(!error.contains("fixture-secret"));
+                }
             }
             worker.join().unwrap();
         }

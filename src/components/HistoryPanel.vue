@@ -200,7 +200,7 @@ const filteredHistory = computed(() => {
             )
                 return false;
         }
-        // 历史正文可达 128 MiB；没有搜索词时不能为了匹配空串逐条复制、转小写整段回答。
+        // 历史正文通常按 128 MiB 预算保留，单条可更长；空搜索不能逐条复制、转小写整段回答。
         return (
             !query ||
             (props.remote

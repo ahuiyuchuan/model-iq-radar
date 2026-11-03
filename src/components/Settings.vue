@@ -1927,8 +1927,8 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         <div>
                             <label for="history-retention-days">历史最多保留天数</label>
                             <p>
-                                留空不按日期清理；保存前预览影响并确认，数量、日期及 128 MiB
-                                上限以先触发者为准。
+                                留空不按日期清理；保存前预览影响并确认，按数量、日期及 128 MiB
+                                预算清理旧记录，最新完整记录可单独超出容量预算。
                             </p>
                         </div>
                         <div class="number-control">

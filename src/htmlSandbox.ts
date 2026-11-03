@@ -57,12 +57,11 @@ export interface PreparedPreview {
 
 /**
  * 包装原始 HTML/SVG；不改写原始历史，也不加载截图或其他第三方运行库。
- * @param source 完整单个候选，UTF-8 不超过 1 MiB；无效内容拒绝，不截断。
+ * @param source 完整单个候选，不按字节数裁剪或拒绝；空白内容拒绝，原文始终保留。
  * @returns 随机文档 URL/消息令牌，调用方负责幂等释放。
  */
 export async function preparePreview(source: string): Promise<PreparedPreview> {
-    if (!source.trim() || new TextEncoder().encode(source).length > 1024 * 1024)
-        throw new Error('HTML 为空或超过 1 MiB 预览上限，原始回答仍完整保留。');
+    if (!source.trim()) throw new Error('HTML 为空，原始回答仍完整保留。');
     const token = crypto.randomUUID();
     // 可信引导先于模型代码执行；序列化只用于生成脚本文本，不把源码插入宿主 DOM。
     const bootstrap = `(() => {
@@ -113,10 +112,20 @@ export async function preparePreview(source: string): Promise<PreparedPreview> {
                 afterLayout(() => {
                     const root = document.documentElement;
                     const body = document.body;
-                    send('dimensions', {
+                    const dimensions = {
                         width: Math.ceil(Math.max(${HTML_VIEWPORT.width}, root.scrollWidth, body?.scrollWidth || 0)),
                         height: Math.ceil(Math.max(${HTML_VIEWPORT.height}, root.scrollHeight, body?.scrollHeight || 0))
-                    });
+                    };
+                    // 超大作品使用有界视口内滚动，不因页面尺寸终止预览；放大后可操作完整内容。
+                    // 只放开根文档滚动，不放宽 CSP、来源校验或创建无界的合成画布。
+                    if (dimensions.width > ${HTML_MAX_VIEWPORT.width} || dimensions.height > ${HTML_MAX_VIEWPORT.height}) {
+                        root.style.setProperty('overflow', 'auto', 'important');
+                        body?.style.setProperty('overflow', 'visible', 'important');
+                        document.head.append(Object.assign(document.createElement('style'), {
+                            textContent: 'html::-webkit-scrollbar{display:block!important}'
+                        }));
+                    }
+                    send('dimensions', dimensions);
                     // 先让宿主更新有界视口再测内容位置，避免居中布局在扩展前后产生坐标偏移。
                     afterLayout(() => {
                         send('content', measureContent());

@@ -338,18 +338,34 @@ fn model_catalog_persists_isolates_endpoints_and_updates_atomically() {
                 .id,
             "second"
         );
-        let too_big = vec![models[0].clone(); 5001];
+        // 超过旧条目数及字节门槛的完整目录应持久化；非法句柄失败仍不能覆盖已提交结果。
+        let large: Vec<_> = serde_json::from_value(json!((0..6001)
+            .map(|index| json!({
+                "id": format!("{index:05}-{}", "m".repeat(180)), "ownedBy": null
+            }))
+            .collect::<Vec<_>>()))
+        .unwrap();
+        assert!(serde_json::to_vec(&large).unwrap().len() > 1024 * 1024);
+        store
+            .save_model_catalog("fixture-catalog", "https://example.com/v1/models", &large)
+            .unwrap();
         assert!(store
-            .save_model_catalog("fixture-catalog", "https://example.com/v1/models", &too_big)
+            .save_model_catalog("", "https://example.com/v1/models", &models)
             .is_err());
         assert_eq!(
             store
                 .model_catalog("fixture-catalog", "https://example.com/v1/models")
-                .unwrap()[0]
-                .id,
-            "second"
+                .unwrap()
+                .len(),
+            6001
         );
     }
+    let restored = Store::open(&path)
+        .unwrap()
+        .model_catalog("fixture-catalog", "https://example.com/v1/models")
+        .unwrap();
+    assert_eq!(restored.len(), 6001);
+    assert!(restored.last().unwrap().id.starts_with("06000-"));
     let connection = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(
         connection

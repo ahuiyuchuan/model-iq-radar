@@ -193,17 +193,17 @@ function receive(event: MessageEvent): void {
         if (
             typeof width !== 'number' ||
             typeof height !== 'number' ||
-            !Number.isInteger(width) ||
-            !Number.isInteger(height)
+            !Number.isSafeInteger(width) ||
+            !Number.isSafeInteger(height)
         )
             return;
         if (width < HTML_VIEWPORT.width || height < HTML_VIEWPORT.height) return;
-        if (width > HTML_MAX_VIEWPORT.width || height > HTML_MAX_VIEWPORT.height) {
-            fail('HTML 页面尺寸超过预览上限，请复制原始回答查看。');
-            return;
-        }
-        viewport.value = { width, height };
-        content.value = { x: 0, y: 0, width, height };
+        // 画布预算只约束渲染尺寸；更大的作品由沙箱根文档滚动展示，不能直接报错移除 iframe。
+        viewport.value = {
+            width: Math.min(width, HTML_MAX_VIEWPORT.width),
+            height: Math.min(height, HTML_MAX_VIEWPORT.height),
+        };
+        content.value = { x: 0, y: 0, ...viewport.value };
         layout();
         return;
     }
@@ -325,7 +325,7 @@ onBeforeUnmount(() => {
                             ref="frame"
                             :src="url"
                             sandbox="allow-scripts"
-                            scrolling="no"
+                            scrolling="auto"
                             referrerpolicy="no-referrer"
                             title="HTML 沙箱效果"
                             @load="frameLoaded"

@@ -32,7 +32,7 @@ npm run tauri -- build --no-bundle
 
 邮件图标为已提交的 PNG，常规构建不需要图像依赖。需要重新生成时，在 `npm ci` 后准备已安装的 `sharp`，执行 `node scripts/generate_mail_assets.mjs [sharp 模块绝对目录]`；省略路径时从当前环境解析 `sharp`。脚本仅将现有 Lucide 图标写入 `src-tauri/assets/mail` 白名单，不联网、不改第三方原文。邮件模板位于 `src-tauri/src/notifications/template.rs`，采用内联样式、表格和 CID 图标；所有记录字段必须安全转义，完整回答不得截断或渲染成 HTML。设置 `MODEL_PROBE_EMAIL_PREVIEW_DIR` 后执行 Rust 测试，可将虚构记录的 HTML/EML 导出到指定 QA 目录；这条路径仅在测试代码中使用，不会发信或读取正式凭据。须以真实 MIME 中的 CID 附件预览并核对长内容与窄屏，不把浏览器预览等同于 Outlook/Gmail 实际投递验证。
 
-HTML 预览采用页面内 iframe。组件回归在 `tests/html-answer.test.ts`；桌面验收必须用独立 identifier、虚构数据库和模型，避免读取正式数据。验证有界画布缩放、无滚动条、HTML 悬停、收起裁剪、页内放大、Escape/焦点恢复，以及列表实时动画不弹出额外窗口。
+HTML 预览采用页面内 iframe。组件回归在 `tests/html-answer.test.ts`；桌面验收必须用独立 identifier、虚构数据库和模型，避免读取正式数据。验证有界视口缩放、常规作品无滚动条、超大作品放大后可滚动到末尾、HTML 悬停、收起裁剪、页内放大、Escape/焦点恢复，以及列表实时动画不弹出额外窗口。
 
 HTML 引导正常等待两帧布局，每阶段 200ms 定时兜底，字体就绪最多等待 500ms；所有完成路径互斥，防止不可见 iframe 的绘制帧暂停阻断 ready。测试应执行实际生成的引导脚本，并覆盖暂停帧、未完成字体和迟到回调；12秒真正未就绪的超时、文档释放及消息令牌校验仍由原组件负责。
 

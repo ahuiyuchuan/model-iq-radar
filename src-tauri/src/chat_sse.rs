@@ -1,5 +1,5 @@
 //! Chat Completions SSE 解析：只还原同一响应、index=0 的助手正文，不混入推理或工具参数。
-//! 调用方须先在共享期限和 2 MiB 上限内读到 EOF；原始字节不改写，不执行模型指令。
+//! 调用方须先在共享期限内读到 EOF；不按固定字节预算中止响应，不改写原始字节或执行模型指令。
 //! 返回兼容既有 parse_completion 的对象，继续使用原来的完整性、空回答与判定规则。作者：ahui。
 
 use crate::responses_sse::StreamFailure;

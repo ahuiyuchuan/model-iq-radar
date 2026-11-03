@@ -13,7 +13,7 @@ use std::{
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-/// 与正式请求的既有正文预算一致；只保存收到的前缀，不为取证继续读取超限响应。
+/// 只约束失败诊断的磁盘副本；正常请求须完整读取和解析，不受此字节预算影响。
 pub const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// 原始响应与 transport 子目录各最多二十组；清理只识别本模块文件，不处理其他用户文件。
 const MAX_RECORDS: usize = 20;
@@ -54,6 +54,7 @@ pub struct TransportDiagnostic {
     pub request_id: Option<String>,
     pub received_body_bytes: u64,
     pub body_complete: bool,
+    /// 仅表示接收阶段裁剪；诊断副本的截断标记位于 ResponseDiagnostic，不能混为读取失败。
     pub body_truncated: bool,
     /// success 只表示请求/协议解析成功，文字是否降智仍由现有业务规则判定。
     pub outcome: String,
@@ -279,6 +280,7 @@ pub struct ResponseDiagnostic {
     pub saved_body_bytes: usize,
     pub body_limit_bytes: usize,
     pub body_complete: bool,
+    /// 已收到的正文是否被诊断预算裁剪；可与 body_complete=true 同时成立。
     pub body_truncated: bool,
     pub json_error: Option<JsonParseError>,
     pub sse_error: Option<SseParseError>,
@@ -323,10 +325,19 @@ pub fn save_in_background(directory: &Path, mut diagnostic: ResponseDiagnostic, 
             .windows(key.len())
             .any(|window| window == key.as_bytes())
     {
-        diagnostic.body.clear();
+        // clear 会保留原 Vec 容量；立即释放被省略的长响应，后台只携带元数据。
+        diagnostic.body = Vec::new();
         diagnostic.saved_body_bytes = 0;
         diagnostic.body_omission_reason = Some("known_request_credential_in_response");
     }
+    // 先检查全部已收字节中的凭据，再裁剪日志副本，防止密钥位于前缀之外时漏掉省略标记。
+    // 入队前复制有界前缀，使后台任务不持有长响应 Vec 的原始容量；原解析结果不受影响。
+    if diagnostic.body.len() > BODY_LIMIT_BYTES {
+        diagnostic.body = diagnostic.body[..BODY_LIMIT_BYTES].to_vec();
+        diagnostic.body_truncated = true;
+    }
+    diagnostic.saved_body_bytes = diagnostic.body.len();
+    diagnostic.body_limit_bytes = BODY_LIMIT_BYTES;
     let Ok(permit) = PENDING_WRITES.try_acquire() else {
         eprintln!("响应诊断队列已满；原测试结果保留。");
         return;
@@ -585,9 +596,11 @@ mod tests {
     async fn known_key_is_omitted_without_rewriting_or_copying_credentials() {
         let _test_guard = BACKGROUND_TEST_LOCK.lock().await;
         let directory = Directory::new();
+        // 凭据故意放在保存前缀之外，避免先截日志再检测导致整份响应省略规则失效。
+        let body = format!("{}fixture-only-key", "x".repeat(BODY_LIMIT_BYTES + 1));
         save_in_background(
             &directory.0,
-            diagnostic(b"echo fixture-only-key"),
+            diagnostic(body.as_bytes()),
             "fixture-only-key",
         );
         let _drained = PENDING_WRITES.acquire_many(4).await.unwrap();
@@ -597,7 +610,7 @@ mod tests {
             "known_request_credential_in_response"
         );
         assert_eq!(metadata["saved_body_bytes"], 0);
-        assert_eq!(metadata["received_body_bytes"], 21);
+        assert_eq!(metadata["received_body_bytes"], body.len());
         assert_eq!(metadata["body_file"], json!(null));
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
         assert!(!metadata.to_string().contains("fixture-only-key"));

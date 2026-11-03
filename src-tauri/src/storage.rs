@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::path::Path;
 
 /// 限制保留的历史 JSON 正文总字节数；SQLite 已分配页面/WAL 不等于逻辑正文大小。
-/// 128 MiB 与 5000 条硬上限同时生效，避免长回答使常驻窗口占用失控。
+/// 128 MiB 为清理预算，与 5000 条上限同时生效；最新一条未过期的完整记录允许单独超出预算。
 pub const HISTORY_STORAGE_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 pub const HISTORY_HARD_MAX_RECORDS: u64 = 5000;
 
@@ -65,7 +65,7 @@ fn cleanup_plan(connection: &Connection, preferences: &Preferences) -> Result<Cl
     )
 }
 
-/// 注入时刻与字节预算供确定性回归验证；生产入口始终使用当前 UTC 与固定硬上限。
+/// 注入时刻与字节预算供确定性回归验证；生产入口始终使用当前 UTC 与固定清理预算。
 fn cleanup_plan_at(
     connection: &Connection,
     preferences: &Preferences,
@@ -112,7 +112,12 @@ fn cleanup_plan_at(
             None => false,
         };
         let bytes = payload.len() as u64;
-        if !expired && plan.preview.remaining_bytes.saturating_add(bytes) > storage_limit {
+        // 已收完的长回答不能因单条超过预算而立即消失；至少保留最新未过期记录，再淘汰旧记录。
+        // 用户设置的日期与条数仍独立生效，不能因容量例外恢复已过期的数据。
+        if !expired
+            && plan.preview.remaining_count > 0
+            && plan.preview.remaining_bytes.saturating_add(bytes) > storage_limit
+        {
             size_exhausted = true;
         }
         if expired || plan.preview.remaining_count >= max_records || size_exhausted {
@@ -301,7 +306,8 @@ impl Store {
         self.save_config(config)
     }
 
-    /// 成功列表才原子更新，失败事务保留旧缓存；最多 100 份、总正文 16 MiB。
+    /// 成功列表才原子更新，失败事务保留旧缓存；最多 100 份，以 16 MiB 为旧缓存清理预算。
+    /// 本次完整列表允许单独超预算，不能保存后立即淘汰或因条目数/正文大小拒绝正常目录。
     /// 随机 token 不含 API Key 或其哈希，缓存只作选择建议，不改变配置或测试结果。
     pub fn save_model_catalog(
         &mut self,
@@ -311,16 +317,14 @@ impl Store {
     ) -> Result<(), String> {
         crate::conditions::validate_id(token)?;
         let payload = serde_json::to_string(models).map_err(|_| "模型列表缓存序列化失败。")?;
-        if models.len() > 5000 || payload.len() > 1024 * 1024 {
-            return Err("模型列表缓存超过上限。".into());
-        }
         let tx = self
             .connection
             .transaction()
             .map_err(|_| "无法开始模型列表缓存事务。")?;
         tx.execute("INSERT INTO model_catalog(token,endpoint,payload,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(token) DO UPDATE SET endpoint=excluded.endpoint,payload=excluded.payload,updated_at=excluded.updated_at", params![token, endpoint, payload, Utc::now().to_rfc3339()]).map_err(|_| "模型列表缓存保存失败，原列表保留。")?;
-        // 只保留最新完整列表，不按单个模型进行 N+1 写入；引用失效时界面仍可手填/重新拉取。
-        tx.execute("DELETE FROM model_catalog WHERE token IN (SELECT token FROM (SELECT token, ROW_NUMBER() OVER (ORDER BY updated_at DESC,token) AS n, SUM(length(CAST(payload AS BLOB))) OVER (ORDER BY updated_at DESC,token) AS bytes FROM model_catalog) WHERE n>100 OR bytes>16777216)", []).map_err(|_| "模型列表缓存清理失败。")?;
+        // 本次写入优先于系统时间排序，避免时钟回拨或单份超过预算时刚保存就被清理。
+        // 同一事务按完整目录回收旧缓存，不做逐模型 N+1 写入，清理失败回滚本次替换。
+        tx.execute("DELETE FROM model_catalog WHERE token IN (SELECT token FROM (SELECT token, ROW_NUMBER() OVER (ORDER BY (token=?1) DESC,updated_at DESC,token) AS n, SUM(length(CAST(payload AS BLOB))) OVER (ORDER BY (token=?1) DESC,updated_at DESC,token) AS bytes FROM model_catalog) WHERE n>1 AND (n>100 OR bytes>16777216))", params![token]).map_err(|_| "模型列表缓存清理失败。")?;
         tx.commit()
             .map_err(|_| "模型列表缓存提交失败。".to_string())
     }
@@ -440,7 +444,7 @@ impl Store {
         })
     }
 
-    /// 一次只解析一条原文后立即释放长字段，列表常驻内存不保留最多 128 MiB 的全部回答。
+    /// 一次只解析一条原文后立即释放长字段，列表常驻内存不保留全部长回答。
     /// 返回的 record 是元数据投影，不能用作复制/导出；正文须用 sequence 按页重新读取。
     pub fn history_index(&self) -> Result<HistoryIndex, String> {
         let revision = self.history_revision()?;
@@ -603,12 +607,9 @@ impl Store {
             .map_err(|_| "最近测试记录格式无效；请先备份数据库。".into())
     }
 
-    /// 插入与 count/day/128MiB 清理同事务，按完整原文保存，不重新判定旧回答。
+    /// 插入与 count/day/128MiB 预算清理同事务；最新完整记录允许超预算，不截断或重新判定。
     pub fn save_record(&mut self, record: &TestRecord) -> Result<(), String> {
         let payload = serde_json::to_string(record).map_err(|_| "结果序列化失败。")?;
-        if payload.len() as u64 > HISTORY_STORAGE_LIMIT_BYTES {
-            return Err("单条历史超过 128 MiB，未写入数据库。".into());
-        }
         let transaction = self
             .connection
             .transaction()
@@ -1156,6 +1157,34 @@ mod tests {
         );
     }
 
+    /// 大目录必须完整持久化且不会被同事务预算清理；旧目录仍可淘汰，不丢靠后模型。
+    #[test]
+    fn large_catalog_survives_cache_budget_with_full_tail() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let models: Vec<crate::discovery::FetchedModel> = (0..90_000)
+            .map(|index| crate::discovery::FetchedModel {
+                id: format!("{index:05}-{}", "m".repeat(180)),
+                owned_by: None,
+            })
+            .collect();
+        assert!(serde_json::to_vec(&models).unwrap().len() > 16 * 1024 * 1024);
+        store
+            .save_model_catalog("old", "https://example.com/models", &models[..1])
+            .unwrap();
+        store
+            .save_model_catalog("large", "https://example.com/models", &models)
+            .unwrap();
+        let restored = store
+            .model_catalog("large", "https://example.com/models")
+            .unwrap();
+        assert_eq!(restored.len(), models.len());
+        assert_eq!(restored.last().unwrap().id, models.last().unwrap().id);
+        assert!(store
+            .model_catalog("old", "https://example.com/models")
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn notification_state_survives_history_clear_and_rejects_invalid_payload() {
         let mut store = Store::open(Path::new(":memory:")).unwrap();
@@ -1289,7 +1318,7 @@ mod tests {
             &store.connection,
             &Preferences::default(),
             Utc::now(),
-            newest_size,
+            newest_size - 1,
         )
         .unwrap();
         assert_eq!(plan.preview.remaining_count, 1);

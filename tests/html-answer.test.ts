@@ -98,7 +98,7 @@ it('iframe 只开放脚本，小预览点击放大且没有额外工具栏，卸
     await flushPromises();
     const iframe = wrapper.get('iframe');
     expect(iframe.attributes('sandbox')).toBe('allow-scripts');
-    expect(iframe.attributes('scrolling')).toBe('no');
+    expect(iframe.attributes('scrolling')).toBe('auto');
     expect(iframe.attributes('style')).toContain('pointer-events: none');
     expect(wrapper.find('div').html()).not.toContain('<div>demo</div>');
     const url = iframe.attributes('src');
@@ -226,8 +226,15 @@ it('消息必须同时匹配真实 frame 和会话令牌，不接受旧页面和
         ),
     ).toBe(false);
 });
-it('文档大小不截断，准备失败可重载，成功 ready 后清除旧错误', async () => {
-    await expect(preparePreview('中'.repeat(400000))).rejects.toThrow('1 MiB');
+it('大文档完整传入沙箱，准备失败可重载，成功 ready 后清除旧错误', async () => {
+    const source = `<div>${'中'.repeat(800000)}</div>`;
+    const prepared = await preparePreview(source);
+    expect(fake.call).toHaveBeenLastCalledWith('prepare_html_preview', {
+        document: expect.stringContaining(source),
+        source,
+    });
+    prepared.dispose();
+    await expect(preparePreview('   ')).rejects.toThrow('HTML 为空');
     fake.call.mockRejectedValueOnce(new Error('准备失败'));
     const wrapper = mount(HtmlPreview, {
         attachTo: document.body,
@@ -282,10 +289,15 @@ it('加载在 ready 前保持动画，合法尺寸整体缩放，伪造尺寸和
     await flushPromises();
     expect(wrapper.find('.html-preview-spinner').exists()).toBe(false);
     expect(wrapper.get('.html-preview').attributes('style')).toContain('rgb(240, 240, 240)');
-    send('dimensions', { width: 5000, height: 1400 });
+    send('dimensions', { width: 5000, height: 10000 });
     await flushPromises();
-    expect(wrapper.find('iframe').exists()).toBe(false);
-    expect(wrapper.text()).toContain('超过预览上限');
+    expect(wrapper.find('iframe').exists()).toBe(true);
+    expect(frame.style.width).toBe('4096px');
+    expect(frame.style.height).toBe('8192px');
+    expect(wrapper.find('.html-preview-error').exists()).toBe(false);
+    send('dimensions', { width: Number.MAX_SAFE_INTEGER + 1, height: 1400 });
+    await flushPromises();
+    expect(frame.style.height).toBe('8192px');
     wrapper.unmount();
 });
 it('实际内容放大并等比居中，非法范围无效，放大后仍使用同一内容坐标', async () => {
@@ -437,6 +449,42 @@ it.each(['ready', 'pending'])('绘制帧暂停且字体 %s 时仍完成就绪握
     await vi.advanceTimersByTimeAsync(1000);
     expect(postMessage.mock.calls.filter(([data]) => data.type === 'ready')).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
+});
+
+it('超大作品启用沙箱内滚动并完成就绪，不裁掉正文或放宽来源限制', async () => {
+    vi.useFakeTimers();
+    await preparePreview('<div>超大作品</div>');
+    const doc = fake.call.mock.calls.find(([cmd]) => cmd === 'prepare_html_preview')![1].document;
+    const bootstrap = doc.match(/<script>([\s\S]*?)<\/script>/)![1];
+    const postMessage = vi.fn();
+    const listeners = new Map<string, () => void>();
+    const root = document.documentElement;
+    const rootStyle = root.getAttribute('style');
+    vi.spyOn(root, 'scrollWidth', 'get').mockReturnValue(5000);
+    vi.spyOn(root, 'scrollHeight', 'get').mockReturnValue(10000);
+    try {
+        // 执行实际包装脚本，确认滚动发生在 iframe 文档内部，宿主仍只接收数字与会话令牌。
+        new Function('parent', 'addEventListener', 'requestAnimationFrame', 'document', bootstrap)(
+            { postMessage },
+            (type: string, handler: () => void) => listeners.set(type, handler),
+            () => 1,
+            document,
+        );
+        listeners.get('load')!();
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(root.style.getPropertyValue('overflow')).toBe('auto');
+        expect(document.body.style.getPropertyValue('overflow')).toBe('visible');
+        expect(postMessage.mock.calls.find(([data]) => data.type === 'dimensions')![0].value).toEqual({
+            width: 5000,
+            height: 10000,
+        });
+        expect(postMessage.mock.calls.filter(([data]) => data.type === 'ready')).toHaveLength(1);
+    } finally {
+        if (rootStyle === null) root.removeAttribute('style');
+        else root.setAttribute('style', rootStyle);
+        document.body.style.removeProperty('overflow');
+        document.head.querySelectorAll('style').forEach((style) => style.remove());
+    }
 });
 
 it('历史仅可见行运行，放大期间滚出视口仍保留会话，关闭后释放', async () => {

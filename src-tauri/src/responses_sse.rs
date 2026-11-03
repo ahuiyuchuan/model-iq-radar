@@ -1,4 +1,4 @@
-//! Responses SSE 的有界正文解析；网络读取、超时和取消仍由 api.rs 统一管理。
+//! Responses SSE 的完整正文解析；网络读取、超时和取消仍由 api.rs 统一管理。
 //! 只提取明确结束事件内的完整 response，不用 delta 拼答案，不执行正文中的任何指令。作者：ahui。
 
 use serde_json::Value;
@@ -494,7 +494,7 @@ impl EmptyPrelude {
     }
 }
 
-/// 解析已读到 EOF 且未超限的原始正文，支持 LF/CRLF/CR、UTF-8 BOM、多行 data 和保活注释。
+/// 解析已读到 EOF 的原始正文，支持 LF/CRLF/CR、UTF-8 BOM、多行 data 和保活注释。
 /// 仅临时解析副本归一换行，诊断缓冲不改写；未以空行结束的数据事件不能当成完整事件。
 /// 返回原样的 completed.response，调用方必须继续调用既有 parse_response 检查完整助手正文。
 pub fn parse(bytes: &[u8]) -> Result<Value, StreamFailure> {
