@@ -40,6 +40,14 @@ HTML 引导正常等待两帧布局，每阶段 200ms 定时兜底，字体就�
 
 桌面集成检查应只在隔离 QA 标识、虚构数据库和模型下运行，正式构建不开放调试端口。iframe 共享渲染资源，不能将旧工作进程的死循环硬终止检查当作当前保证。当前版本的实际检查与未覆盖边界见 `VALIDATION.md`，当前桌宠模块范围见 `docs/DESKTOP_PET_CHANGE_SUMMARY.md`；`docs/FILE_AUDIT-v1.0.6.md`仅记录历史版本。
 
+## 设置窗口生命周期
+
+`src-tauri/src/settings_window.rs`统一卡片/托盘的打开路径。Windows必须通过主窗口`with_webview`取得已有环境，用已锁定`tauri-runtime`的`WebviewAttributes`转交，再由异步命令中的`with_environment`交给Tauri；不自行声明COM接口为Send，不在主WebView回调里build，不改数据目录或环境参数。新增直接依赖只使用已在锁文件中的同版本crate，无依赖升级。
+
+异步门禁覆盖查找、创建、恢复与结果通知，不与running/store锁嵌套。只在同名标签尚未注销时每25ms重查、最多等待500ms，其余创建错误不重试。保留已存活窗口及草稿，只回收本次创建但尚未就绪的窗口；最小化恢复、显示、聚焦都须检查。`settings-window-result`仅向卡片发送null或可读错误，不能携带配置/凭据或改变模型结果。
+
+代码回归覆盖并发入口、关闭重开、恢复中销毁、失败后重试、有限等待、新窗口清理、错误码脱敏，以及前端等待、托盘反馈、测试故障隔离、迟到结果和订阅释放。模拟边界测试和Windows编译不能代替真实Runtime热更新、多屏及长时驻留验收；实际验证范围及限制见`VALIDATION.md`，原生检查须遵循前述隔离要求。升级/回退只需完全退出后更换EXE，无数据迁移；同步前后端事件契约和浏览器桥接。
+
 ## 目录职责
 
 桌宠模块为 `src/pet`、`PetActor/PetStage/SkinManager` 与 `src-tauri/src/pet_window.rs`；皮肤包规范和制作命令见 [SKIN_PACKS.md](docs/SKIN_PACKS.md)。`python scripts/build_pet_assets.py` 从本轮四组定稿中的角色源图生成十二动作PNG及提取记录，勿手改生成结果。源图为 `source-states.png`、`source-actions.png`、`card-compact-design.png`、`card-expanded-design.png`，均在 `assets/pet/blue-whale-maid`；裁切与归一尺度可追溯到 `extraction.json`。播放器只接受 PNG 图集，普通构建直接复制 `public` 资源，EXE 打包检查也包含该目录。
@@ -53,7 +61,7 @@ HTML 引导正常等待两帧布局，每阶段 200ms 定时兜底，字体就�
 - `src/markdown.ts`：不可信回答的安全显示副本，不能参与判定、保存和复制。
 - `src/htmlAnswer.ts` / `src/htmlSandbox.ts`：与后端共用 html-v1 识别语义、临时 iframe 文档包装和会话消息验证；不生成或缓存截图。
 - `src-tauri/src/api.rs` / `discovery.rs`：兼容模型请求、目录拉取、独立连接诊断。
-- `src-tauri/src/lib.rs`：运行门禁、定时、凭据与窗口生命周期。
+- `src-tauri/src/lib.rs`：运行门禁、定时、凭据与窗口生命周期；`settings_window.rs`负责单一设置窗口、主WebView环境复用及打开结果通知。
 - `src-tauri/src/html.rs` / `preview.rs`：自动识别、请求状态结算、本地临时文档协议、响应头 CSP 和既有 WebView 的 iframe 导航保护；不创建预览窗口。
 - `src-tauri/src/storage.rs` / `model.rs`：SQLite、配置、规则与历史契约。
 - `src-tauri/src/autostart.rs` / `updates.rs`：当前用户自启、只读更新检查与系统浏览器入口。

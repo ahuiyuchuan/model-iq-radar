@@ -18,7 +18,7 @@
 
 </div>
 
-> **v1.1.2：移除正常长响应的大小拦截，完善大页面预览、模型目录与历史保存。** [查看发布说明](docs/release-notes/v1.1.2-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.2/Model-IQ-Radar-v1.1.2-Windows-x64.exe)
+> **v1.1.3：修复常驻使用后设置窗口打不开，完善重开、恢复及错误反馈。** [查看发布说明](docs/release-notes/v1.1.3-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.3/Model-IQ-Radar-v1.1.3-Windows-x64.exe)
 
 ## 为什么选择测智雷达？
 
@@ -113,13 +113,13 @@
 
 ## 下载安装
 
-当前正式版为 **v1.1.2**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.2) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.2/Model-IQ-Radar-v1.1.2-Windows-x64.exe)**。
+当前正式版为 **v1.1.3**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.3) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.3/Model-IQ-Radar-v1.1.3-Windows-x64.exe)**。
 
 下载后直接运行，无需安装或解压。系统需安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；使用远程模型时需能访问配置的 API，费用由对应服务商收取。
 
 更新时完全退出旧版后运行新版，配置、历史和系统凭据继续沿用，建议先备份完整应用数据目录。更换 EXE 路径后，已启用自启的用户应重新设置自启路径。GitHub 自动生成的 Source code 归档是源码，不是可执行程序。
 
-本版移除正常响应的 2 MiB 门槛及模型列表、HTML 预览的同类拦截；超大页面可放大滚动，最新完整历史允许单独超出清理预算。保留当前模型选择、原有判定、超时、取消与桌宠交互。详情见 [v1.1.2 发布说明](docs/release-notes/v1.1.2-zh.md)。
+本版让设置窗口复用主窗口的 WebView2 环境，避免常驻期间重新协商环境导致创建失败；补齐关闭重开、最小化恢复、连续点击等待和托盘错误反馈。保留未保存草稿、当前模型、历史判定及测试流程。详情见 [v1.1.3 发布说明](docs/release-notes/v1.1.3-zh.md)。
 
 ## 快速开始
 
@@ -223,7 +223,7 @@ v1.0.6 对 Responses 增加空前导兼容：仅在前导生命周期、空消�
 
 配置与历史位于 `%APPDATA%\com.ahui.model-probe\probe.db`，API Key 和邮箱授权码在 Windows 凭据管理器；免安装不等于数据随 EXE 保存。迁移前先备份完整数据目录，配置可通过设置导出 / 导入，历史单独导出；配置备份不含凭据，新电脑需要重新填写，邮箱导入后关闭。
 
-当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.2 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
+当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.3 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
 
 </details>
 

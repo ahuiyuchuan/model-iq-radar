@@ -12,6 +12,8 @@ const fake = vi.hoisted(() => ({
     resize: vi.fn(),
     subscribeDock: vi.fn(),
     subscribeModelCatalog: vi.fn(),
+    subscribeSettingsWindow: vi.fn(),
+    openSettings: vi.fn(),
     snapshot: {} as AppSnapshot,
 }));
 vi.mock('../src/bridge', () => ({
@@ -20,10 +22,11 @@ vi.mock('../src/bridge', () => ({
     subscribe: fake.subscribe,
     dragWindow: vi.fn(),
     dragPetWindow: vi.fn(),
-    openSettings: vi.fn(),
+    openSettings: fake.openSettings,
     resizeWidget: fake.resize,
     subscribeDock: fake.subscribeDock,
     subscribeModelCatalog: fake.subscribeModelCatalog,
+    subscribeSettingsWindow: fake.subscribeSettingsWindow,
 }));
 
 beforeEach(() => {
@@ -64,6 +67,98 @@ beforeEach(() => {
     fake.resize.mockReset().mockResolvedValue(undefined);
     fake.subscribeDock.mockReset().mockResolvedValue(() => {});
     fake.subscribeModelCatalog.mockReset().mockResolvedValue(() => {});
+    fake.subscribeSettingsWindow.mockReset().mockResolvedValue(() => {});
+    fake.openSettings.mockReset().mockResolvedValue(undefined);
+});
+
+it('打开设置等待期间只发一次请求，失败可重试，成功仅清除设置故障且保留测试结果', async () => {
+    let rejectOpen!: (cause: Error) => void;
+    fake.openSettings.mockImplementationOnce(
+        () => new Promise<void>((_resolve, reject) => (rejectOpen = reject)),
+    );
+    const wrapper = mount(Widget);
+    await flushPromises();
+    const button = wrapper.get<HTMLButtonElement>('[aria-label="打开设置"]');
+    await button.trigger('click');
+    await button.trigger('click');
+    expect(fake.openSettings).toHaveBeenCalledTimes(1);
+    expect(button.element.disabled).toBe(true);
+    expect(button.attributes('aria-busy')).toBe('true');
+    rejectOpen(new Error('无法创建设置窗口（0x8007139F）。请重试。'));
+    await flushPromises();
+    expect(button.element.disabled).toBe(false);
+    expect(wrapper.get('[role="alert"]').text()).toContain('0x8007139F');
+    await button.trigger('click');
+    await flushPromises();
+    expect(fake.openSettings).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(fake.call.mock.calls.some(([command]) => command === 'start_test')).toBe(false);
+    wrapper.unmount();
+});
+
+it('托盘设置结果提供独立提示，晚到订阅在卸载后立即清理', async () => {
+    let report!: (message: string | null) => void;
+    const cleanup = vi.fn();
+    fake.subscribeSettingsWindow.mockImplementation(async (handler: typeof report) => {
+        report = handler;
+        return cleanup;
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    report('无法恢复设置窗口，请再次点击设置。');
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain('无法恢复');
+    report(null);
+    await flushPromises();
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    wrapper.unmount();
+    expect(cleanup).toHaveBeenCalledOnce();
+
+    let resolveSubscription!: (cleanup: () => void) => void;
+    fake.subscribeSettingsWindow.mockImplementation(
+        () => new Promise<() => void>((resolve) => (resolveSubscription = resolve)),
+    );
+    const late = mount(Widget);
+    await flushPromises();
+    late.unmount();
+    const lateCleanup = vi.fn();
+    resolveSubscription(lateCleanup);
+    await flushPromises();
+    expect(lateCleanup).toHaveBeenCalledOnce();
+});
+
+it('设置成功不掩盖测试故障，迟到的打开失败不覆盖较新的托盘成功结果', async () => {
+    let report!: (message: string | null) => void;
+    fake.subscribeSettingsWindow.mockImplementation(async (handler: typeof report) => {
+        report = handler;
+        return () => {};
+    });
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'start_test') throw new Error('测试入口故障');
+        return structuredClone(fake.snapshot);
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('.compact-primary').trigger('click');
+    await flushPromises();
+    report('设置打开失败');
+    await flushPromises();
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(2);
+    report(null);
+    await flushPromises();
+    expect(wrapper.findAll('[role="alert"]').map((item) => item.text())).toEqual(['Error: 测试入口故障']);
+
+    let rejectOpen!: (cause: Error) => void;
+    fake.openSettings.mockImplementationOnce(
+        () => new Promise<void>((_resolve, reject) => (rejectOpen = reject)),
+    );
+    await wrapper.get('[aria-label="打开设置"]').trigger('click');
+    report(null);
+    rejectOpen(new Error('过期的设置失败'));
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('过期的设置失败');
+    expect(wrapper.get('[aria-label="打开设置"]').attributes('disabled')).toBeUndefined();
+    wrapper.unmount();
 });
 
 afterEach(() => {

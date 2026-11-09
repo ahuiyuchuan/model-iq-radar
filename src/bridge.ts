@@ -382,10 +382,27 @@ export async function dragPetWindow(pointerDelta: [number, number]): Promise<voi
     if (desktop) await call('start_pet_drag', { pointerDelta });
 }
 
-/** 桌面模式打开复用的设置窗口；浏览器通过独立地址展示相同组件。 */
+/**
+ * 桌面模式打开或恢复唯一设置窗口；浏览器通过独立地址展示相同组件。
+ * @throws 原生创建/恢复失败或浏览器拦截新窗口时拒绝，由入口显示重试提示。
+ */
 export async function openSettings(): Promise<void> {
     if (desktop) await call('open_settings');
-    else window.open('/?view=settings', 'model-probe-settings');
+    else if (!window.open('/?view=settings', 'model-probe-settings'))
+        throw new Error('设置页面被浏览器拦截，请允许弹出窗口后重试。');
+}
+
+/**
+ * 订阅卡片与托盘共用的设置打开结果；与测试错误分开，不改变历史或触发模型请求。
+ * @param handler null 表示打开成功，仅清除设置故障；字符串为可恢复的窗口阶段错误。
+ * @returns 解除监听函数；浏览器预览返回空函数，不伪造原生窗口事件。
+ * @throws 原生订阅失败时拒绝，调用方须处理晚到注册和卸载。
+ */
+export async function subscribeSettingsWindow(
+    handler: (message: string | null) => void,
+): Promise<() => void> {
+    if (!desktop) return () => {};
+    return listen<string | null>('settings-window-result', (event) => handler(event.payload));
 }
 
 /**

@@ -1,4 +1,16 @@
-# 测智雷达 v1.1.2 验证记录
+# 测智雷达 v1.1.3 验证记录
+
+## v1.1.3 设置窗口修复与发布前复查（2026-11-09）
+
+- 现象与证据：用户截图中测试结果正常，独立提示“无法创建设置窗口”，没有当时的底层HRESULT或可重复步骤。源码确认每次重建设置时均调用未传入environment的WebviewWindowBuilder；锁定的Tauri 2.12.5/runtime-wry 2.12.3/Wry 0.57.0实现表明该路径会重新创建WebView2环境，主/设置默认共用数据目录。Windows运行时更新或环境选项不一致时存在协商失败路径；不能凭截图断言当天发生过哪种系统状态。原逻辑还忽略unminimize失败、托盘丢弃错误、按钮不防重且成功不清除旧提示。
+- 范围与实现：新增`src-tauri/src/settings_window.rs`，Windows通过主窗口with_webview取得既有环境，由已锁定tauri-runtime的WebviewAttributes容器转交，异步命令调用with_environment/build；不自行声明COM Send、不在主WebView回调中创建窗口、不修改用户数据目录。独立Tokio异步门禁覆盖卡片/托盘查找、创建、恢复与结果通知，不嵌套运行/存储锁。现存窗口不销毁或重载草稿；恢复最小化、显示、聚焦逐段检查，新窗口隐藏准备，初始化/展示失败只回收本次实例。
+- 关闭与失败边界：只在原生同名标签尚未注销时每25ms重查、最多等待500ms；非标签创建故障不自动重试。恢复期间销毁完成可创建新实例，仍存活的窗口保留草稿并返回错误。阶段提示只提取标准HRESULT，不暴露整段路径/URL。settings-window-result只发往widget，null为成功、字符串为可读错误；托盘失败恢复卡片，成功不重跑模型或改写历史。
+- 前端交互：Widget新增独立settingsPending/settingsError，设置按钮和未配置接口的主入口防重、显示等待；失败解锁，成功仅清除设置提示。反馈世代隔离较新的托盘结果与旧Promise，卸载忽略迟到回调并释放晚到订阅；不吞掉独立测试错误。浏览器window.open被拦截明确报错。两个QA/文档桥接同步导出新订阅，生产不引入这些脚本。
+- 回归与检查：修改交互前`npm test -- --reporter=dot tests/widget.test.ts`两项新增用例按预期失败（重复打开两次、缺少结果订阅）；实现后v1.1.3下`npm test -- --reporter=dot`共344项/12文件通过。隔离MSVC/SDK环境`run-build.ps1 -Action test`为119＋18＋23共160项通过，新增六项覆盖并发入口、存活草稿、关闭重开、有限等待、失败解锁、恢复中销毁、新窗口回收和错误码脱敏。`npm run build`、`npm run format:check`、专项文档/桥接Prettier、`cargo fmt --check`和全目标Clippy `-D warnings`通过。Clippy初查指出错误分支多余unwrap，已改为匹配错误引用后重跑通过；测试夹具已移除当前工具链废弃的fetch_update调用。
+- 兼容与文档：npm/Cargo/Tauri统一1.1.3；工具更新锁文件并重新生成第三方声明（37个前端包、315个crate）。仅根项目版本和直接引用已锁定tauri-runtime 2.12.2的依赖边变化，没有升级或新增crate版本，许可证正文保持原样。README、USER_GUIDE、CONTRIBUTING、CHANGELOG及`docs/release-notes/v1.1.3-zh.md`同步。数据库/配置备份仍为v3，无配置默认值、SQL、凭据服务或数据迁移变化；回退时完全退出并更换EXE，前后端事件契约一并回退。Java/JVM/MyBatis专属规范不适用于Vue/TypeScript/Rust/SQLite项目，采用原有格式和手册通用要求。
+- 正式构建与交付：隔离`run-build.ps1 -Action build`完成Vue/TypeScript/Vite与Windows x64 release，Rust编译3分17秒；仅既有chunk体积与链接器导入库提示。`scripts/package_exe.ps1`校验工程/文件/产品版本1.1.3、PE x64、应用输入新鲜度及复制前后摘要通过。唯一交付文件为`release-artifacts/v1.1.3/Model-IQ-Radar-v1.1.3-Windows-x64.exe`，19,295,232字节，SHA-256为`eedd291a1e278c5b242ff76298148b9464dffdc6ce685709419021f2cdd8f5e5`；保留旧包，没有启动正式EXE。
+- 源码审计：本次19份变更文件均为严格UTF-8无BOM/LF，无替换字符或凭据模式匹配；51处本地Markdown文件链接有效。结构比对npm/Cargo锁文件和第三方声明，确认只含上述项目版本、既有依赖边及产品版本变动，无其他依赖版本或许可证正文变化。生成的许可证集合沿用既有大小，其他文件无异常增长；临时审计/发布脚本、日志和EXE不进入源码提交，`git diff --check`通过。
+- 验证限制：用户补充“不使用computer-use，从代码层面分析”后立即停止界面操作；修复前只确认隔离标识的首次设置可打开，未复现长时故障，独立验收进程已停止。修复后仅执行代码与模拟边界测试，不运行浏览器截图/CSP交互脚本或原生界面验收，未验证真实WebView2热更新、多屏、长期驻留、模型/SMTP或实际资源耗尽。自动测试不能替代这些实机场景；保留阶段错误码便于后续遇到系统故障时定位。未访问正式配置、数据库或凭据。
 
 ## v1.1.2 发布前复查（2026-11-03）
 

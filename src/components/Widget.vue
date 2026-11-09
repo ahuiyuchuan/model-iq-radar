@@ -33,6 +33,7 @@ import {
     resizeWidget,
     subscribeDock,
     subscribeModelCatalog,
+    subscribeSettingsWindow,
 } from '../bridge';
 import { formatTime, formatRelativeTime, useProbe } from '../useProbe';
 import ModelPicker from './ModelPicker.vue';
@@ -146,6 +147,10 @@ const effortPickerOpen = ref(false);
 const pickerOpen = ref(false);
 const selecting = ref(false);
 const autoSwitchPending = ref(false);
+// 设置窗口使用独立等待/故障状态，测试重跑不会把窗口故障当作模型失败，也不会误清提示。
+const settingsPending = ref(false);
+const settingsError = ref('');
+let settingsFeedbackGeneration = 0;
 const layoutPending = ref(false);
 const edgeSide = ref<string | null>(null);
 const tucked = ref(false);
@@ -156,6 +161,7 @@ let hovering = false;
 let tuckTimer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribeDock: (() => void) | undefined;
 let unsubscribeModelCatalog: (() => void) | undefined;
+let unsubscribeSettingsWindow: (() => void) | undefined;
 let disposed = false;
 let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 let motionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -290,6 +296,17 @@ onMounted(async () => {
         if (!disposed) error.value = String(cause);
     }
     try {
+        const cleanup = await subscribeSettingsWindow((message) => {
+            if (disposed) return;
+            settingsFeedbackGeneration++;
+            settingsError.value = message ?? '';
+        });
+        if (disposed) cleanup();
+        else unsubscribeSettingsWindow = cleanup;
+    } catch (cause) {
+        if (!disposed) settingsError.value = `设置窗口状态监听失败：${String(cause)}`;
+    }
+    try {
         const cleanup = await subscribeDock((dock) => {
             if (petActive.value) return;
             edgeSide.value = dock.side;
@@ -313,6 +330,7 @@ onUnmounted(() => {
     clearInterval(clockTimer);
     unsubscribeDock?.();
     unsubscribeModelCatalog?.();
+    unsubscribeSettingsWindow?.();
     cardObserver?.disconnect();
     observedMenus.clear();
     cancelAnimationFrame(measuredFrame);
@@ -358,7 +376,9 @@ const primaryLabel = computed(() =>
             ? '正在取消'
             : '取消测试'
         : !profile.value
-          ? '配置接口'
+          ? settingsPending.value
+              ? '正在打开设置'
+              : '配置接口'
           : latestRecord.value
             ? '重新测试'
             : '开始测试',
@@ -500,12 +520,21 @@ async function primaryAction(): Promise<void> {
     }
 }
 
-/** 设置窗口异常不能成为未捕获 Promise，也不应改变测试结果。 */
+/**
+ * 同一组件仅发起一次打开；失败解锁以供重试，成功清除设置故障且保留其他错误。
+ * 托盘事件和卸载使旧 Promise 的反馈失效；后端仍负责跨入口的窗口唯一性。
+ */
 async function safeOpenSettings(): Promise<void> {
+    if (settingsPending.value || disposed) return;
+    settingsPending.value = true;
+    const generation = ++settingsFeedbackGeneration;
     try {
         await openSettings();
+        if (!disposed && generation === settingsFeedbackGeneration) settingsError.value = '';
     } catch (cause) {
-        error.value = String(cause);
+        if (!disposed && generation === settingsFeedbackGeneration) settingsError.value = String(cause);
+    } finally {
+        if (!disposed) settingsPending.value = false;
     }
 }
 
@@ -684,6 +713,9 @@ watch(busy, (value) => {
 watch(error, (value) => {
     if (value && !expanded.value) void toggleExpanded();
 });
+watch(settingsError, (value) => {
+    if (value && !expanded.value) void toggleExpanded();
+});
 </script>
 
 <template>
@@ -756,8 +788,16 @@ watch(error, (value) => {
                     >
                         <TimerReset :size="15" />
                     </button>
-                    <button class="icon-button" aria-label="打开设置" title="设置" @click="safeOpenSettings">
-                        <Settings2 :size="15" />
+                    <button
+                        class="icon-button"
+                        aria-label="打开设置"
+                        :title="settingsPending ? '正在打开设置' : '设置'"
+                        :disabled="settingsPending"
+                        :aria-busy="settingsPending"
+                        @click="safeOpenSettings"
+                    >
+                        <LoaderCircle v-if="settingsPending" :size="15" class="spin" aria-hidden="true" />
+                        <Settings2 v-else :size="15" aria-hidden="true" />
                     </button>
                     <button
                         class="icon-button expand-button"
@@ -904,6 +944,7 @@ watch(error, (value) => {
                 </div>
 
                 <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
+                <div v-if="settingsError" class="inline-error" role="alert">{{ settingsError }}</div>
                 <div class="answer-label">
                     <span>模型回答</span>
                     <div class="answer-label-tools">
@@ -976,7 +1017,12 @@ watch(error, (value) => {
                     <button
                         class="button"
                         :class="{ secondary: busy }"
-                        :disabled="cancelling || selecting || (busy && !snapshot?.running)"
+                        :disabled="
+                            cancelling ||
+                            selecting ||
+                            (busy && !snapshot?.running) ||
+                            (!profile && settingsPending)
+                        "
                         @click="primaryAction"
                     >
                         <X v-if="busy" :size="15" /><RotateCw v-else-if="latestRecord" :size="15" /><Play
@@ -1018,7 +1064,12 @@ watch(error, (value) => {
                 <button
                     class="button compact-primary"
                     :class="{ secondary: busy }"
-                    :disabled="cancelling || selecting || (busy && !snapshot?.running)"
+                    :disabled="
+                        cancelling ||
+                        selecting ||
+                        (busy && !snapshot?.running) ||
+                        (!profile && settingsPending)
+                    "
                     @click="primaryAction"
                 >
                     <X v-if="busy" :size="13" /><RotateCw v-else-if="latestRecord" :size="13" /><Play

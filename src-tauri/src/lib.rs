@@ -14,6 +14,7 @@ mod pet_window;
 pub mod preview;
 mod response_diagnostics;
 mod responses_sse;
+mod settings_window;
 pub mod storage;
 mod updates;
 
@@ -26,10 +27,7 @@ use std::sync::{
 };
 use std::time::Instant;
 use storage::Store;
-use tauri::{
-    Emitter, Listener, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
+use tauri::{Emitter, Listener, Manager, PhysicalPosition, State, WebviewWindow};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -48,7 +46,6 @@ struct AppState {
     store: Mutex<Store>,
     running: Mutex<Option<Running>>,
     move_generation: AtomicU64,
-    settings_gate: Mutex<()>,
     layout: Mutex<WidgetLayout>,
     dragging: AtomicBool,
     /// 原生拖动从按下到移动之间可能没有 `Moved` 事件；单独记录是否真的移动，
@@ -1333,44 +1330,10 @@ fn reset_selected_data(
     Ok(SaveOutcome { warning })
 }
 
-/// 复用单一设置窗口，避免重复编辑窗口写入冲突；用户不保存时不提交草稿。
+/// 复用主窗口运行环境与单一设置窗口；跨卡片/托盘串行，失败不改草稿或测试结果。
 #[tauri::command]
 async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let _gate = lock(&state.settings_gate)?;
-    if let Some(window) = app.get_webview_window("settings") {
-        window.show().map_err(|_| "无法显示设置窗口。")?;
-        let _ = window.unminimize();
-        return window.set_focus().map_err(|_| "无法聚焦设置窗口。".into());
-    }
-    // 1920×1080、100% 缩放下默认 1120×900，容纳常用设置及固定操作栏。
-    // 高 DPI 或较小显示器保留 40px 工作区余量，沿用原最小尺寸。
-    let (width, height) = app
-        .get_webview_window("widget")
-        .and_then(|window| {
-            let (left, top, right, bottom) = work_area(&window).ok()?;
-            let scale = window.scale_factor().ok()?;
-            Some((
-                1120.0_f64.min(((right - left) as f64 / scale - 40.0).max(700.0)),
-                900.0_f64.min(((bottom - top) as f64 / scale - 40.0).max(520.0)),
-            ))
-        })
-        .unwrap_or((1120.0, 900.0));
-    let window = WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        WebviewUrl::App("index.html?view=settings".into()),
-    )
-    .title("测智雷达 · 设置")
-    .inner_size(width, height)
-    .min_inner_size(700.0, 520.0)
-    .decorations(false)
-    .transparent(true)
-    .center()
-    .build()
-    .map_err(|_| "无法创建设置窗口。")?;
-    preview::secure(&window)?;
-    Ok(())
+    settings_window::open(&app).await
 }
 
 /// 获取真实 Windows 工作区，避开任务栏并支持多显示器和负坐标。
@@ -1949,6 +1912,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(pet_window::PetWindowState::default())
         .manage(preview::PreviewState::default())
+        .manage(settings_window::SettingsWindows::default())
         .register_uri_scheme_protocol("html-preview", |context, request| {
             preview::respond(
                 context.app_handle(),
@@ -1972,7 +1936,6 @@ pub fn run() {
                 store: Mutex::new(store),
                 running: Mutex::new(None),
                 move_generation: AtomicU64::new(0),
-                settings_gate: Mutex::new(()),
                 layout: Mutex::new(WidgetLayout::default()),
                 dragging: AtomicBool::new(false),
                 drag_moved: AtomicBool::new(false),
@@ -2049,7 +2012,10 @@ pub fn run() {
                 "settings" => {
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = open_settings(handle).await;
+                        if open_settings(handle.clone()).await.is_err() {
+                            // 失败事件由统一入口发送；托盘操作也显示可恢复提示，不能静默丢弃。
+                            show_widget(&handle);
+                        }
                     });
                 }
                 "auto-test" => {
@@ -2288,7 +2254,6 @@ mod desktop_tests {
             store: Mutex::new(Store::open(std::path::Path::new(":memory:")).unwrap()),
             running: Mutex::new(None),
             move_generation: AtomicU64::new(0),
-            settings_gate: Mutex::new(()),
             layout: Mutex::new(WidgetLayout::default()),
             dragging: AtomicBool::new(true),
             drag_moved: AtomicBool::new(true),
@@ -2321,7 +2286,6 @@ mod desktop_tests {
             store: Mutex::new(Store::open(std::path::Path::new(":memory:")).unwrap()),
             running: Mutex::new(None),
             move_generation: AtomicU64::new(0),
-            settings_gate: Mutex::new(()),
             layout: Mutex::new(WidgetLayout::default()),
             dragging: AtomicBool::new(false),
             drag_moved: AtomicBool::new(false),

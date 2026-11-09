@@ -13,6 +13,7 @@ export {
     PELICAN_PROMPT,
     subscribeUpdateStatus,
     subscribeModelCatalog,
+    subscribeSettingsWindow,
     protectWindowClose,
     windowAction,
     closeSettingsWindow,
