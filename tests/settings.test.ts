@@ -482,6 +482,7 @@ it('悬浮设置DOM按常用测试、外观交互、自启、历史顺序排列'
     await flushPromises();
     await wrapper.findAll('nav button')[2].trigger('click');
     expect(wrapper.findAll('.preference-row label').map((label) => label.attributes('for'))).toEqual([
+        'prompt-as-image',
         'auto-test',
         'auto-interval',
         'timeout',
@@ -664,7 +665,7 @@ it('设置中的全部二值选项共用滑动开关及可访问名称，不残�
             expect(input.element.labels?.length).toBeGreaterThan(0);
         }
     }
-    expect(total).toBe(11);
+    expect(total).toBe(12);
     expect(fake.call.mock.calls.some(([command]) => command.startsWith('save_'))).toBe(false);
     wrapper.unmount();
 });
@@ -1215,7 +1216,11 @@ describe('自定义测试规则', () => {
         await wrapper.get('form').trigger('submit');
         await flushPromises();
         expect(fake.call).toHaveBeenCalledWith('save_rule', {
-            rule: { prompt: '新问题\n请只按记忆回答。', keyword: ' Answer\nNext ', timeoutSeconds: null },
+            rule: {
+                prompt: '新问题\n请只按记忆回答。',
+                keyword: ' Answer\nNext ',
+                timeoutSeconds: null,
+            },
             name: '默认规则',
         });
         expect(wrapper.text()).toContain('已保存');
@@ -1335,6 +1340,113 @@ it('外部自动测试开关只同步对应字段，不覆盖其他偏好草稿'
     await flushPromises();
     expect(wrapper.get<HTMLInputElement>('#auto-test').element.checked).toBe(false);
     expect(wrapper.get('#opacity').element).toHaveProperty('value', '91');
+    wrapper.unmount();
+});
+
+it('图片总开关位于悬浮设置，同步保留其他草稿，规则页只有图片预览', async () => {
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[1].trigger('click');
+    await flushPromises();
+    expect(wrapper.find('#prompt-as-image').exists()).toBe(false);
+    expect(wrapper.text()).toContain('预览题目图片');
+    await wrapper.findAll('nav button')[2].trigger('click');
+    await flushPromises();
+    const toggle = wrapper.get<HTMLInputElement>('#prompt-as-image');
+    expect(toggle.element.checked).toBe(false);
+    await wrapper.get('#timeout').setValue('456');
+    fake.snapshot.config.preferences.promptAsImage = true;
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(toggle.element.checked).toBe(true);
+    expect(wrapper.get<HTMLInputElement>('#timeout').element.value).toBe('456');
+    await wrapper.get('.preferences-form').trigger('submit');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith(
+        'save_preferences',
+        expect.objectContaining({
+            preferences: expect.objectContaining({ promptAsImage: true, timeoutSeconds: 456 }),
+            preservePromptAsImage: true,
+        }),
+    );
+    wrapper.unmount();
+});
+
+it('邮件快捷开关同步时保留 SMTP 和授权码草稿，只有该开关变化不会制造未保存状态', async () => {
+    const settings = {
+        enabled: false,
+        smtpHost: 'smtp.example.com',
+        smtpPort: 465,
+        security: 'tls' as const,
+        sender: 'sender@example.com',
+        username: 'fixture',
+        recipients: ['receiver@example.com'],
+        onDegraded: true,
+        onRecovered: true,
+        onFailure: true,
+        hasPassword: true,
+    };
+    const wrapper = mount(MailSettings, {
+        props: { settings, disabled: false, afterSave: async () => true },
+    });
+    await wrapper.get('#smtp-host').setValue('smtp.unsaved.example');
+    await wrapper.get('#smtp-password').setValue('fictional-unsaved-password');
+    await wrapper.setProps({ settings: { ...settings, enabled: true } });
+    expect(wrapper.get<HTMLInputElement>('#mail-enabled').element.checked).toBe(true);
+    expect(wrapper.get<HTMLInputElement>('#smtp-host').element.value).toBe('smtp.unsaved.example');
+    expect(wrapper.get<HTMLInputElement>('#smtp-password').element.value).toBe('fictional-unsaved-password');
+    expect(fake.call.mock.calls.some(([command]) => command === 'save_email_settings')).toBe(false);
+    await wrapper.get('#smtp-host').setValue(settings.smtpHost);
+    await wrapper.get('#smtp-password').setValue('');
+    await flushPromises();
+    expect(wrapper.emitted('dirty')?.at(-1)).toEqual([false]);
+    wrapper.unmount();
+});
+
+it('图片通知尚未到达时，保存其他偏好要求后端保留总开关', async () => {
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[2].trigger('click');
+    await flushPromises();
+    await wrapper.get('#timeout').setValue('456');
+    fake.snapshot.config.preferences.promptAsImage = true;
+    await wrapper.get('.preferences-form').trigger('submit');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith(
+        'save_preferences',
+        expect.objectContaining({ preservePromptAsImage: true }),
+    );
+    expect(wrapper.get<HTMLInputElement>('#prompt-as-image').element.checked).toBe(true);
+    wrapper.unmount();
+});
+
+it.each([false, true])('保存图片总开关区分未编辑保护与明确编辑：edited=%s', async (edited) => {
+    fake.call.mockImplementation(
+        async (
+            command: string,
+            args?: { preferences: Record<string, unknown>; preservePromptAsImage: boolean },
+        ) => {
+            if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+            if (command === 'get_autostart') return false;
+            if (command === 'preview_history_retention') return { removedCount: 0, remainingCount: 0 };
+            if (command === 'save_preferences')
+                fake.snapshot.config.preferences.promptAsImage = args!.preservePromptAsImage
+                    ? false
+                    : Boolean(args!.preferences.promptAsImage);
+        },
+    );
+    const wrapper = mount(Settings);
+    await flushPromises();
+    await wrapper.findAll('nav button')[2].trigger('click');
+    await wrapper.get('#opacity').setValue('94');
+    if (edited) await wrapper.get('#prompt-as-image').setValue(true);
+    await wrapper.get('#widget-settings').trigger('submit');
+    await flushPromises();
+    expect(fake.call).toHaveBeenCalledWith(
+        'save_preferences',
+        expect.objectContaining({ preservePromptAsImage: !edited }),
+    );
+    expect(wrapper.get<HTMLInputElement>('#prompt-as-image').element.checked).toBe(edited);
     wrapper.unmount();
 });
 
@@ -1512,7 +1624,13 @@ it('已有规则预设保存保持 ID，引用规则删除必须明确确认原�
     await wrapper.get('#rule-settings').trigger('submit');
     await flushPromises();
     expect(fake.call).toHaveBeenCalledWith('save_rule_preset', {
-        preset: { id: 'preset-a', name: '预设 A', prompt: '新题目', keyword: '旧答案', timeoutSeconds: null },
+        preset: {
+            id: 'preset-a',
+            name: '预设 A',
+            prompt: '新题目',
+            keyword: '旧答案',
+            timeoutSeconds: null,
+        },
     });
     await wrapper
         .findAll('button')
@@ -1562,6 +1680,7 @@ it('缩短历史范围先预览清理数量，取消不保存，确认才携带�
         preferences: expect.objectContaining({ historyMaxRecords: 3 }),
         confirmCleanup: true,
         preserveAutoTest: true,
+        preservePromptAsImage: true,
     });
     wrapper.unmount();
 });
@@ -1804,6 +1923,7 @@ it('历史清理预览期间收到托盘开关变更，保存不会撤销较新�
         preferences: expect.objectContaining({ opacity: 93, autoTestEnabled: false }),
         confirmCleanup: false,
         preserveAutoTest: true,
+        preservePromptAsImage: true,
     });
     wrapper.unmount();
 });
@@ -1836,6 +1956,7 @@ it.each([false, true])('保存偏好仅在用户明确编辑开关时覆盖权�
         preferences: expect.objectContaining({ opacity: 94, autoTestEnabled: !edited }),
         confirmCleanup: false,
         preserveAutoTest: !edited,
+        preservePromptAsImage: true,
     });
     expect(wrapper.get<HTMLInputElement>('#auto-test').element.checked).toBe(false);
     wrapper.unmount();

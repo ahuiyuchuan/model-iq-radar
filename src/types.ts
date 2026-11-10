@@ -56,6 +56,8 @@ export interface Preferences {
     timeoutSeconds: number;
     /** 自动调用当前模型；默认启用，无模型配置时不执行。 */
     autoTestEnabled: boolean;
+    /** 图片测试全局总开关，默认关闭；所有分组/题目、手动/定时共用。 */
+    promptAsImage?: boolean;
     /** 分钟，1—1440，默认 3；每次测试结算、开启自动或修改间隔时重新计时。 */
     autoTestIntervalMinutes: number;
     /** 历史记录最多保留条数；旧配置缺省为 500，null 使用 5000 条硬上限。 */
@@ -96,6 +98,8 @@ export interface TestRecord {
     answer: string;
     error: string | null;
     prompt: string;
+    /** 当次发送方式，旧历史缺省为文字；prompt 继续保存可读题目原文。 */
+    promptAsImage?: boolean;
     keyword: string;
     alternativeKeywords?: string[];
     /** 当次请求的规则名称快照；旧历史缺省时显示未记录。 */

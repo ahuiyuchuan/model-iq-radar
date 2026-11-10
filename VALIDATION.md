@@ -1,4 +1,55 @@
-# 测智雷达 v1.1.3 验证记录
+# 测智雷达 v1.2.0 验证记录
+
+## v1.2.0 全文件复查与正式发布验证（2026-11-10）
+
+本节是最终发布范围；后续各节保留早期测试包的时间、结果和限制，不代表正式包的当前状态。以v1.1.3提交`c157633d461b79f2005bff94bdeb12cad0a71399`为基线，逐一检查本次38份文件的差异、关键调用方及交互/持久化边界：
+
+- 后端9份：`api.rs`、`backup.rs`、`conditions.rs`、`discovery.rs`、`lib.rs`、`model.rs`、`notifications.rs`、`storage.rs`、新增`prompt_image.rs`。核对双协议、总期限/取消、PNG复用、不附明文/答案、不自动改发文字、全局条件摘要、门禁/锁顺序、迁移持久化、备份、分类重置、原图按需读取、清理预算/触发器及写入回滚。
+- 前端10份：`bridge.ts`、`types.ts`、`historyExport.ts`、`style.css`，以及`AboutPanel.vue`、`HistoryPanel.vue`、`MailSettings.vue`、`Settings.vue`、`Widget.vue`、新增`PromptImagePreview.vue`。核对全局语义、跨窗口开关同步、保留其他草稿、后端权威状态回填、等待防重/独立错误、桌宠按钮可用空间、预览/历史边界和导出字段。
+- 回归6份：Rust的`data_integrity.rs`、`regression.rs`，前端的`history-export.test.ts`、`settings.test.ts`、`widget.test.ts`、新增`prompt-image-preview.test.ts`。核对新增断言对应业务行为，使用虚构数据与本机HTTP，不读取生产配置/数据库或模型/SMTP凭据。
+- 工程6份：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`、`scripts/pet-preview-bridge.ts`。核对版本、Windows接口特性、依赖与锁文件，虚构预览桥接的关闭邮箱操作不再依赖授权码。
+- 文档7份：`CHANGELOG.md`、`CONTRIBUTING.md`、`README.md`、`THIRD_PARTY_NOTICES.md`、本文件、`docs/USER_GUIDE.md`、新增`docs/release-notes/v1.2.0-zh.md`。核对下载入口、实际发布行为、数据v4升级/回滚、历史原图保留和早期测试包兼容边界。
+
+### 本轮发现与修复
+
+- **预览失败后重试空白**：多页预览停留末页，图片解码失败会清空集合但保留旧页码；重试得到单张图片时索引越界。新增回归先在原实现失败（图片src为undefined），再于每次成功读取新集合时重置首页，专项6项及全量回归通过。单张继续隐藏分页，多张保持翻页，未修改发送页数、排版和历史内容。
+- **说明遗漏**：清空确认与分类说明补齐请求原图删除、恢复悬浮设置关闭图片总开关及正文/图片共用128 MiB预算；配置备份和历史导出均不含原图，需要完整目录备份。修正早期“不落盘图片”和HTML章节“数据库不保存图片”的歧义，明确排版器无临时文件、历史事务独立保存PNG。注释、使用/贡献指南、更新日志与发布说明同步。
+- 未发现其他需在本次范围内修复的缺陷，未进行无关重构。按用户要求保留原生title提示机制，不增加自定义悬浮提示。Java手册已读取，Java/JVM/MyBatis专属条款不适用于Vue/TypeScript/Rust/SQLite，使用项目现有格式及通用注释/边界规范。
+
+### 实际命令与结果
+
+- `npm test -- --reporter=dot`：**359项、13文件全部通过**，包括新预览重试回归；专项`tests/prompt-image-preview.test.ts`6项通过。
+- `C:/tmp/model-iq-radar-image-build.ps1 -Action test`（配置已有MSVC/SDK的进程环境，内部执行`cargo test --locked --manifest-path src-tauri/Cargo.toml`）：**125个库测试＋21个完整性测试＋25个协议回归＝171项通过**。原生排版测试无窗口，涵盖中文/Unicode、20000字符多页、取消与控制字符；HTTP回归核对实际PNG与双协议/回退结果一致，未调用真实服务。
+- `npm run build`：Vue/TypeScript及Vite生产构建通过；`-Action clippy`执行全目标Clippy `-D warnings`通过；`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`npm run format:check`及额外的脚本/手册/发布说明Prettier检查通过。
+- `node scripts/generate_notices.mjs`：从锁定依赖生成37个前端包/315个crate的第三方声明，结构比较确认仅产品版本变化。npm锁仅根版本变化；Cargo锁仅产品版本及已锁定base64 0.22.1/windows-numerics 0.3.1两个直接依赖边，无依赖版本升级，windows仍0.62.2。
+- 临时只读审计脚本`C:/tmp/model-iq-radar-v120-audit.py`检查38份变更UTF-8无BOM/LF、无替换字符，51处本地Markdown链接有效，npm/Cargo/Tauri均为1.2.0；`git diff --check`通过。临时脚本、日志、PNG证据、EXE及生产数据不进入源码提交。
+- `C:/tmp/model-iq-radar-image-build.ps1 -Action build`执行`npm run tauri -- build --no-bundle`，最终Vue/TypeScript/Vite及Windows x64 release构建通过（Rust阶段5分12秒）。随后`./scripts/package_exe.ps1`校验文件/产品版本1.2.0、PE x64、所有应用输入新鲜度及复制前后SHA-256通过，正式包为`release-artifacts/v1.2.0/Model-IQ-Radar-v1.2.0-Windows-x64.exe`，**19,436,032字节**，SHA-256：`a55d9d984cb497d632b7ebfac5b00352f2e8a4a76cb8b554de647b481bf5a802`。仅此EXE作为Release上传资产，未启动EXE。
+
+### 兼容性、限制与回滚
+
+图片总开关默认关闭；所有分组/题目共用，旧正式版缺字段保持文字。数据库/配置备份为v4，早期按题开关测试包一次迁移到全局并清除旧字段，关闭后重启不复开；不要降回这些同号测试包交替运行。v1.1.3及以前拒绝v4，回退前完全退出并恢复升级前完整数据目录，不能只替换EXE或降低schema号。原图保存在本机数据库，JSON/CSV/配置备份不嵌入PNG；保留/清空与历史同生命周期，已清理数据和已发邮件不能撤销。
+
+按用户要求未使用computer-use、浏览器或原生UI自动化，未启动正式EXE，也未调用真实模型或SMTP。未验证实际OCR、服务商图片/强度/大小支持及费用、邮箱投递、字体缺失/资源耗尽、原生多屏/DPI和长期驻留。图片不保证避开中转OCR或分流。生产构建仍有既有Vite大chunk提示与MSVC导入库生成信息，未将其伪装为零警告，也未在本次加入无依据的拆包重构。
+
+## 单张图片隐藏分页（2026-11-10）
+
+- 截图中仅一张图片仍显示禁用的翻页按钮及1/1页码，来自预览组件对所有非空图片集合统一绘制分页。`PromptImagePreview.vue`改为仅多张显示导航和页码，单张保留图片、尺寸切换与滚动；规则草稿及历史原图共用，不改变排版、发送数量、存储或兼容契约。CHANGELOG及使用手册同步。
+- `npm test -- --reporter=dot tests/prompt-image-preview.test.ts`五项通过，新增草稿/历史单张隐藏分页且尺寸切换仍可用的覆盖，既有多张翻页、换题及错误路径通过。首次构建指出参数化测试的联合props类型推断不兼容，显式传入两个可选字段后重跑通过；`npm run build`的Vue/TypeScript/Vite通过，仅既有chunk提示。专项Prettier及`git diff --check`通过，文件保持UTF-8无BOM/LF。
+- 本轮仅前端显示条件调整，未重跑Rust或全部前端测试，未执行原生界面验收、真实模型/SMTP或重新打包EXE；下方2026-11-09测试包不包含这次显示优化。
+
+## v1.2.0 全局图片测试、预览与历史原图（2026-11-09）
+
+- 最终范围：悬浮设置新增与定时测试同级的全局“转为图片发送”，默认关闭，所有分组/题目及手动/定时测试共用；卡片图片/邮箱按钮与设置同步。规则页提供当前草稿预览，历史发送方式旁可查看当次保存的PNG。用户撤销悬浮提示需求，保留现有原生title机制；图片按钮提示仅同步改为全局含义。未使用computer-use、浏览器/原生界面自动化，不启动正式EXE，不读取生产数据库/配置/凭据，不调用真实模型或SMTP；本次仅本地源码与测试包，未提交、推送或发布新版本。
+- 图片请求：`prompt_image.rs`用Windows DirectWrite/Direct2D/WIC在阻塞池排版，32px字体、44px行高、1440px宽，每44个完整文字行分页；COM/位图同线程RAII释放，不读取屏幕，不执行HTML/Markdown，不缩小整份题目或截掉尾部。转换与请求共享原期限，取消停止后续页面，单个系统调用不能强制中断。Chat为image_url，Responses为input_image，detail=high；不附明文题目、判定答案或工具，回退复用同一批PNG，失败不自动降为文字。连接探针仍为独立文字，不代表支持识图。
+- 全局同步：开关保存到Preferences，执行态从全局解析，不依赖当前选中模型；运行中禁止切换，不重置调度或触发模型调用。早期1.2.0测试包任一题目已开启图片时一次迁移为全局开启并清除旧字段，迁移事务失败回滚，关闭后重启不会复开。规则清空不改总开关，悬浮设置清空恢复关闭。设置页合并外部开关与基线、保留其他草稿；未明确编辑时传preservePromptAsImage，后端锁内保留最新值，保存收尾再以权威快照回填，修复旧input撤销外部状态的边界。
+- 历史原图：Completion交付的PNG与HTTP捕获值一致，经`save_record_with_images`与test_record同事务保存在独立prompt_image_record表；图片写入失败不留半条历史。图片计入128 MiB清理预算，保留最新未过期完整记录的原有例外；删除触发器覆盖清空和保留清理，避免孤图。卡片/索引/分页JSON及JSON/CSV/配置备份不带PNG，`get_prompt_images`只在查看时按稳定历史ID读取。旧记录/生成前失败显示无原图，被清理的记录明确报错，不重新生成冒充实际发送图；保存原图不等于确认服务端收到。
+- 草稿预览：`preview_prompt_images`复用正式排版器与20000字符边界，无需保存或开启总开关，不访问模型/凭据。共享PromptImagePreview支持分页、原始尺寸/宽度适配、纵横滚动，按需加载、防重并释放关闭/换题/卸载后的图片引用，迟到结果不能回填旧题；只允许PNG data URL，拒绝外链，解码故障可见且可重试。普通浏览器明确说明需要Windows系统排版，不伪造另一种Canvas效果。
+- 邮箱及错误：邮箱快捷按钮只切换已保存通知总开关，开启验证配置和实际授权码，关闭不读取凭据，不试发、不修改事件/状态，已在发送中的邮件不撤回；设置保留其他草稿。两个按钮防重、等待、错误独立，重试成功不清除模型或设置窗口故障。
+- 回归：最终`npm test -- --reporter=dot`共356项/13文件通过；覆盖草稿预览防重/分页/缩放/换题、历史只读/缺图/重试/外链拒绝、全局按钮无分组时仍可用、位置/状态同步、明确编辑与未编辑保护、迟到通知保存收尾。早期失败来自旧DOM/参数断言及新测试beforeEach错误返回Mock函数，已修正后全量通过；设置页保存收尾问题在复查中修复并加断言。Rust已通过125＋21＋25＝171项，覆盖原生排版、20k长题、双协议HTTP原图/回退一致、取消/失败不发明文、全局备份/摘要/重启迁移、按需原图读取/清理/写入回滚和保留字节核算。最终全量回归再次以125＋21＋25＝171项通过，包含请求原图与HTTP逐字节比较、规则/悬浮分类重置断言。
+- 静态与依赖：`npm run build`的Vue/TypeScript/Vite检查通过，仅既有大chunk提示；全目标Clippy `-D warnings`通过。npm/Cargo/Tauri统一1.2.0，锁文件仅产品版本及base64 0.22.1/windows-numerics 0.3.1两个已锁定直接依赖边，windows仍0.62.2，无crate升级。工具生成第三方声明37个前端包/315个crate，仅产品版本变化。README、使用手册、CONTRIBUTING、CHANGELOG、关于页及注释同步；Java/JVM/MyBatis专属规范不适用，沿用项目格式及通用要求。
+- 图像证据：原生单测导出的虚构题目位于`C:/tmp/model-iq-radar-prompt-image-qa-20261109/`，两页1440×2000/1440×1296，静态检查中文、Unicode及最后一行未裁剪。20k字符单测验证多页、宽度不变、高度不超过2048。证据图片不进入源码或交付目录；历史PNG是用户当次题目，作为本机历史数据保留，不写调试日志。
+- 兼容与限制：数据库/备份v4，读取旧备份1—3；声明旧格式却启用图片拒绝。完整数据目录备份包含原图，配置备份和JSON/CSV历史导出不包含图片。回退1.1.3及以前需退出并恢复升级前完整目录，不能只换EXE或降低schema号。未实测真实模型OCR、接口图片/强度/大小支持、实际费用、SMTP投递、字体缺失/资源耗尽、原生多屏/DPI/长期驻留；图片不能保证绕开中转OCR或分流。
+- 最终交付：`C:/tmp/model-iq-radar-image-build.ps1 -Action build`完成Vue/TypeScript/Vite及Windows x64 release（Rust阶段5分59秒），仅既有chunk和链接器导入库提示。`scripts/package_exe.ps1 -OutputDirectory release-artifacts/global-image-preview-test-20261109`校验工程/文件/产品版本1.2.0、PE x64、输入新鲜度和复制前后摘要通过；新测试包为`release-artifacts/global-image-preview-test-20261109/Model-IQ-Radar-v1.2.0-Windows-x64.exe`，19,436,032字节，SHA-256为`c5eaaa68c8cc9889a9ec9899061567d97069956d7d92f717efe325bcedc89c5c`。保留上一轮测试包及正式发布包，未启动EXE。Prettier、rustfmt、git diff检查通过；37份变更文件严格UTF-8无BOM/LF、无替换字符，51处本地Markdown链接有效，锁文件/声明结构审计无额外版本变化；PNG证据、EXE、临时日志及生产数据不进入源码。
 
 ## v1.1.3 设置窗口修复与发布前复查（2026-11-09）
 

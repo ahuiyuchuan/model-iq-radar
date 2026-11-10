@@ -18,7 +18,9 @@
 
 </div>
 
-> **v1.1.3：修复常驻使用后设置窗口打不开，完善重开、恢复及错误反馈。** [查看发布说明](docs/release-notes/v1.1.3-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.3/Model-IQ-Radar-v1.1.3-Windows-x64.exe)
+> **v1.2.0：全局图片测试、草稿预览与历史原图，卡片图片/邮箱快捷开关。** [查看发布说明](docs/release-notes/v1.2.0-zh.md) · [下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.2.0/Model-IQ-Radar-v1.2.0-Windows-x64.exe)
+
+悬浮设置提供全局“转为图片发送”，所有分组/题目共用，无需上传图片；卡片图片/邮箱快捷开关与设置同步，规则页可预览草稿图片，历史可查看当次保存的请求原图。图片输入需要模型及中转接口支持识图，不能据此保证避开OCR或分流。**本版升级数据库/备份至v4，升级前请完全退出并备份完整数据目录，回退旧版须恢复升级前备份。**
 
 ## 为什么选择测智雷达？
 
@@ -113,13 +115,13 @@
 
 ## 下载安装
 
-当前正式版为 **v1.1.3**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.1.3) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.1.3/Model-IQ-Radar-v1.1.3-Windows-x64.exe)**。
+当前正式版为 **v1.2.0**：[查看发布说明](https://github.com/ahuiyuchuan/model-iq-radar/releases/tag/v1.2.0) · **[下载 Windows x64 EXE](https://github.com/ahuiyuchuan/model-iq-radar/releases/download/v1.2.0/Model-IQ-Radar-v1.2.0-Windows-x64.exe)**。
 
 下载后直接运行，无需安装或解压。系统需安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；使用远程模型时需能访问配置的 API，费用由对应服务商收取。
 
 更新时完全退出旧版后运行新版，配置、历史和系统凭据继续沿用，建议先备份完整应用数据目录。更换 EXE 路径后，已启用自启的用户应重新设置自启路径。GitHub 自动生成的 Source code 归档是源码，不是可执行程序。
 
-本版让设置窗口复用主窗口的 WebView2 环境，避免常驻期间重新协商环境导致创建失败；补齐关闭重开、最小化恢复、连续点击等待和托盘错误反馈。保留未保存草稿、当前模型、历史判定及测试流程。详情见 [v1.1.3 发布说明](docs/release-notes/v1.1.3-zh.md)。
+本版增加默认关闭的全局图片测试：题目自动排版为PNG，仅发送图片，手动/定时共用；规则草稿可预览，历史可查看当次原图，单张图片不显示分页。卡片图片与邮箱按钮同步设置并保留其他草稿。详情见 [v1.2.0 发布说明](docs/release-notes/v1.2.0-zh.md)。
 
 ## 快速开始
 
@@ -223,14 +225,14 @@ v1.0.6 对 Responses 增加空前导兼容：仅在前导生命周期、空消�
 
 配置与历史位于 `%APPDATA%\com.ahui.model-probe\probe.db`，API Key 和邮箱授权码在 Windows 凭据管理器；免安装不等于数据随 EXE 保存。迁移前先备份完整数据目录，配置可通过设置导出 / 导入，历史单独导出；配置备份不含凭据，新电脑需要重新填写，邮箱导入后关闭。
 
-当前数据库 schema 与配置备份均为 v3，支持读取 v1—v3 备份。v1.0.3—v1.1.3 使用相同数据格式，退出程序后可更换对应 EXE；降到更早数据格式的版本须恢复与之匹配的完整数据备份。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细容量及兼容限制见使用手册。
+v1.2.0使用数据库schema与配置备份v4，支持读取v1—v4备份；旧题目默认仍为文字。v1.0.3—v1.1.3使用v3格式，不能直接读取v4数据库或导入v4备份，回退须退出并恢复升级前的完整数据目录备份。早期v1.2.0测试包曾使用按题开关，不应与正式版共用数据目录交替运行。已经清理的历史和诊断不会因降级恢复，已发邮件无法撤回。详细兼容说明见使用手册。
 
 </details>
 
 <details>
 <summary><strong>历史保留与“清除所有数据”有什么区别？</strong></summary>
 
-默认保留最近 **500 条**；可设置最多 5000 条及 1—3650 天，以 128 MiB 历史 JSON 正文预算清理旧记录，最新未过期的完整记录可单独超出容量预算。数量与日期设置继续生效。缩短保留范围会先预览并确认，清理后 SQLite 文件不保证立即缩小。
+默认保留最近 **500 条**；可设置最多 5000 条及 1—3650 天，以 128 MiB 历史 JSON 正文与请求图片预算清理旧记录，最新未过期的完整记录可单独超出容量预算。清理和清空历史同步删除原图；JSON/CSV和配置备份不包含图片，需要保留原图时备份完整数据目录。数量与日期设置继续生效。缩短保留范围会先预览并确认，清理后 SQLite 文件不保证立即缩小。
 
 “恢复所有设置”和“清除所有数据”按相同规则工作：选择接口、规则、悬浮设置、历史、邮箱中的分类，可全选；最终确认后立即清空所选分类并恢复初始状态。接口 / 邮箱类别包含对应系统凭据，未勾选类别保留。历史页的普通“清空”保留通知恢复依据；分类清空历史会同时重置该依据。操作范围见使用手册，清空前请备份。
 

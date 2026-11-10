@@ -115,6 +115,24 @@ pub fn validate_settings(settings: &EmailNotificationSettings) -> Result<(), Str
     Ok(())
 }
 
+/// 快捷开关只克隆并修改 enabled；开启必须已保存完整目标与授权码标记。
+/// 实际凭据是否仍存在由命令边界再检查，关闭时不读取凭据、不发信或清空通知状态。
+pub fn toggle_settings(
+    previous: &EmailNotificationSettings,
+    enabled: bool,
+) -> Result<EmailNotificationSettings, String> {
+    let mut next = previous.clone();
+    next.enabled = enabled;
+    if enabled {
+        validate_settings(&next)
+            .map_err(|_| "请先在设置 → 邮箱通知中保存完整的发件和收件信息。".to_owned())?;
+        if !next.has_password {
+            return Err("请先在设置 → 邮箱通知中保存授权码，再开启通知。".into());
+        }
+    }
+    Ok(next)
+}
+
 fn credential() -> Result<Entry, String> {
     Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_ACCOUNT)
         .map_err(|_| "无法访问 Windows 凭据管理器。".into())
@@ -433,6 +451,28 @@ pub async fn send_notification(
 
 #[cfg(test)]
 mod tests {
+    /// 快捷开关仅改 enabled；不访问系统凭据、不覆盖 SMTP/收件人/事件，也不触发发信。
+    #[test]
+    fn shortcut_only_toggles_complete_saved_settings_and_always_allows_disable() {
+        let mut settings = super::EmailNotificationSettings::default();
+        assert!(super::toggle_settings(&settings, true).is_err());
+        settings.smtp_host = "smtp.example.com".into();
+        settings.sender = "sender@example.com".into();
+        settings.username = "fixture".into();
+        settings.recipients = vec!["receiver@example.com".into()];
+        assert!(super::toggle_settings(&settings, true).is_err());
+        settings.has_password = true;
+        let enabled = super::toggle_settings(&settings, true).unwrap();
+        assert!(enabled.enabled);
+        let disabled = super::toggle_settings(&enabled, false).unwrap();
+        assert_eq!(
+            serde_json::to_value(disabled).unwrap(),
+            serde_json::to_value(&settings).unwrap()
+        );
+        settings.smtp_host = "invalid/host".into();
+        settings.enabled = true;
+        assert!(!super::toggle_settings(&settings, false).unwrap().enabled);
+    }
     use super::*;
 
     fn record(status: &str) -> TestRecord {

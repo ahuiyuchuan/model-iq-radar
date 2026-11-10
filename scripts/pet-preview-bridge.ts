@@ -177,6 +177,22 @@ export async function call(command: string, args: Record<string, unknown> = {}):
         setQaRun(command === 'start_test' ? 'running' : 'cancelled');
         return;
     }
+    // 快捷开关只改虚构内存配置，与生产保存粒度一致，不读取系统凭据或发信。
+    if (command === 'set_prompt_as_image') {
+        state.config.preferences.promptAsImage = Boolean(args.enabled);
+        window.dispatchEvent(new Event('preview-changed'));
+        return;
+    }
+    if (command === 'set_email_notifications_enabled') {
+        if (
+            !state.config.emailNotifications ||
+            (args.enabled && !state.config.emailNotifications.hasPassword)
+        )
+            throw new Error('请先在邮箱设置保存授权码。');
+        state.config.emailNotifications.enabled = Boolean(args.enabled);
+        window.dispatchEvent(new Event('preview-changed'));
+        return;
+    }
     if (command === 'set_auto_test_enabled') {
         state.config.preferences.autoTestEnabled = Boolean(args.enabled);
         state.autoTestRemainingMs = 137000;

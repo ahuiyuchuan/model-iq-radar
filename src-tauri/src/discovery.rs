@@ -193,6 +193,7 @@ pub async fn test_connection(
     };
     let rule = TestRule {
         prompt: "请只回复 OK。".into(),
+        prompt_as_image: false,
         keyword: "OK".into(),
         alternative_keywords: Vec::new(),
         timeout_seconds: None,

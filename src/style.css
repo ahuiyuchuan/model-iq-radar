@@ -2660,9 +2660,8 @@ textarea {
     color: #a9e1ff;
 }
 .pet-stage .widget .drag-grip {
-    width: 14px;
-    left: 45%;
-    color: #6ba8e67a;
+    /* 桌宠从角色拖动；卡片短标题给六个快捷按钮留位，不让装饰抓手覆盖按钮。 */
+    display: none;
 }
 .pet-stage .widget-tools {
     gap: 1px;

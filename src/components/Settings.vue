@@ -70,6 +70,7 @@ import HistoryPanel from './HistoryPanel.vue';
 import AboutPanel from './AboutPanel.vue';
 import ActionDialog from './ActionDialog.vue';
 import MailSettings from './MailSettings.vue';
+import PromptImagePreview from './PromptImagePreview.vue';
 import SkinManager from './SkinManager.vue';
 import { DEFAULT_SKIN } from '../pet/types';
 
@@ -230,9 +231,13 @@ const resetSections: { id: keyof DataResetSelection; label: string; description:
         id: 'widget',
         label: '悬浮设置',
         description:
-            '恢复默认外观、位置、300 秒超时、3 分钟自动测试和 500 条保留上限，关闭系统自启；历史后续按新策略清理。',
+            '恢复默认外观、位置、300 秒超时、3 分钟自动测试和 500 条保留上限，关闭图片测试与系统自启；历史后续按新策略清理。',
     },
-    { id: 'history', label: '测试历史', description: '删除全部测试记录、最近结果和通知恢复判断依据。' },
+    {
+        id: 'history',
+        label: '测试历史',
+        description: '删除全部测试记录、请求原图、最近结果和通知恢复判断依据。',
+    },
     {
         id: 'mail',
         label: '邮箱通知',
@@ -342,6 +347,7 @@ watch(snapshot, (value, previous) => {
         loadRuleTarget(initialRulePresetId.value ?? 'default');
         Object.assign(preferences, value.config.preferences, {
             skin: { ...DEFAULT_SKIN, ...value.config.preferences.skin },
+            promptAsImage: Boolean(value.config.preferences.promptAsImage),
         });
         editProfile(value.config.profiles.find((item) => item.id === value.config.selectedProfileId) ?? null);
         ruleBaseline.value = ruleDraft();
@@ -382,6 +388,14 @@ watch(snapshot, (value, previous) => {
         preferences.autoTestEnabled = live;
         const saved = JSON.parse(preferencesBaseline.value) as Preferences;
         saved.autoTestEnabled = live;
+        preferencesBaseline.value = JSON.stringify(saved);
+    }
+    const liveImage = Boolean(value.config.preferences.promptAsImage);
+    if (previous && liveImage !== Boolean(previous.config.preferences.promptAsImage)) {
+        // 合并全局图片开关与基线，不覆盖其他悬浮设置草稿。
+        preferences.promptAsImage = liveImage;
+        const saved = JSON.parse(preferencesBaseline.value) as Preferences;
+        saved.promptAsImage = liveImage;
         preferencesBaseline.value = JSON.stringify(saved);
     }
 });
@@ -799,6 +813,9 @@ async function savePreferences(): Promise<void> {
         : originalAutoState;
     // 未明确编辑定时开关时，让后端在持锁写入时保留权威值，覆盖尚未送达的托盘事件竞态。
     let preserveAutoTest = input.autoTestEnabled === savedAutoState;
+    const originalImageState = Boolean(snapshot.value?.config.preferences.promptAsImage);
+    const savedImageState = Boolean((JSON.parse(preferencesBaseline.value) as Preferences).promptAsImage);
+    let preservePromptAsImage = Boolean(input.promptAsImage) === savedImageState;
     const values = [
         [input.autoTestIntervalMinutes, 1, 1440],
         [input.historyMaxRecords, 1, 5000],
@@ -851,14 +868,21 @@ async function savePreferences(): Promise<void> {
             input.autoTestEnabled = preferences.autoTestEnabled;
             preserveAutoTest = true;
         }
+        if (Boolean(snapshot.value?.config.preferences.promptAsImage) !== originalImageState) {
+            input.promptAsImage = preferences.promptAsImage;
+            preservePromptAsImage = true;
+        }
         const saved = await save('save_preferences', {
             preferences: input,
             confirmCleanup: confirmed,
             preserveAutoTest,
+            preservePromptAsImage,
         });
         if (saved) {
             Object.assign(preferences, input, {
                 autoTestEnabled: snapshot.value?.config.preferences.autoTestEnabled ?? input.autoTestEnabled,
+                // 锁内保留的全局图片状态以保存后快照为准，不能再被提交前的 input 回填撤销。
+                promptAsImage: Boolean(snapshot.value?.config.preferences.promptAsImage),
             });
             preferencesBaseline.value = JSON.stringify(preferences);
         }
@@ -929,7 +953,9 @@ async function copyRecord(): Promise<void> {
                 record,
             )
                 .map((answer, index) => `${index + 1}. ${answer}`)
-                .join('\n')}\n题目：\n${record.prompt}\n\n回答：\n${record.answer}\n${record.error ?? ''}`,
+                .join(
+                    '\n',
+                )}\n发送方式：${record.promptAsImage ? '图片' : '文字'}\n题目：\n${record.prompt}\n\n回答：\n${record.answer}\n${record.error ?? ''}`,
         );
         if (!disposed && turn === historyFeedbackGeneration && page.value === 'history')
             savedMessage.value = '已复制本条测试记录';
@@ -952,6 +978,7 @@ async function copyDiagnostic(): Promise<void> {
         `时间：${record.startedAt}`,
         `模型：${record.profileName} / ${record.model}`,
         `接口模式：${record.interfaceMode ?? '未记录'}`,
+        `题目发送方式：${record.promptAsImage ? '图片' : '文字'}`,
         `失败切换协议：${record.protocolFallbackEnabled == null ? '未记录' : record.protocolFallbackEnabled ? '开启' : '关闭'}`,
         `协议尝试顺序：${record.attemptedModes?.length ? record.attemptedModes.join(' → ') : '未记录'}`,
         `思考强度：${reasoningLabel(record)}`,
@@ -1055,7 +1082,7 @@ async function resetData(title: string): Promise<void> {
         const sections = resetSections.filter((section) => selection[section.id]);
         const confirmation = await ask(
             '确认清空所选分类',
-            `即将清空：${sections.map((section) => section.label).join('、')}。\n\n${sections.map((section) => `${section.label}：${section.description}`).join('\n')}\n\n此操作立即生效，无法撤销。配置备份不包含密钥、授权码和测试历史；需要保留时请先分别备份。`,
+            `即将清空：${sections.map((section) => section.label).join('、')}。\n\n${sections.map((section) => `${section.label}：${section.description}`).join('\n')}\n\n此操作立即生效，无法撤销。配置备份不包含密钥、授权码和测试历史；历史导出也不包含请求原图，需要保留原图时请先备份完整数据目录。`,
             [
                 { id: 'cancel', label: '取消' },
                 { id: 'reset', label: '确认清空并恢复初始状态', danger: true, primary: true },
@@ -1686,6 +1713,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                         rows="11"
                         placeholder="填写发送给模型的完整问题和要求…"
                     ></textarea>
+                    <PromptImagePreview :prompt="rule.prompt" :disabled="busy || saving || preparing" />
                     <div class="keyword-field">
                         <div class="section-heading">
                             <label for="keyword">判定答案（任意一项命中即不降智）</label>
@@ -1784,6 +1812,20 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                     class="preferences-form"
                     @submit.prevent="savePreferences"
                 >
+                    <div class="preference-row">
+                        <div>
+                            <label for="prompt-as-image">转为图片发送</label>
+                            <p>所有分组和题目共用，需要模型支持识图。保存后生效。</p>
+                        </div>
+                        <input
+                            id="prompt-as-image"
+                            v-model="preferences.promptAsImage"
+                            type="checkbox"
+                            class="switch"
+                            role="switch"
+                            :disabled="busy || saving || preparing"
+                        />
+                    </div>
                     <div class="preference-row">
                         <div>
                             <label for="auto-test">定时测试</label>
@@ -1928,7 +1970,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                             <label for="history-retention-days">历史最多保留天数</label>
                             <p>
                                 留空不按日期清理；保存前预览影响并确认，按数量、日期及 128 MiB
-                                预算清理旧记录，最新完整记录可单独超出容量预算。
+                                正文与图片预算清理旧记录，最新未过期完整记录可单独超出容量预算。
                             </p>
                         </div>
                         <div class="number-control">

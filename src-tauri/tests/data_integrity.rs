@@ -7,7 +7,7 @@ use model_probe_lib::{
 };
 use serde_json::json;
 
-/// 外观不参与模型条件；旧配置、v3 备份和分类重置共同覆盖新增嵌套字段。
+/// 外观不参与模型条件；旧配置、备份和分类重置共同覆盖新增嵌套字段。
 #[test]
 fn skin_defaults_backup_reset_and_fingerprint_remain_compatible() {
     use model_probe_lib::model::{DataResetSelection, Preferences, SkinPreferences};
@@ -108,7 +108,7 @@ fn protocol_fallback_defaults_off_invalidates_conditions_and_roundtrips_backup()
 /// 兼容旧备份中的快捷键字段；忽略旧开关但保留其他偏好，再导出不携带已删除功能。
 #[test]
 fn legacy_shortcut_backup_is_ignored_without_changing_other_preferences() {
-    for version in [1, 2, 3] {
+    for version in [1, 2, 3, 4] {
         for enabled in [false, true] {
             let mut current = config();
             current.preferences.opacity = 88;
@@ -124,7 +124,7 @@ fn legacy_shortcut_backup_is_ignored_without_changing_other_preferences() {
             assert!(exported["config"]["preferences"]
                 .get("shortcutEnabled")
                 .is_none());
-            assert_eq!(exported["version"], 3);
+            assert_eq!(exported["version"], 4);
         }
     }
 }
@@ -165,7 +165,7 @@ fn multi_answer_fingerprint_backup_and_default_name_roundtrip() {
         conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
     );
     let document = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
-    assert_eq!(document["version"], 3);
+    assert_eq!(document["version"], 4);
     let imported = backup::prepare_import(&AppConfig::default(), &document, "replace").unwrap();
     assert_eq!(imported.config.default_rule_name, "默认改名");
     assert_eq!(
@@ -371,7 +371,7 @@ fn model_catalog_persists_isolates_endpoints_and_updates_atomically() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     drop(connection);
     std::fs::remove_file(&path).unwrap();
@@ -400,12 +400,155 @@ fn config() -> AppConfig {
             id: "rule-one".into(),
             name: "预设".into(),
             prompt: " 问题\n".into(),
+            prompt_as_image: false,
             keyword: " 高市早苗 ".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
         }],
         ..AppConfig::default()
     }
+}
+
+/// 全局图片开关适用于所有分组/题目，备份保留；关闭后恢复原文字条件摘要。
+#[test]
+fn global_image_switch_roundtrips_and_applies_to_all_bindings() {
+    let mut current = config();
+    let before = conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap();
+    let original = serde_json::to_value(&current).unwrap();
+    current.preferences.prompt_as_image = true;
+    assert!(
+        conditions::effective_rule(&current, &current.profiles[0])
+            .unwrap()
+            .prompt_as_image
+    );
+    let mut default_bound = current.profiles[0].clone();
+    default_bound.rule_preset_id = None;
+    assert!(
+        conditions::effective_rule(&current, &default_bound)
+            .unwrap()
+            .prompt_as_image
+    );
+    assert_ne!(
+        before,
+        conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
+    );
+    let backup = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
+    assert_eq!(backup["config"]["preferences"]["promptAsImage"], true);
+    assert!(backup["config"]["rule"].get("promptAsImage").is_none());
+    let imported = backup::prepare_import(&AppConfig::default(), &backup, "replace").unwrap();
+    assert!(imported.config.preferences.prompt_as_image);
+    let reset_rules: model_probe_lib::model::DataResetSelection = serde_json::from_value(
+        json!({"api":false,"rules":true,"widget":false,"history":false,"mail":false}),
+    )
+    .unwrap();
+    assert!(
+        reset_rules
+            .reset_config(&current)
+            .unwrap()
+            .preferences
+            .prompt_as_image
+    );
+    let reset_widget: model_probe_lib::model::DataResetSelection = serde_json::from_value(
+        json!({"api":false,"rules":false,"widget":true,"history":false,"mail":false}),
+    )
+    .unwrap();
+    assert!(
+        !reset_widget
+            .reset_config(&current)
+            .unwrap()
+            .preferences
+            .prompt_as_image
+    );
+    current.preferences.prompt_as_image = false;
+    assert_eq!(
+        before,
+        conditions::condition_fingerprint(&current, &current.profiles[0]).unwrap()
+    );
+    assert_eq!(serde_json::to_value(current).unwrap(), original);
+    let mut legacy_claim = backup;
+    legacy_claim["version"] = json!(3);
+    assert!(backup::prepare_import(&AppConfig::default(), &legacy_claim, "replace").is_err());
+}
+
+/// 早期测试包曾按题保存图片开关；一次迁移后关闭总开关，重启不能重新开启。
+#[test]
+fn legacy_per_rule_image_switch_migrates_once_to_global() {
+    let path = std::env::temp_dir().join(format!(
+        "model-probe-global-image-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.save_config(config()).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute("UPDATE app_config SET payload=json_set(payload,'$.rulePresets[0].promptAsImage',json('true')) WHERE id=1", []).unwrap();
+    drop(connection);
+    let mut upgraded = Store::open(&path).unwrap();
+    assert!(upgraded.config.preferences.prompt_as_image);
+    assert!(!upgraded.config.rule_presets[0].prompt_as_image);
+    let mut disabled = upgraded.config.clone();
+    disabled.preferences.prompt_as_image = false;
+    upgraded.save_config(disabled).unwrap();
+    drop(upgraded);
+    assert!(
+        !Store::open(&path)
+            .unwrap()
+            .config
+            .preferences
+            .prompt_as_image
+    );
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// schema4只改变解释契约；重启保留图片模式，高于当前版本的库在初始化前拒绝。
+#[test]
+fn image_mode_survives_restart_and_future_schema_is_not_rewritten() {
+    let path = std::env::temp_dir().join(format!("model-probe-image-{}.db", uuid::Uuid::new_v4()));
+    let mut current = config();
+    current.preferences.prompt_as_image = true;
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.save_config(current.clone()).unwrap();
+    }
+    let restored = Store::open(&path).unwrap();
+    assert!(
+        conditions::effective_rule(&restored.config, &restored.config.profiles[0])
+            .unwrap()
+            .prompt_as_image
+    );
+    drop(restored);
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        connection.pragma_update(None, "user_version", 5).unwrap();
+    }
+    assert!(Store::open(&path).is_err());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    let saved: String = connection
+        .query_row("SELECT payload FROM app_config WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&saved).unwrap(),
+        serde_json::to_value(current).unwrap()
+    );
+    drop(connection);
+    std::fs::remove_file(&path).unwrap();
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
 
 #[test]
@@ -639,6 +782,7 @@ fn export_rejects_oversized_document_instead_of_creating_unimportable_backup() {
             id: format!("rule-{index}"),
             name: format!("预设 {index}"),
             prompt: "题".repeat(20_000),
+            prompt_as_image: false,
             keyword: "答案".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
@@ -685,7 +829,7 @@ fn rule_timeout_inherits_global_ignores_legacy_profiles_and_roundtrips() {
     );
     current.rule.timeout_seconds = Some(90);
     let document = serde_json::to_value(backup::export_backup(&current).unwrap()).unwrap();
-    assert_eq!(document["version"], 3);
+    assert_eq!(document["version"], 4);
     assert!(document["config"]["profiles"][0]
         .get("timeoutSeconds")
         .is_none());

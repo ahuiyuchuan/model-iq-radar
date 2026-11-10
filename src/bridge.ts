@@ -98,6 +98,9 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
             )
             .map((record) => record.id) as T;
     }
+    if (command === 'get_prompt_images') return [] as T;
+    if (command === 'preview_prompt_images')
+        throw new Error('题目图片预览需要 Windows 桌面应用的系统排版器。');
     if (command === 'get_model_catalog') return [] as T;
     if (command === 'get_update_status') return null as T;
     if (command === 'start_test') {
@@ -155,8 +158,14 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
         if (selected.mail) preview.config.emailNotifications = undefined;
         if (selected.api || selected.history || selected.mail) preview.emailNotificationError = null;
     } else if (command === 'save_rule') {
-        preview.config.rule = structuredClone(args.rule) as typeof preview.config.rule;
+        const rule = structuredClone(args.rule) as typeof preview.config.rule;
+        preview.config.rule = rule;
         if (typeof args.name === 'string') preview.config.defaultRuleName = args.name;
+    } else if (command === 'set_prompt_as_image') {
+        preview.config.preferences.promptAsImage = Boolean(args.enabled);
+    } else if (command === 'set_email_notifications_enabled') {
+        // 浏览器不能检查系统授权码，不伪造邮件开关已经生效。
+        throw new Error('邮箱通知快捷开关仅在桌面应用中可用，请先保存邮件设置。');
     } else if (command === 'set_profile_rule') {
         const profile = preview.config.profiles.find((item) => item.id === args.profileId);
         if (!profile) throw new Error('模型配置已不存在，请刷新后重试。');
@@ -177,7 +186,11 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
             throw new Error('思考强度无效。');
         profile.reasoningEffort = value as ModelProfile['reasoningEffort'];
     } else if (command === 'save_preferences') {
-        preview.config.preferences = structuredClone(args.preferences) as typeof preview.config.preferences;
+        const preferences = structuredClone(args.preferences) as typeof preview.config.preferences;
+        if (args.preservePromptAsImage)
+            preferences.promptAsImage = Boolean(preview.config.preferences.promptAsImage);
+        if (args.preserveAutoTest) preferences.autoTestEnabled = preview.config.preferences.autoTestEnabled;
+        preview.config.preferences = preferences;
     } else if (command === 'set_auto_test_enabled') {
         preview.config.preferences.autoTestEnabled = Boolean(args.enabled);
     } else if (command === 'preview_history_retention') {
@@ -187,7 +200,9 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
         const presets = (preview.config.rulePresets ??= []);
         const index = presets.findIndex((item) => item.id === preset.id);
         if (index < 0) presets.push(preset);
-        else presets[index] = preset;
+        else {
+            presets[index] = preset;
+        }
     } else if (command === 'delete_rule_preset') {
         preview.config.rulePresets = preview.config.rulePresets?.filter((item) => item.id !== args.id);
         for (const profile of preview.config.profiles) {

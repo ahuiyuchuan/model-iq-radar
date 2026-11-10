@@ -48,4 +48,13 @@ describe('历史导出与本机日期', () => {
         expect(csv).toContain(JSON.stringify(original.alternativeKeywords).replaceAll('"', '""'));
         expect(csv).toContain('糖果测试');
     });
+    it('CSV保留实际图片发送标记，旧记录明确为文字且不改题目原文', () => {
+        const old = record('回答');
+        const image = { ...old, promptAsImage: true };
+        const csv = historyCsv([old, image]);
+        expect(csv).toContain('prompt,promptAsImage,keyword');
+        expect(csv).toContain('"问题","false","答案"');
+        expect(csv).toContain('"问题","true","答案"');
+        expect(old).not.toHaveProperty('promptAsImage');
+    });
 });

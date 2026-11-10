@@ -11,12 +11,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 
-/// 限制保留的历史 JSON 正文总字节数；SQLite 已分配页面/WAL 不等于逻辑正文大小。
+/// 限制保留的历史 JSON 与请求图片总字节数；SQLite 页面/WAL 不等于逻辑正文大小。
 /// 128 MiB 为清理预算，与 5000 条上限同时生效；最新一条未过期的完整记录允许单独超出预算。
 pub const HISTORY_STORAGE_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 pub const HISTORY_HARD_MAX_RECORDS: u64 = 5000;
 
-/// 按真实数据库计算的保留影响，单位为条数和 UTF-8 JSON 正文字节；不等于文件大小。
+/// 按真实数据库计算的保留影响，单位为条数及正文/图片序列化字节；不等于文件大小。
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryCleanupPreview {
@@ -80,11 +80,15 @@ fn cleanup_plan_at(
         .history_retention_days
         .map(|days| now - Duration::days(days as i64));
     let mut statement = connection
-        .prepare("SELECT sequence,payload FROM test_record ORDER BY sequence DESC")
+        .prepare("SELECT r.sequence,r.payload,COALESCE(length(CAST(i.payload AS BLOB)),0) FROM test_record r LEFT JOIN prompt_image_record i ON i.sequence=r.sequence ORDER BY r.sequence DESC")
         .map_err(|_| "无法查询历史清理范围。")?;
     let rows = statement
         .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
         })
         .map_err(|_| "无法查询历史清理范围。")?;
     let mut plan = CleanupPlan {
@@ -99,7 +103,7 @@ fn cleanup_plan_at(
     };
     let mut size_exhausted = false;
     for row in rows {
-        let (sequence, payload) = row.map_err(|_| "历史记录读取失败，未执行清理。")?;
+        let (sequence, payload, image_bytes) = row.map_err(|_| "历史记录读取失败，未执行清理。")?;
         let record: TestRecord = serde_json::from_str(&payload)
             .map_err(|_| "历史记录格式无效；请先备份数据库，未执行清理。")?;
         let expired = match cutoff {
@@ -111,7 +115,7 @@ fn cleanup_plan_at(
             }
             None => false,
         };
-        let bytes = payload.len() as u64;
+        let bytes = (payload.len() as u64).saturating_add(image_bytes);
         // 已收完的长回答不能因单条超过预算而立即消失；至少保留最新未过期记录，再淘汰旧记录。
         // 用户设置的日期与条数仍独立生效，不能因容量例外恢复已过期的数据。
         if !expired
@@ -200,7 +204,7 @@ pub fn retention_tightened(previous: &Preferences, next: &Preferences) -> bool {
 }
 
 impl Store {
-    /// 读取旧配置并升级至 schema v3；旧程序拒绝新版本，防止多答案或规则超时被忽略。
+    /// 读取旧配置并升级至 schema v4；旧程序拒绝新版本，防止忽略图片开关后误发明文。
     /// 启动时执行已经保存的保留策略，因此长期未测试也不会把过期历史继续展示出来。
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut connection =
@@ -211,13 +215,15 @@ impl Store {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|_| "无法读取数据库版本。")?;
-        if version > 3 {
+        if version > 4 {
             return Err("数据库来自更新版本，请使用对应版本应用。".into());
         }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS app_config (id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS test_record (sequence INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS prompt_image_record (sequence INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TRIGGER IF NOT EXISTS delete_prompt_image_record AFTER DELETE ON test_record BEGIN DELETE FROM prompt_image_record WHERE sequence=OLD.sequence; END;
              CREATE TABLE IF NOT EXISTS latest_test_record (profile_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS notification_state (id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS model_catalog (token TEXT PRIMARY KEY, endpoint TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL);"
@@ -238,6 +244,7 @@ impl Store {
         // 保留原始业务数据供用户备份或使用兼容版本修复。
         // 内置规则迁移与启动历史检查同事务保存，避免仅留在内存、重启后重复补入。
         // 同 ID 的用户内容保留；仅完全匹配旧内置正文时替换，容量为 100 自定义 + 2 自带规则。
+        let upgrade_images = config.upgrade_prompt_image_switch();
         let upgrade_builtins = config.builtin_rules_version < BUILTIN_RULES_VERSION;
         config.upgrade_builtin_rules();
         validate_stored_config(&config)
@@ -251,15 +258,15 @@ impl Store {
         // 逐条校验正文并执行保留策略，因此在同一事务中重建一个本地派生索引，不改变
         // 历史内容；派生索引沿用 v2 结构。悬浮窗只需读取当前模型的一条记录。
         rebuild_latest_record_index(&transaction)?;
-        if upgrade_builtins {
+        if upgrade_builtins || upgrade_images {
             let payload = serde_json::to_string(&config).map_err(|_| "内置规则迁移序列化失败。")?;
             transaction.execute("INSERT INTO app_config(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [payload])
                 .map_err(|_| "内置规则迁移保存失败，原配置保留。")?;
         }
-        // v3 规则超时改变请求预算，旧程序必须拒绝新库，不能忽略覆盖值后静默使用旧超时。
+        // v4 图片开关改变实际请求内容，旧程序必须拒绝新库，不能忽略字段后静默发送文字。
         // 仅完整验证/历史整理成功后随事务升级；回退旧程序须恢复升级前数据库备份。
         transaction
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .map_err(|_| "数据库版本更新失败。")?;
         transaction.commit().map_err(|_| "历史整理提交失败。")?;
         Ok(Self { connection, config })
@@ -410,6 +417,21 @@ impl Store {
             serde_json::from_str(&payload).map_err(|_| "历史记录格式无效；请先备份数据库。".into())
         })
         .collect()
+    }
+
+    /// 仅在用户展开图片时读取当次PNG，不重新排版旧题目；旧记录或转换前失败返回空页。
+    /// ID必须对应仍保留的历史，清理后明确报错，避免把缺失原图冒充当前重建图。
+    pub fn prompt_images(&self, record_id: &str) -> Result<Vec<String>, String> {
+        let payload: Option<String> = self.connection.query_row(
+            "SELECT i.payload FROM test_record r LEFT JOIN prompt_image_record i ON i.sequence=r.sequence WHERE json_extract(r.payload,'$.id')=?1 ORDER BY r.sequence DESC LIMIT 1",
+            [record_id], |row| row.get(0),
+        ).map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) { "历史记录已不存在，请刷新后重试。".to_string() } else { "无法读取当次请求图片。".to_string() })?;
+        payload
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|_| "当次请求图片格式无效，请先备份数据库。".to_string())
+            })
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     /// 追加序号加条数/最早序号标识实际集合；重命名配置或运行状态广播不触发全文重读。
@@ -609,6 +631,20 @@ impl Store {
 
     /// 插入与 count/day/128MiB 预算清理同事务；最新完整记录允许超预算，不截断或重新判定。
     pub fn save_record(&mut self, record: &TestRecord) -> Result<(), String> {
+        self.save_record_with_images(record, &[])
+    }
+
+    /// 当次实际请求的PNG与历史同事务保存；独立表按需读取，不随卡片/列表广播复制。
+    /// 图片计入同一保留预算，删除触发器确保日期、条数、清空和旧版删除路径均不遗留孤图。
+    pub fn save_record_with_images(
+        &mut self,
+        record: &TestRecord,
+        images: &[String],
+    ) -> Result<(), String> {
+        if !record.prompt_as_image && !images.is_empty() {
+            return Err("文字记录不能附带请求图片。".into());
+        }
+        let image_payload = serde_json::to_string(images).map_err(|_| "请求图片序列化失败。")?;
         let payload = serde_json::to_string(record).map_err(|_| "结果序列化失败。")?;
         let transaction = self
             .connection
@@ -621,6 +657,14 @@ impl Store {
             )
             .map_err(|_| "测试已结束，但历史保存失败。")?;
         let sequence = transaction.last_insert_rowid();
+        if !images.is_empty() {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_image_record(sequence,payload) VALUES(?1,?2)",
+                    params![sequence, image_payload],
+                )
+                .map_err(|_| "请求图片保存失败，历史写入已回滚。")?;
+        }
         let plan = cleanup_plan(&transaction, &self.config.preferences)?;
         apply_cleanup(&transaction, &plan)?;
         if plan.sequences.is_empty() {
@@ -734,6 +778,74 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    /// 请求原图独立保存、原样读取，不出现在普通历史JSON；清空同步删除，缺记录明确报错。
+    #[test]
+    fn prompt_images_are_exact_lazy_history_data_and_clear_with_records() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut item = record("image-record", &Utc::now().to_rfc3339());
+        item.prompt_as_image = true;
+        let pages = vec![
+            "data:image/png;base64,aGVsbG8=".to_string(),
+            "data:image/png;base64,d29ybGQ=".to_string(),
+        ];
+        store.save_record_with_images(&item, &pages).unwrap();
+        assert_eq!(store.prompt_images(&item.id).unwrap(), pages);
+        assert!(!serde_json::to_string(&store.history().unwrap())
+            .unwrap()
+            .contains("data:image"));
+        let preview = store
+            .preview_history_retention(&store.config.preferences)
+            .unwrap();
+        assert_eq!(
+            preview.remaining_bytes,
+            (serde_json::to_string(&item).unwrap().len()
+                + serde_json::to_string(&pages).unwrap().len()) as u64
+        );
+        let legacy = record("legacy-record", &Utc::now().to_rfc3339());
+        store.save_record(&legacy).unwrap();
+        assert!(store.prompt_images(&legacy.id).unwrap().is_empty());
+        store.clear_history().unwrap();
+        assert!(store.prompt_images(&item.id).is_err());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM prompt_image_record", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    /// 图片写入失败回滚整条历史；条数清理也必须删除对应原图，不能只处理手动清空。
+    #[test]
+    fn prompt_image_write_failure_rolls_back_and_retention_deletes_images() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut item = record("image-first", &Utc::now().to_rfc3339());
+        item.prompt_as_image = true;
+        let pages = vec!["data:image/png;base64,aGVsbG8=".to_string()];
+        store.connection.execute_batch("CREATE TRIGGER fail_image BEFORE INSERT ON prompt_image_record BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+        assert!(store.save_record_with_images(&item, &pages).is_err());
+        assert!(store.history().unwrap().is_empty());
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_image;")
+            .unwrap();
+        store.config.preferences.history_max_records = Some(1);
+        store.save_record_with_images(&item, &pages).unwrap();
+        item.id = "image-second".into();
+        store.save_record_with_images(&item, &pages).unwrap();
+        assert!(store.prompt_images("image-first").is_err());
+        assert_eq!(store.prompt_images("image-second").unwrap(), pages);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM prompt_image_record", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
     use super::*;
     use crate::model::{CANDY_RULE_ID, PELICAN_RULE_ID};
     use serde_json::json;

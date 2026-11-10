@@ -29,6 +29,8 @@ pub struct Completion {
     pub request_id: Option<String>,
     /// 首选协议及可选回退协议的真实尝试顺序；请求前本地失败时为空。
     pub attempted_modes: Vec<String>,
+    /// 本次转换后用于请求的原始 PNG data URL；只交给独立历史存储，不进入轻量快照。
+    pub prompt_images: Vec<String>,
 }
 
 impl Completion {
@@ -42,6 +44,7 @@ impl Completion {
             http_status: None,
             request_id: None,
             attempted_modes: Vec::new(),
+            prompt_images: Vec::new(),
         }
     }
 
@@ -181,6 +184,7 @@ pub fn parse_completion(value: &Value) -> Completion {
         http_status: None,
         request_id: None,
         attempted_modes: Vec::new(),
+        prompt_images: Vec::new(),
     }
 }
 
@@ -265,6 +269,7 @@ pub fn parse_response(value: &Value) -> Completion {
         http_status: None,
         request_id: None,
         attempted_modes: Vec::new(),
+        prompt_images: Vec::new(),
     }
 }
 
@@ -330,10 +335,43 @@ pub async fn complete_with_diagnostics(
             "超时超过系统计时器可表示的范围，请减小秒数。",
         );
     };
+    if let Err(message) = rule.validate() {
+        return Completion::failure("configuration", &message);
+    }
+    // 自动与手动请求共用无窗口转换；转换也消耗同一总期限。仅生成一次，协议回退
+    // 复用完全相同的 PNG，不得在图片失败后暗中发送明文或重新获得一份超时。
+    let images = if rule.prompt_as_image {
+        let mut rendering = crate::prompt_image::start(rule.prompt.clone());
+        let converted = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Completion {
+                cancelled: true,
+                ..Completion::failure("cancelled", "测试已取消。")
+            },
+            _ = tokio::time::sleep_until(deadline) => return Completion::failure("timeout", "题目转图片超时，请增加本题超时后重试。"),
+            result = &mut rendering.task => result,
+        };
+        match converted {
+            Ok(Ok(images)) if !images.is_empty() => Some(images),
+            Ok(Err(message)) => return Completion::failure("image_conversion", &message),
+            _ => {
+                return Completion::failure(
+                    "image_conversion",
+                    "题目转图片未完成，请重试或关闭转图片发送。",
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let prompt = PromptInput {
+        text: &rule.prompt,
+        images,
+    };
     let trace_id = uuid::Uuid::new_v4().to_string();
     let mut result = complete_once(
         profile,
-        rule,
+        &prompt,
         key,
         timeout,
         token,
@@ -355,6 +393,7 @@ pub async fn complete_with_diagnostics(
         || token.is_cancelled()
         || tokio::time::Instant::now() >= deadline
     {
+        result.prompt_images = prompt.images.unwrap_or_default();
         return result;
     }
     let mut fallback = profile.clone();
@@ -366,7 +405,7 @@ pub async fn complete_with_diagnostics(
     .into();
     let mut retried = complete_once(
         &fallback,
-        rule,
+        &prompt,
         key,
         timeout,
         token,
@@ -380,6 +419,7 @@ pub async fn complete_with_diagnostics(
     .await;
     result.attempted_modes.push(fallback.interface_mode);
     retried.attempted_modes = result.attempted_modes;
+    retried.prompt_images = prompt.images.unwrap_or_default();
     retried
 }
 
@@ -391,10 +431,16 @@ struct AttemptDiagnostics<'a> {
     attempt_index: u8,
 }
 
+/// 一次测试持有一份转换结果；图片模式的 text 仅为本地原文，绝不序列化进请求。
+struct PromptInput<'a> {
+    text: &'a str,
+    images: Option<Vec<String>>,
+}
+
 /// 仅执行所选协议一次，不递归回退；总超时包含完整正文读取，不按固定字节数中止正常响应。
 async fn complete_once(
     profile: &ModelProfile,
-    rule: &TestRule,
+    prompt: &PromptInput<'_>,
     key: &str,
     timeout: u64,
     token: &CancellationToken,
@@ -455,16 +501,29 @@ async fn complete_once(
     let mut response_metadata = None;
     let started_at_utc = chrono::Utc::now().to_rfc3339();
     let work = async {
+        let content = if let Some(images) = &prompt.images {
+            Value::Array(images.iter().map(|url| {
+                if profile.interface_mode == "responses" {
+                    json!({"type": "input_image", "image_url": url, "detail": "high"})
+                } else {
+                    json!({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+                }
+            }).collect())
+        } else {
+            json!(prompt.text)
+        };
         let mut payload = if profile.interface_mode == "responses" {
             json!({
                 "model": profile.model,
-                "input": rule.prompt,
+                "input": if prompt.images.is_some() {
+                    json!([{"role": "user", "content": content}])
+                } else { content },
                 "stream": request_stream
             })
         } else {
             json!({
                 "model": profile.model,
-                "messages": [{"role": "user", "content": rule.prompt}],
+                "messages": [{"role": "user", "content": content}],
                 "stream": request_stream
             })
         };
@@ -544,6 +603,7 @@ async fn complete_once(
                 401 | 403 => ("authentication", format!("鉴权失败（HTTP {status}），请检查 API Key 和权限。")),
                 429 => ("rate_limit", "请求被限流或额度不足（HTTP 429），请稍后手动重试。".into()),
                 300..=399 => ("redirect", "接口返回重定向。为保护密钥，请直接填写最终接口地址。".into()),
+                400 | 413 | 415 | 422 if prompt.images.is_some() => ("request_rejected", format!("接口拒绝图片题目（HTTP {status}），请检查模型识图能力、图片请求格式/大小及思考强度支持；可关闭转图片发送后手动重试。未自动改为文字。")),
                 400 | 422 if profile.reasoning_effort.is_some() => ("request_rejected", format!("接口拒绝请求（HTTP {status}），请核对模型、接口模式及思考强度支持范围；不支持思考强度时请选择“不指定”。未自动换档。")),
                 _ => ("http", format!("接口返回 HTTP {status}，请检查模型名称和服务状态。")),
             };

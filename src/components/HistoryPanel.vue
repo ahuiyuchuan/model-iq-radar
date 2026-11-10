@@ -11,8 +11,10 @@ import AnswerContent from './AnswerContent.vue';
 import HistoryAnswerPreview from './HistoryAnswerPreview.vue';
 import { previewAllowed } from '../htmlAnswer';
 import DatePicker from './DatePicker.vue';
+import PromptImagePreview from './PromptImagePreview.vue';
 import { call } from '../bridge';
 const previewError = ref('');
+const imagePreview = ref<InstanceType<typeof PromptImagePreview>>();
 const props = defineProps<{
     history: TestRecord[];
     profiles: ModelProfile[];
@@ -41,6 +43,7 @@ const detailFields = computed(() => {
         { label: '接口分组', value: record.profileName },
         { label: '模型', value: record.model },
         { label: '规则预设', value: record.ruleName || '未记录' },
+        { label: '题目发送方式', value: record.promptAsImage ? '图片' : '文字' },
         { label: '思考强度', value: reasoningLabel(record) },
         { label: '请求耗时', value: `${(record.durationMs / 1000).toFixed(2)} 秒` },
         {
@@ -200,7 +203,7 @@ const filteredHistory = computed(() => {
             )
                 return false;
         }
-        // 历史正文通常按 128 MiB 预算保留，单条可更长；空搜索不能逐条复制、转小写整段回答。
+        // 历史正文与图片共用 128 MiB 预算，单条可更长；空搜索不能逐条复制、转小写整段回答。
         return (
             !query ||
             (props.remote
@@ -295,9 +298,25 @@ onBeforeUnmount(() => {
             <dl class="history-detail-summary">
                 <div v-for="field in detailFields" :key="field.label">
                     <dt>{{ field.label }}</dt>
-                    <dd>{{ field.value }}</dd>
+                    <dd>
+                        {{ field.value
+                        }}<button
+                            v-if="field.label === '题目发送方式' && selectedRecord.promptAsImage"
+                            type="button"
+                            class="button subtle small"
+                            @click="imagePreview?.open()"
+                        >
+                            查看图片
+                        </button>
+                    </dd>
                 </div>
             </dl>
+            <PromptImagePreview
+                v-if="selectedRecord.promptAsImage"
+                :key="selectedRecord.id"
+                ref="imagePreview"
+                :record-id="selectedRecord.id"
+            />
             <dl class="history-detail-content">
                 <dt>判定答案（任一命中）</dt>
                 <dd>

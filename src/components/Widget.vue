@@ -24,6 +24,8 @@ import {
     Info,
     Grip,
     PanelLeftClose,
+    Image,
+    Mail,
 } from 'lucide-vue-next';
 import {
     CANDY_RULE_ID,
@@ -147,6 +149,11 @@ const effortPickerOpen = ref(false);
 const pickerOpen = ref(false);
 const selecting = ref(false);
 const autoSwitchPending = ref(false);
+const imageSwitchPending = ref(false);
+const mailSwitchPending = ref(false);
+// 快捷操作错误各自清理，不能在重试成功时误清模型测试或设置窗口的故障。
+const imageSwitchError = ref('');
+const mailSwitchError = ref('');
 // 设置窗口使用独立等待/故障状态，测试重跑不会把窗口故障当作模型失败，也不会误清提示。
 const settingsPending = ref(false);
 const settingsError = ref('');
@@ -413,6 +420,9 @@ const reasoning = computed(() =>
     reasoningSupport(profile.value?.model ?? '', profile.value?.interfaceMode, currentEffort.value || null),
 );
 const autoTestEnabled = computed(() => snapshot.value?.config.preferences.autoTestEnabled ?? false);
+/** 图片测试是全局偏好，切换分组或题目不能改变按钮状态。 */
+const promptAsImage = computed(() => Boolean(snapshot.value?.config.preferences.promptAsImage));
+const emailEnabled = computed(() => Boolean(snapshot.value?.config.emailNotifications?.enabled));
 /** 规则由稳定 ID 解析，失效绑定明确标识；强度缺字段沿用旧配置 low，null 为不指定。 */
 const profileSummaries = computed(() =>
     Object.fromEntries(
@@ -510,6 +520,7 @@ async function toggleExpanded(): Promise<void> {
 
 /** 没有配置时主操作直接进入设置；不产生无意义的失败历史。 */
 async function primaryAction(): Promise<void> {
+    if (imageSwitchPending.value) return;
     if (!profile.value) {
         await safeOpenSettings();
     } else if (busy.value) {
@@ -551,6 +562,38 @@ async function toggleAutoTest(): Promise<void> {
     } finally {
         await refresh();
         autoSwitchPending.value = false;
+    }
+}
+
+/** 图片按钮只保存全局开关，不提交规则/偏好整份草稿；失败保留权威状态供重试。 */
+async function togglePromptImage(): Promise<void> {
+    if (!snapshot.value || busy.value || selecting.value || imageSwitchPending.value) return;
+    imageSwitchPending.value = true;
+    imageSwitchError.value = '';
+    try {
+        await call('set_prompt_as_image', {
+            enabled: !promptAsImage.value,
+        });
+    } catch (cause) {
+        if (!disposed) imageSwitchError.value = String(cause);
+    } finally {
+        await refresh();
+        imageSwitchPending.value = false;
+    }
+}
+
+/** 邮箱按钮只切换已保存通知总开关，不试发或改写凭据；未配置时显示后端的设置指引。 */
+async function toggleEmail(): Promise<void> {
+    if (!snapshot.value || mailSwitchPending.value) return;
+    mailSwitchPending.value = true;
+    mailSwitchError.value = '';
+    try {
+        await call('set_email_notifications_enabled', { enabled: !emailEnabled.value });
+    } catch (cause) {
+        if (!disposed) mailSwitchError.value = String(cause);
+    } finally {
+        await refresh();
+        mailSwitchPending.value = false;
     }
 }
 
@@ -716,6 +759,9 @@ watch(error, (value) => {
 watch(settingsError, (value) => {
     if (value && !expanded.value) void toggleExpanded();
 });
+watch([imageSwitchError, mailSwitchError], (values) => {
+    if (values.some(Boolean) && !expanded.value) void toggleExpanded();
+});
 </script>
 
 <template>
@@ -773,10 +819,36 @@ watch(settingsError, (value) => {
             >
                 <div class="brand">
                     <Target class="brand-mark" :size="17" aria-hidden="true" />
-                    <span>测智雷达</span>
+                    <span :class="{ 'sr-only': petActive }">测智雷达</span>
                 </div>
-                <Grip :size="22" class="drag-grip" aria-hidden="true" />
+                <Grip v-if="!petActive" :size="22" class="drag-grip" aria-hidden="true" />
                 <div class="widget-tools" @mousedown.stop>
+                    <button
+                        class="icon-button"
+                        :class="{ active: promptAsImage }"
+                        :aria-pressed="promptAsImage"
+                        :aria-busy="imageSwitchPending"
+                        :disabled="busy || selecting || imageSwitchPending || !snapshot"
+                        aria-label="转为图片发送"
+                        :title="`${promptAsImage ? '关闭' : '开启'}图片测试 · 全局`"
+                        @click="togglePromptImage"
+                    >
+                        <LoaderCircle v-if="imageSwitchPending" :size="15" class="spin" aria-hidden="true" />
+                        <Image v-else :size="15" aria-hidden="true" />
+                    </button>
+                    <button
+                        class="icon-button"
+                        :class="{ active: emailEnabled }"
+                        :aria-pressed="emailEnabled"
+                        :aria-busy="mailSwitchPending"
+                        :disabled="mailSwitchPending || !snapshot"
+                        aria-label="邮箱通知"
+                        :title="`${emailEnabled ? '关闭' : '开启'}邮箱通知`"
+                        @click="toggleEmail"
+                    >
+                        <LoaderCircle v-if="mailSwitchPending" :size="15" class="spin" aria-hidden="true" />
+                        <Mail v-else :size="15" aria-hidden="true" />
+                    </button>
                     <button
                         class="icon-button"
                         :class="{ active: autoTestEnabled }"
@@ -829,7 +901,7 @@ watch(settingsError, (value) => {
                     :context="petActive ? 'scene' : 'widget'"
                     :selected-id="snapshot?.config.selectedProfileId ?? null"
                     :expanded="expanded"
-                    :disabled="busy || selecting"
+                    :disabled="busy || selecting || imageSwitchPending"
                     :show-model="false"
                     :summaries="profileSummaries"
                     :before-open="() => closeOtherPickers('group')"
@@ -849,7 +921,14 @@ watch(settingsError, (value) => {
                     :selected-id="profile?.model ?? null"
                     :placeholder="profile?.model || '无模型'"
                     :expanded="expanded"
-                    :disabled="busy || selecting || catalogLoading || fetchingModels || !catalogModels.length"
+                    :disabled="
+                        busy ||
+                        selecting ||
+                        imageSwitchPending ||
+                        catalogLoading ||
+                        fetchingModels ||
+                        !catalogModels.length
+                    "
                     :show-model="false"
                     :show-icon="false"
                     :before-open="() => closeOtherPickers('model')"
@@ -871,7 +950,14 @@ watch(settingsError, (value) => {
                               : '拉取当前分组模型'
                     "
                     :aria-busy="catalogLoading || fetchingModels"
-                    :disabled="busy || selecting || catalogLoading || fetchingModels || !profile"
+                    :disabled="
+                        busy ||
+                        selecting ||
+                        imageSwitchPending ||
+                        catalogLoading ||
+                        fetchingModels ||
+                        !profile
+                    "
                     @click="fetchProfileModels"
                 >
                     <RotateCw
@@ -893,7 +979,7 @@ watch(settingsError, (value) => {
                     :selected-id="selectedRuleId"
                     :placeholder="profile?.rulePresetId ? '规则已失效' : '默认规则'"
                     :expanded="expanded"
-                    :disabled="busy || selecting || !profile"
+                    :disabled="busy || selecting || imageSwitchPending || !profile"
                     :show-model="false"
                     :before-open="() => closeOtherPickers('rule')"
                     :prepare-scene-menu="prepareSceneMenu"
@@ -910,7 +996,7 @@ watch(settingsError, (value) => {
                     :profiles="reasoning.options"
                     :selected-id="currentEffort"
                     :expanded="expanded"
-                    :disabled="busy || selecting || !profile"
+                    :disabled="busy || selecting || imageSwitchPending || !profile"
                     :show-model="false"
                     :show-icon="false"
                     :description="reasoning.notice"
@@ -945,6 +1031,8 @@ watch(settingsError, (value) => {
 
                 <div v-if="error" class="inline-error" role="alert">{{ error }}</div>
                 <div v-if="settingsError" class="inline-error" role="alert">{{ settingsError }}</div>
+                <div v-if="imageSwitchError" class="inline-error" role="alert">{{ imageSwitchError }}</div>
+                <div v-if="mailSwitchError" class="inline-error" role="alert">{{ mailSwitchError }}</div>
                 <div class="answer-label">
                     <span>模型回答</span>
                     <div class="answer-label-tools">
@@ -1020,6 +1108,7 @@ watch(settingsError, (value) => {
                         :disabled="
                             cancelling ||
                             selecting ||
+                            imageSwitchPending ||
                             (busy && !snapshot?.running) ||
                             (!profile && settingsPending)
                         "
@@ -1067,6 +1156,7 @@ watch(settingsError, (value) => {
                     :disabled="
                         cancelling ||
                         selecting ||
+                        imageSwitchPending ||
                         (busy && !snapshot?.running) ||
                         (!profile && settingsPending)
                     "

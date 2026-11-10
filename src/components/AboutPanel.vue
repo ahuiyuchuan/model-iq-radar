@@ -78,6 +78,7 @@ const repository = 'https://github.com/ahuiyuchuan/model-iq-radar';
                 <li>HTML/SVG 回答在卡片、历史列表与详情统一展示隔离动画，不参与降智判定或邮件通知。</li>
                 <li>接口支持拉取模型、测试连接，历史支持分组与关键词组合筛选。</li>
                 <li>支持 Chat Completions/Responses、思考强度、规则级超时和规则预设绑定。</li>
+                <li>题目可一键转为图片发送，卡片提供图片发送及邮箱通知快捷开关，与设置同步。</li>
                 <li>悬浮窗与托盘提供自动测试快捷开关，历史可按状态筛选并导出原始记录。</li>
             </ul>
         </section>

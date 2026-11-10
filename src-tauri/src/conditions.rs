@@ -13,7 +13,7 @@ pub fn effective_rule(config: &AppConfig, profile: &ModelProfile) -> Result<Test
 
 /// 正式请求和草稿连接测试共用已保存规则解析；None 沿用默认，悬空 ID 必须明确报错。
 pub fn rule_for_binding(config: &AppConfig, preset_id: Option<&str>) -> Result<TestRule, String> {
-    let rule = match preset_id {
+    let mut rule = match preset_id {
         Some(id) => {
             let preset = config
                 .rule_presets
@@ -22,6 +22,7 @@ pub fn rule_for_binding(config: &AppConfig, preset_id: Option<&str>) -> Result<T
                 .ok_or("模型绑定的规则预设不存在，请重新选择规则后保存。")?;
             TestRule {
                 prompt: preset.prompt.clone(),
+                prompt_as_image: config.preferences.prompt_as_image,
                 keyword: preset.keyword.clone(),
                 alternative_keywords: preset.alternative_keywords.clone(),
                 timeout_seconds: preset.timeout_seconds,
@@ -29,6 +30,7 @@ pub fn rule_for_binding(config: &AppConfig, preset_id: Option<&str>) -> Result<T
         }
         None => config.rule.clone(),
     };
+    rule.prompt_as_image = config.preferences.prompt_as_image;
     rule.validate()?;
     Ok(rule)
 }
@@ -51,6 +53,8 @@ pub fn condition_fingerprint(config: &AppConfig, profile: &ModelProfile) -> Resu
         model: &'a str,
         credential_revision: Option<&'a str>,
         prompt: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_image_version: Option<&'static str>,
         keyword: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         alternative_keywords: Vec<String>,
@@ -80,6 +84,7 @@ pub fn condition_fingerprint(config: &AppConfig, profile: &ModelProfile) -> Resu
         model: &profile.model,
         credential_revision: profile.credential_revision.as_deref(),
         prompt: rule.prompt,
+        prompt_image_version: rule.prompt_as_image.then_some(crate::prompt_image::VERSION),
         keyword: rule.keyword,
         alternative_keywords: rule.alternative_keywords,
         interface_mode: &profile.interface_mode,
@@ -189,6 +194,7 @@ pub(crate) fn validate_stored_config(config: &AppConfig) -> Result<(), String> {
         }
         TestRule {
             prompt: preset.prompt.clone(),
+            prompt_as_image: config.preferences.prompt_as_image,
             keyword: preset.keyword.clone(),
             alternative_keywords: preset.alternative_keywords.clone(),
             timeout_seconds: preset.timeout_seconds,

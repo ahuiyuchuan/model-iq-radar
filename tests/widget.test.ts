@@ -167,6 +167,128 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
+it('图片全局按钮单次提交并等待权威快照，分组切换不改变状态', async () => {
+    let finish!: () => void;
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'set_prompt_as_image') await new Promise<void>((resolve) => (finish = resolve));
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    const button = wrapper.get('[aria-label="转为图片发送"]');
+    expect(button.attributes('aria-pressed')).toBe('false');
+    await Promise.all([button.trigger('click'), button.trigger('click')]);
+    expect(fake.call.mock.calls.filter(([command]) => command === 'set_prompt_as_image')).toHaveLength(1);
+    expect(fake.call).toHaveBeenCalledWith('set_prompt_as_image', {
+        enabled: true,
+    });
+    expect(button.attributes('aria-busy')).toBe('true');
+    expect(wrapper.get('.compact-primary').attributes('disabled')).toBeDefined();
+    fake.snapshot.config.preferences.promptAsImage = true;
+    finish();
+    await flushPromises();
+    expect(button.attributes('aria-pressed')).toBe('true');
+    expect(button.attributes('disabled')).toBeUndefined();
+    fake.snapshot.config.selectedProfileId = null;
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(button.attributes('aria-pressed')).toBe('true');
+    expect(button.attributes('disabled')).toBeUndefined();
+    fake.snapshot.config.selectedProfileId = 'one';
+    fake.snapshot.config.preferences.promptAsImage = false;
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(button.attributes('aria-pressed')).toBe('false');
+    fake.snapshot.running = {
+        id: 'run',
+        profileName: '本地模型',
+        model: 'fixture',
+        startedAt: new Date().toISOString(),
+    };
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(button.attributes('disabled')).toBeDefined();
+    expect(
+        fake.call.mock.calls.some(([command]) =>
+            ['start_test', 'save_rule', 'save_rule_preset'].includes(command),
+        ),
+    ).toBe(false);
+    wrapper.unmount();
+});
+
+it('邮箱快捷按钮失败可重试，只提交总开关且同步外部状态，不试发邮件或掩盖测试错误', async () => {
+    let rejectToggle = true;
+    fake.call.mockImplementation(async (command: string, args?: { enabled?: boolean }) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'start_test') throw new Error('独立的测试错误');
+        if (command === 'set_email_notifications_enabled') {
+            if (rejectToggle) throw new Error('请先在邮箱设置保存授权码');
+            fake.snapshot.config.emailNotifications = {
+                enabled: Boolean(args?.enabled),
+                smtpHost: 'smtp.example.com',
+                smtpPort: 465,
+                security: 'tls',
+                sender: 'fixture@example.com',
+                username: 'fixture',
+                recipients: ['receiver@example.com'],
+                hasPassword: true,
+                onDegraded: true,
+                onRecovered: true,
+                onFailure: true,
+            };
+        }
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    await wrapper.get('.compact-primary').trigger('click');
+    await flushPromises();
+    const button = wrapper.get('[aria-label="邮箱通知"]');
+    await button.trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).toContain('请先在邮箱设置保存授权码');
+    expect(button.attributes('aria-pressed')).toBe('false');
+    expect(button.attributes('disabled')).toBeUndefined();
+    rejectToggle = false;
+    await button.trigger('click');
+    await flushPromises();
+    expect(wrapper.text()).not.toContain('请先在邮箱设置保存授权码');
+    expect(wrapper.text()).toContain('独立的测试错误');
+    expect(button.attributes('aria-pressed')).toBe('true');
+    expect(fake.call).toHaveBeenCalledWith('set_email_notifications_enabled', { enabled: true });
+    fake.snapshot.config.emailNotifications!.enabled = false;
+    fake.subscribe.mock.calls[0][0]();
+    await flushPromises();
+    expect(button.attributes('aria-pressed')).toBe('false');
+    expect(
+        fake.call.mock.calls.some(([command]) =>
+            ['send_test_email', 'save_email_settings'].includes(command),
+        ),
+    ).toBe(false);
+    wrapper.unmount();
+});
+
+it('邮箱快捷按钮等待期间防重，未提交前不提前显示开启状态', async () => {
+    let finish!: () => void;
+    fake.call.mockImplementation(async (command: string) => {
+        if (command === 'get_snapshot') return structuredClone(fake.snapshot);
+        if (command === 'set_email_notifications_enabled')
+            await new Promise<void>((resolve) => (finish = resolve));
+    });
+    const wrapper = mount(Widget);
+    await flushPromises();
+    const button = wrapper.get('[aria-label="邮箱通知"]');
+    await Promise.all([button.trigger('click'), button.trigger('click')]);
+    expect(
+        fake.call.mock.calls.filter(([command]) => command === 'set_email_notifications_enabled'),
+    ).toHaveLength(1);
+    expect(button.attributes('disabled')).toBeDefined();
+    expect(button.attributes('aria-pressed')).toBe('false');
+    finish();
+    await flushPromises();
+    expect(button.attributes('disabled')).toBeUndefined();
+    wrapper.unmount();
+});
+
 it('桌宠两态共用两行选择器，详情按纵向排列，菜单扩场景而不撑卡片', async () => {
     fake.snapshot.config.profiles[0].rulePresetId = 'bound-rule';
     fake.snapshot.config.rulePresets = [

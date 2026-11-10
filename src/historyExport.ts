@@ -53,6 +53,7 @@ export function historyCsv(records: TestRecord[]): string {
         'startedAt',
         'durationMs',
         'prompt',
+        'promptAsImage',
         'keyword',
         'alternativeKeywords',
         'ruleName',
@@ -80,7 +81,9 @@ export function historyCsv(records: TestRecord[]): string {
                         quote(
                             key === 'alternativeKeywords' || key === 'attemptedModes'
                                 ? JSON.stringify(record[key] ?? [])
-                                : record[key],
+                                : key === 'promptAsImage'
+                                  ? Boolean(record.promptAsImage)
+                                  : record[key],
                         ),
                     )
                     .join(','),

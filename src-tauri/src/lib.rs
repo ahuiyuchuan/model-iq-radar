@@ -12,6 +12,7 @@ pub mod model;
 pub mod notifications;
 mod pet_window;
 pub mod preview;
+mod prompt_image;
 mod response_diagnostics;
 mod responses_sse;
 mod settings_window;
@@ -236,6 +237,35 @@ async fn get_history_records(
     })
     .await
     .map_err(|_| "历史页面任务失败。".to_string())?
+}
+
+/// 草稿预览复用发送排版器，不读写配置/历史、不调用模型；题目沿用现有字符边界。
+#[tauri::command]
+async fn preview_prompt_images(prompt: String) -> Result<Vec<String>, String> {
+    let rule = TestRule {
+        prompt: prompt.clone(),
+        ..TestRule::default()
+    };
+    rule.validate()?;
+    let mut rendering = prompt_image::start(prompt);
+    (&mut rendering.task)
+        .await
+        .map_err(|_| "题目图片预览任务失败，请重试。".to_string())?
+}
+
+/// 按需读取历史保存的PNG；使用独立只读连接，不重新生成或访问凭据。
+#[tauri::command]
+async fn get_prompt_images(
+    app: tauri::AppHandle,
+    record_id: String,
+) -> Result<Vec<String>, String> {
+    conditions::validate_id(&record_id)?;
+    tokio::task::spawn_blocking(move || {
+        let reader = lock(&app.state::<AppState>().store)?.history_reader()?;
+        reader.prompt_images(&record_id)
+    })
+    .await
+    .map_err(|_| "读取请求图片任务失败。".to_string())?
 }
 
 /// 只返回全文命中的稳定记录 ID；输入防抖由界面负责，后端不把搜索当作接口请求。
@@ -651,6 +681,7 @@ fn save_rule_preset(
     }
     let rule = TestRule {
         prompt: preset.prompt.clone(),
+        prompt_as_image: false,
         keyword: preset.keyword.clone(),
         alternative_keywords: preset.alternative_keywords.clone(),
         timeout_seconds: preset.timeout_seconds,
@@ -702,6 +733,23 @@ fn set_profile_rule(
         .ok_or("模型配置已不存在，请刷新后重试。")?;
     config.profiles[index].rule_preset_id = rule_preset_id;
     conditions::effective_rule(&config, &config.profiles[index])?;
+    store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
+}
+
+/// 卡片图片按钮只保存全局图片测试开关；运行中拒绝变更，不改题目/分组或调度期限。
+#[tauri::command]
+fn set_prompt_as_image(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _idle = require_idle(&state)?;
+    let mut store = lock(&state.store)?;
+    let mut config = store.config.clone();
+    config.preferences.prompt_as_image = enabled;
     store.save_config(config)?;
     drop(store);
     changed(&app);
@@ -779,6 +827,7 @@ fn save_preferences(
     mut preferences: Preferences,
     confirm_cleanup: Option<bool>,
     preserve_auto_test: Option<bool>,
+    preserve_prompt_as_image: Option<bool>,
 ) -> Result<SaveOutcome, String> {
     let _idle = require_idle(&state)?;
     // 保存、清理预览、启动和备份共用边界，避免只放开表单却被另一入口的旧上限拒绝。
@@ -788,6 +837,9 @@ fn save_preferences(
     let previous = config.preferences.clone();
     if preserve_auto_test.unwrap_or(false) {
         preferences.auto_test_enabled = previous.auto_test_enabled;
+    }
+    if preserve_prompt_as_image.unwrap_or(false) {
+        preferences.prompt_as_image = previous.prompt_as_image;
     }
     apply_preferences(&app, &preferences)?;
     config.preferences = preferences;
@@ -901,9 +953,14 @@ fn import_config_backup(
 fn save_email_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    input: notifications::EmailSettingsInput,
+    mut input: notifications::EmailSettingsInput,
+    preserve_enabled: Option<bool>,
 ) -> Result<AppConfig, String> {
     let mut store = lock(&state.store)?;
+    // 其他邮件草稿保存不能撤销卡片刚写入的开关；用户明确编辑 enabled 时才覆盖。
+    if preserve_enabled == Some(true) {
+        input.settings.enabled = store.config.email_notifications.enabled;
+    }
     let old_password = notifications::read_password()?;
     let next_password = notifications::validate_input(&store.config.email_notifications, &input)?;
     let mut config = store.config.clone();
@@ -922,6 +979,27 @@ fn save_email_settings(
     drop(store);
     changed(&app);
     Ok(config)
+}
+
+/// 卡片只切换已保存邮件总开关，不覆盖表单草稿、改写凭据或发送测试邮件。
+/// 开启前核验已保存目标与真实授权码；关闭不依赖凭据服务，通知状态和事件选择均保留。
+#[tauri::command]
+fn set_email_notifications_enabled(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut store = lock(&state.store)?;
+    let settings = notifications::toggle_settings(&store.config.email_notifications, enabled)?;
+    if enabled && notifications::read_password()?.is_none_or(|password| password.is_empty()) {
+        return Err("请先在设置 → 邮箱通知中保存有效授权码，再开启通知。".into());
+    }
+    let mut config = store.config.clone();
+    config.email_notifications = settings;
+    store.save_config(config)?;
+    drop(store);
+    changed(&app);
+    Ok(())
 }
 
 /// 试发使用表单草稿，既不保存，也不触发模型测试或通知状态变化。
@@ -1086,6 +1164,7 @@ async fn run_test(
         answer: completion.answer,
         error: completion.error,
         prompt: rule.prompt,
+        prompt_as_image: rule.prompt_as_image,
         keyword: rule.keyword,
         alternative_keywords: rule.alternative_keywords,
         rule_name: Some(rule_name),
@@ -1112,7 +1191,7 @@ async fn run_test(
     let result = {
         let mut running = lock(&state.running)?;
         let mut store = lock(&state.store)?;
-        let result = store.save_record(&record);
+        let result = store.save_record_with_images(&record, &completion.prompt_images);
         let mut next = lock(&state.next_auto_test)?;
         // 成功、失败、超时、取消和历史保存失败都在结算后等待完整间隔，不计算请求耗时。
         // 运行门禁尚未释放，外部自动开关在途变化也以这里的最新配置为准，不会抢跑。
@@ -2135,6 +2214,8 @@ pub fn run() {
             get_snapshot,
             get_history_index,
             get_history_records,
+            preview_prompt_images,
+            get_prompt_images,
             search_history,
             get_widget_dock,
             save_profile,
@@ -2142,6 +2223,7 @@ pub fn run() {
             select_profile,
             save_rule,
             save_rule_preset,
+            set_prompt_as_image,
             set_profile_rule,
             set_profile_effort,
             delete_rule_preset,
@@ -2151,6 +2233,7 @@ pub fn run() {
             preview_config_import,
             import_config_backup,
             save_email_settings,
+            set_email_notifications_enabled,
             send_test_email,
             set_auto_test_enabled,
             start_test,

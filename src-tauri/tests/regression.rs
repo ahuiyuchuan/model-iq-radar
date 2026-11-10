@@ -658,6 +658,102 @@ fn profile(base_url: String) -> ModelProfile {
     }
 }
 
+/// 使用真实无窗口排版及本机 HTTP，核对双协议只包含 PNG、回退复用同一图片且不泄漏题答。
+#[cfg(windows)]
+#[tokio::test]
+async fn image_prompt_both_protocols_and_fallback_keep_images_without_plaintext() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    for first in ["chat_completions", "responses"] {
+        let other = if first == "responses" {
+            "chat_completions"
+        } else {
+            "responses"
+        };
+        let final_body = if other == "responses" {
+            json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"5"}]}]})
+        } else {
+            json!({"choices":[{"finish_reason":"stop","message":{"content":"5"}}]})
+        };
+        let (base, requests) = sequence_fixture(vec![
+            ("400 Bad Request".into(), "{}".into(), Duration::ZERO),
+            ("200 OK".into(), final_body.to_string(), Duration::ZERO),
+        ]);
+        let mut profile = profile(base);
+        profile.interface_mode = first.into();
+        profile.protocol_fallback_enabled = true;
+        let rule = TestRule {
+            prompt: "image-only-private-question：三颗糖加两颗糖，只回复数量。".into(),
+            prompt_as_image: true,
+            keyword: "secret-answer-never-send".into(),
+            ..TestRule::default()
+        };
+        let result = api::complete(&profile, &rule, "", 30, &CancellationToken::new()).await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.answer, "5");
+        assert_eq!(result.attempted_modes, [first, other]);
+        let mut sent = Vec::new();
+        for mode in [first, other] {
+            let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            let raw = payload.to_string();
+            assert!(!raw.contains("image-only-private-question"));
+            assert!(!raw.contains("secret-answer-never-send"));
+            assert!(payload.get("tools").is_none());
+            let content = if mode == "responses" {
+                &payload["input"][0]["content"]
+            } else {
+                &payload["messages"][0]["content"]
+            };
+            let pages = content.as_array().unwrap();
+            assert!(!pages.is_empty());
+            let mut urls = Vec::new();
+            for page in pages {
+                let url = if mode == "responses" {
+                    assert_eq!(page["type"], "input_image");
+                    assert_eq!(page["detail"], "high");
+                    page["image_url"].as_str().unwrap()
+                } else {
+                    assert_eq!(page["type"], "image_url");
+                    assert_eq!(page["image_url"]["detail"], "high");
+                    page["image_url"]["url"].as_str().unwrap()
+                };
+                let png = STANDARD
+                    .decode(url.strip_prefix("data:image/png;base64,").unwrap())
+                    .unwrap();
+                assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+                urls.push(url.to_owned());
+            }
+            sent.push(urls);
+        }
+        assert_eq!(sent[0], sent[1]);
+        assert_eq!(result.prompt_images, sent[0]);
+        assert!(requests.try_recv().is_err());
+        assert_eq!(profile.interface_mode, first);
+    }
+}
+
+/// 本地转换失败或取消必须发生在 HTTP 前，不能消耗回退次数或偷偷改发文字。
+#[cfg(windows)]
+#[tokio::test]
+async fn image_conversion_failure_and_precancellation_never_attempt_http() {
+    let mut profile = profile("http://127.0.0.1:9".into());
+    profile.protocol_fallback_enabled = true;
+    let mut rule = TestRule {
+        prompt_as_image: true,
+        ..TestRule::default()
+    };
+    rule.prompt = "不能显示\0隐藏题面".into();
+    let failed = api::complete(&profile, &rule, "", 30, &CancellationToken::new()).await;
+    assert_eq!(failed.error_kind.as_deref(), Some("image_conversion"));
+    assert!(failed.attempted_modes.is_empty());
+    let token = CancellationToken::new();
+    token.cancel();
+    rule.prompt = "正常虚构题目".into();
+    let cancelled = api::complete(&profile, &rule, "", 30, &token).await;
+    assert!(cancelled.cancelled && cancelled.attempted_modes.is_empty());
+}
+
 #[test]
 fn endpoint_validation_and_normalization() {
     assert_eq!(
@@ -713,6 +809,7 @@ async fn explicit_fallback_uses_other_protocol_once_without_rewriting_profile() 
         selected.protocol_fallback_enabled = true;
         let rule = TestRule {
             prompt: "独立问题".into(),
+            prompt_as_image: false,
             keyword: "do-not-send-secret-answer".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
@@ -781,6 +878,7 @@ async fn fallback_obeys_disabled_success_and_two_attempt_limit() {
         selected.protocol_fallback_enabled = enabled;
         let rule = TestRule {
             prompt: "问题".into(),
+            prompt_as_image: false,
             keyword: "正确答案".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
@@ -835,6 +933,7 @@ async fn fallback_shares_original_timeout_and_respects_cancellation() {
     selected.protocol_fallback_enabled = true;
     let rule = TestRule {
         prompt: "问题".into(),
+        prompt_as_image: false,
         keyword: "完成".into(),
         alternative_keywords: Vec::new(),
         timeout_seconds: None,
@@ -920,6 +1019,7 @@ fn markdown_answer_roundtrips_without_changing_literal_match() {
         answer: completion.answer,
         error: None,
         prompt: "问题".into(),
+        prompt_as_image: false,
         keyword: "高市早苗".into(),
         alternative_keywords: Vec::new(),
         rule_name: None,
@@ -945,6 +1045,7 @@ fn markdown_answer_roundtrips_without_changing_literal_match() {
 fn custom_rules_reject_blank_but_preserve_meaningful_spaces() {
     assert!(TestRule {
         prompt: "问题".into(),
+        prompt_as_image: false,
         keyword: " \n".into(),
         alternative_keywords: Vec::new(),
         timeout_seconds: None,
@@ -953,6 +1054,7 @@ fn custom_rules_reject_blank_but_preserve_meaningful_spaces() {
     .is_err());
     let rule = TestRule {
         prompt: "自定义问题\n".into(),
+        prompt_as_image: false,
         keyword: " Answer ".into(),
         alternative_keywords: Vec::new(),
         timeout_seconds: None,
@@ -970,6 +1072,7 @@ async fn real_request_sends_only_prompt_and_uses_complete_response() {
     let (base, receiver) = fixture("200 OK", body, Duration::ZERO);
     let rule = TestRule {
         prompt: "独立题面".into(),
+        prompt_as_image: false,
         keyword: "自定义答案".into(),
         alternative_keywords: vec!["do-not-send-alternative-answer".into()],
         timeout_seconds: None,
@@ -1010,6 +1113,7 @@ async fn responses_request_uses_responses_payload_and_parser() {
     let (base, receiver) = fixture("200 OK", body, Duration::ZERO);
     let rule = TestRule {
         prompt: "独立题面".into(),
+        prompt_as_image: false,
         keyword: "自定义答案".into(),
         alternative_keywords: Vec::new(),
         timeout_seconds: None,
@@ -1101,6 +1205,7 @@ fn history_keeps_rule_snapshot_and_reopens_without_secrets() {
             answer: "旧答案".into(),
             error: None,
             prompt: "旧题面".into(),
+            prompt_as_image: false,
             keyword: "旧答案".into(),
             alternative_keywords: Vec::new(),
             rule_name: None,
@@ -1122,6 +1227,7 @@ fn history_keeps_rule_snapshot_and_reopens_without_secrets() {
         let config = AppConfig {
             rule: TestRule {
                 prompt: "新题面".into(),
+                prompt_as_image: false,
                 keyword: "新答案".into(),
                 alternative_keywords: Vec::new(),
                 timeout_seconds: None,

@@ -60,8 +60,15 @@ function discard(): void {
 }
 watch(
     () => props.settings,
-    () => {
+    (next, previous) => {
         if (!dirty.value) discard();
+        else if (next && next.enabled !== previous?.enabled) {
+            // 卡片只切换总开关；密码、SMTP、收件人与事件草稿不能被整份刷新覆盖。
+            form.enabled = next.enabled;
+            const saved = JSON.parse(baseline.value) as EmailNotificationSettings;
+            saved.enabled = next.enabled;
+            baseline.value = JSON.stringify(saved);
+        }
     },
     { immediate: true, deep: true },
 );
@@ -88,7 +95,12 @@ async function perform(kind: 'save' | 'test'): Promise<boolean> {
     message.value = '';
     const submitted = serialize();
     try {
-        await call(kind === 'save' ? 'save_email_settings' : 'send_test_email', { input: input() });
+        const savedEnabled = (JSON.parse(baseline.value) as EmailNotificationSettings).enabled;
+        await call(kind === 'save' ? 'save_email_settings' : 'send_test_email', {
+            input: input(),
+            // 未编辑总开关时，后端保留最新值；即使卡片通知尚未到达也不撤销其操作。
+            ...(kind === 'save' && savedEnabled === form.enabled ? { preserveEnabled: true } : {}),
+        });
         if (kind === 'save') {
             // 后端已提交便清除明文；快照同步仍属于本次保存，不能提前允许离页后回填旧设置。
             form.recipients = input().settings.recipients;

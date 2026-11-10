@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// 备份限额与配置数量限制共同生效，避免导入超大文件或递归对象拖慢桌面进程。
 pub const BACKUP_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// 版本 3 增加题目级超时；读取兼容 1/2，旧程序拒绝新版以免静默丢失请求预算。
+/// 版本 4 增加题目转图片开关；读取兼容 1—3，旧程序须拒绝新版，避免误发明文。
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupDocument {
@@ -71,7 +71,7 @@ pub fn export_backup(config: &AppConfig) -> Result<BackupDocument, String> {
     config.email_notifications.has_password = false;
     config.widget_position = None;
     let document = BackupDocument {
-        version: 3,
+        version: 4,
         exported_at: Utc::now().to_rfc3339(),
         config,
         note: "不包含 API Key 或邮箱授权码；导入后须补填凭据，邮件通知默认关闭。重复项按稳定 ID 判断。".into(),
@@ -136,10 +136,22 @@ fn read_backup(backup: &Value) -> Result<AppConfig, String> {
     reject_secrets(backup, 0)?;
     let document: BackupDocument =
         serde_json::from_value(backup.clone()).map_err(|_| "配置备份格式无效。")?;
-    if !matches!(document.version, 1..=3) {
+    if !matches!(document.version, 1..=4) {
         return Err("不支持此备份版本，请使用匹配的应用版本。".into());
     }
+    if document.version < 4
+        && (document.config.preferences.prompt_as_image
+            || document.config.rule.prompt_as_image
+            || document
+                .config
+                .rule_presets
+                .iter()
+                .any(|rule| rule.prompt_as_image))
+    {
+        return Err("图片题目须使用 v4 配置备份，不能声明为旧格式。".into());
+    }
     let mut config = document.config;
+    config.upgrade_prompt_image_switch();
     config.upgrade_builtin_rules();
     validate_config(&config)?;
     crate::notifications::validate_settings(&config.email_notifications)?;

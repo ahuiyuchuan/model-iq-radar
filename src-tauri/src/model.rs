@@ -40,6 +40,7 @@ pub fn builtin_rule_presets() -> Vec<RulePreset> {
             id: CANDY_RULE_ID.into(),
             name: "糖果测试".into(),
             prompt: CANDY_PROMPT.into(),
+            prompt_as_image: false,
             keyword: "21颗".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
@@ -48,6 +49,7 @@ pub fn builtin_rule_presets() -> Vec<RulePreset> {
             id: PELICAN_RULE_ID.into(),
             name: "鹈鹕测试".into(),
             prompt: PELICAN_PROMPT.into(),
+            prompt_as_image: false,
             // 沿用现有非空答案契约；仅非 HTML 回答走普通文本匹配，HTML 始终中性展示、不发信。
             keyword: "<svg".into(),
             alternative_keywords: Vec::new(),
@@ -118,11 +120,19 @@ pub fn validate_reasoning_effort(value: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// 关闭的新选项不写入旧格式对象，确保未启用时保留原有条件/备份的序列化语义。
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// 一个题目对应 1—20 个答案，每项最多 500 Unicode 字符；保留有效空白和换行。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRule {
     pub prompt: String,
+    /// 执行时从全局偏好填入；只读兼容旧测试包的题目字段，保存配置不再写入此字段。
+    #[serde(default, skip_serializing)]
+    pub prompt_as_image: bool,
     pub keyword: String,
     /// 首个答案继续使用 keyword，旧多行字符串不拆分；缺字段等同单答案。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,6 +149,9 @@ pub struct RulePreset {
     pub id: String,
     pub name: String,
     pub prompt: String,
+    /// 只读兼容旧测试包；启动/导入时合并到全局开关并清零，不再按题目保存。
+    #[serde(default, skip_serializing)]
+    pub prompt_as_image: bool,
     pub keyword: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternative_keywords: Vec<String>,
@@ -151,6 +164,7 @@ impl Default for TestRule {
     fn default() -> Self {
         Self {
             prompt: DEFAULT_PROMPT.into(),
+            prompt_as_image: false,
             keyword: "高市早苗".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
@@ -241,6 +255,9 @@ pub struct Preferences {
     pub timeout_seconds: u64,
     /// 默认启用、每三分钟一次；没有选定模型时不会发送请求。
     pub auto_test_enabled: bool,
+    /// 图片测试全局总开关，默认关闭，所有模型/题目及手动/自动测试共用。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prompt_as_image: bool,
     /// 分钟数，范围 1—1440；手动/自动测试结算后等待完整间隔，开启或修改间隔也重新计时。
     pub auto_test_interval_minutes: u64,
     /// 历史最多保留条数；None 仅使用 5000 条硬上限，旧配置默认为 500 条。
@@ -258,6 +275,7 @@ impl Default for Preferences {
             opacity: 97,
             timeout_seconds: 300,
             auto_test_enabled: true,
+            prompt_as_image: false,
             auto_test_interval_minutes: 3,
             history_max_records: Some(500),
             history_retention_days: None,
@@ -306,6 +324,21 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// 兼容早期1.2.0测试包：任一旧题开启图片则迁移为全局开启，随后清除题目字段。
+    /// 返回是否迁移；启动与内置规则升级同事务写盘，避免用户关闭总开关后重启又被旧值开启。
+    pub fn upgrade_prompt_image_switch(&mut self) -> bool {
+        let legacy_enabled =
+            self.rule.prompt_as_image || self.rule_presets.iter().any(|rule| rule.prompt_as_image);
+        if legacy_enabled {
+            self.preferences.prompt_as_image = true;
+            self.rule.prompt_as_image = false;
+            for rule in &mut self.rule_presets {
+                rule.prompt_as_image = false;
+            }
+        }
+        legacy_enabled
+    }
+
     /// 首次升级补入自带预设，保留同 ID 的用户内容；标记保存后，删除不会在重启时被撤销。
     /// 此方法只改变内存，调用方继续负责校验和事务持久化。
     pub fn upgrade_builtin_rules(&mut self) {
@@ -357,7 +390,7 @@ pub struct DataResetSelection {
     pub rules: bool,
     /// 桌面偏好、保存的位置及本程序的系统自启项。
     pub widget: bool,
-    /// 测试正文、最近结果索引及通知恢复判断依据。
+    /// 测试正文、请求原图、最近结果索引及通知恢复判断依据。
     pub history: bool,
     /// 邮箱设置、授权码及通知恢复判断依据。
     pub mail: bool,
@@ -415,6 +448,9 @@ pub struct TestRecord {
     pub answer: String,
     pub error: Option<String>,
     pub prompt: String,
+    /// 当次实际发送方式；历史JSON只记录模式，实际PNG由独立图片表保存，不写本地文件路径。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prompt_as_image: bool,
     pub keyword: String,
     /// 当次请求实际使用的全部替代答案和名称；旧历史保留缺失，不反推当前名称。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
