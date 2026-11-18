@@ -243,7 +243,7 @@ impl Store {
         // 校验失败不写回配置正文、不清理历史；前面仅初始化兼容附加表和 WAL，
         // 保留原始业务数据供用户备份或使用兼容版本修复。
         // 内置规则迁移与启动历史检查同事务保存，避免仅留在内存、重启后重复补入。
-        // 同 ID 的用户内容保留；仅完全匹配旧内置正文时替换，容量为 100 自定义 + 2 自带规则。
+        // 同 ID 的用户内容保留；固定 ID 的自带规则不占 100 个自定义名额。
         let upgrade_images = config.upgrade_prompt_image_switch();
         let upgrade_builtins = config.builtin_rules_version < BUILTIN_RULES_VERSION;
         config.upgrade_builtin_rules();
@@ -901,7 +901,11 @@ mod tests {
                 assert_eq!(value["rule"], original["rule"]);
                 assert_eq!(value["rulePresets"], original["rulePresets"]);
             } else {
-                assert_eq!(reset.rule_presets.len(), 2);
+                assert_eq!(reset.rule_presets.len(), 3);
+                assert!(reset
+                    .rule_presets
+                    .iter()
+                    .any(|rule| { rule.id == crate::model::CLAUDE_FABLE_5_RULE_ID }));
                 assert_eq!(reset.builtin_rules_version, BUILTIN_RULES_VERSION);
             }
             if !selection.widget {

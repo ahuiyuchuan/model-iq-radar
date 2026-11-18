@@ -16,7 +16,10 @@ export const DEFAULT_PROMPT =
     '仅依据你的记忆，你所知道的最新一位日本首相是谁？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
 /** 题目原文只约束被测模型；HTML 回答走已有中性展示，备用关键词不评估动画质量。 */
 export const PELICAN_PROMPT =
-    '创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。';
+    '创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。\n- 写实风格';
+/** 普通浏览器预览与桌面目录使用同一题面，不在预览中调用模型。 */
+const CLAUDE_FABLE_5_PROMPT =
+    '仅依据你的记忆，你所知道的 Anthropic 的 Claude Fable 5 的发布日期是什么时候？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。\n- 答案要求只能由年月日组成，例如：2024年11月9日、2025年8月1日、2026年5月8日，年月日之间不得有空格。';
 /** 浏览器布局预览使用与 Rust 同源文案；题目只发送正文，不附加 21颗 判定答案。 */
 export const CANDY_PROMPT =
     '请完成回答下面的问题，答案要求只能由数字和“颗”组成，例如10颗、20颗、30颗；数字与“颗”之间不得有空格：\n\n在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4';
@@ -27,10 +30,16 @@ const preview: AppSnapshot = {
         selectedProfileId: null,
         rule: { prompt: DEFAULT_PROMPT, keyword: '高市早苗' },
         defaultRuleName: '日本首相测试',
-        builtinRulesVersion: 2,
+        builtinRulesVersion: 4,
         rulePresets: [
             { id: CANDY_RULE_ID, name: '糖果测试', prompt: CANDY_PROMPT, keyword: '21颗' },
             { id: 'builtin-pelican-test', name: '鹈鹕测试', prompt: PELICAN_PROMPT, keyword: '<svg' },
+            {
+                id: 'builtin-claude-fable-5-release-date',
+                name: 'Claude Fable 5 发布日期（仅适用于GPT 6.2系列及以上的模型）',
+                prompt: CLAUDE_FABLE_5_PROMPT,
+                keyword: '2026年6月9日',
+            },
         ],
         preferences: {
             alwaysOnTop: true,
@@ -147,7 +156,7 @@ export async function call<T>(command: string, args: Record<string, unknown> = {
             preview.config.rule = structuredClone(previewDefaults.rule);
             preview.config.defaultRuleName = previewDefaults.defaultRuleName;
             preview.config.rulePresets = structuredClone(previewDefaults.rulePresets);
-            preview.config.builtinRulesVersion = 2;
+            preview.config.builtinRulesVersion = previewDefaults.builtinRulesVersion;
             for (const profile of preview.config.profiles) profile.rulePresetId = CANDY_RULE_ID;
         }
         if (selected.widget) {

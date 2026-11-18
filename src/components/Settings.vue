@@ -139,8 +139,9 @@ const form = reactive<ProfileInput>({
     model: '',
     apiKey: '',
     removeKey: false,
-    interfaceMode: 'responses',
-    protocolFallbackEnabled: true,
+    // 新建时只请求首选协议；编辑已有配置时由保存值回填。
+    interfaceMode: 'chat_completions',
+    protocolFallbackEnabled: false,
     reasoningEffort: 'low',
     rulePresetId: CANDY_RULE_ID,
     catalogToken: null,
@@ -225,7 +226,8 @@ const resetSections: { id: keyof DataResetSelection; label: string; description:
     {
         id: 'rules',
         label: '测试规则',
-        description: '删除自定义规则，恢复日本首相、糖果、鹈鹕测试；所有保留接口改用糖果测试。',
+        description:
+            '删除自定义规则，恢复日本首相、糖果、鹈鹕和 Claude Fable 5 发布日期测试；所有保留接口改用糖果测试。',
     },
     {
         id: 'widget',
@@ -505,7 +507,7 @@ watch([error, savedMessage], ([message, saved]) => {
 
 /**
  * 显式切换编辑目标时清空密钥草稿，已有密钥只显示保存状态，不读取明文。
- * 新建默认 Responses 并开启协议回退；已有配置缺字段仍按首版 Chat/关闭解释，不能升级即改变请求策略。
+ * 新建及旧配置缺字段时使用 Chat Completions、关闭协议回退；已有显式选择照常回填。
  */
 function editProfile(profile: ModelProfile | null): void {
     editingId.value = profile?.id ?? null;
@@ -516,8 +518,8 @@ function editProfile(profile: ModelProfile | null): void {
         model: profile?.model ?? '',
         apiKey: '',
         removeKey: false,
-        interfaceMode: profile ? (profile.interfaceMode ?? 'chat_completions') : 'responses',
-        protocolFallbackEnabled: profile ? (profile.protocolFallbackEnabled ?? false) : true,
+        interfaceMode: profile?.interfaceMode ?? 'chat_completions',
+        protocolFallbackEnabled: profile?.protocolFallbackEnabled ?? false,
         reasoningEffort:
             profile && Object.prototype.hasOwnProperty.call(profile, 'reasoningEffort')
                 ? (profile.reasoningEffort ?? null)
@@ -1475,7 +1477,7 @@ async function runDiagnostic(kind: 'models' | 'connection'): Promise<void> {
                                 失败时切换另一种协议
                             </label>
                             <p>
-                                新建配置默认开启。请求失败最多尝试另一种协议一次，可能多产生一次 API
+                                开启后，请求失败最多尝试另一种协议一次，可能多产生一次 API
                                 调用；两次共用总超时，取消或正常返回后不重试，不改写首选协议。
                             </p>
                         </div>

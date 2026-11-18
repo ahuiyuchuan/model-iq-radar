@@ -234,7 +234,9 @@ fn builtin_rules_upgrade_once_without_overwriting_user_changes() {
 /// 一次性规则迁移必须在启动事务内落盘；之后用户删除/修改和重复启动都不能重新补入。
 #[test]
 fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
-    use model_probe_lib::model::{BUILTIN_RULES_VERSION, DEFAULT_PROMPT, PELICAN_RULE_ID};
+    use model_probe_lib::model::{
+        BUILTIN_RULES_VERSION, CLAUDE_FABLE_5_RULE_ID, DEFAULT_PROMPT, PELICAN_RULE_ID,
+    };
     let path =
         std::env::temp_dir().join(format!("model-probe-builtin-{}.db", uuid::Uuid::new_v4()));
     let mut legacy = AppConfig {
@@ -243,7 +245,7 @@ fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
     };
     legacy
         .rule_presets
-        .retain(|rule| rule.id != PELICAN_RULE_ID);
+        .retain(|rule| !matches!(rule.id.as_str(), PELICAN_RULE_ID | CLAUDE_FABLE_5_RULE_ID));
     legacy.rule.prompt = "仅依据你的记忆，你所知道的最新一位日本首相是谁？".into();
     // 自定义题目并不等于旧内置全文，升级不能替用户重写。
     let custom_prompt = legacy.rule.prompt.clone();
@@ -267,7 +269,7 @@ fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
     assert!(!unchanged
         .rule_presets
         .iter()
-        .any(|rule| rule.id == PELICAN_RULE_ID));
+        .any(|rule| matches!(rule.id.as_str(), PELICAN_RULE_ID | CLAUDE_FABLE_5_RULE_ID)));
     connection
         .execute_batch("DROP TRIGGER reject_builtin_migration;")
         .unwrap();
@@ -281,6 +283,11 @@ fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
             .rule_presets
             .iter()
             .any(|rule| rule.id == PELICAN_RULE_ID));
+        assert!(store
+            .config
+            .rule_presets
+            .iter()
+            .any(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID));
     }
     {
         let mut store = Store::open(&path).unwrap();
@@ -298,6 +305,177 @@ fn builtin_rule_migration_persists_once_and_rolls_back_failed_write() {
         .any(|rule| rule.id == PELICAN_RULE_ID));
     drop(connection);
     std::fs::remove_file(path).unwrap();
+}
+
+/// v2 用户删掉的鹈鹕题与已保存策略不能被再次迁移；新题也允许删除，重启不恢复。
+#[test]
+fn v2_rule_catalog_adds_date_once_without_rebinding_profiles() {
+    use model_probe_lib::model::{BUILTIN_RULES_VERSION, CLAUDE_FABLE_5_RULE_ID, PELICAN_RULE_ID};
+    let path = std::env::temp_dir().join(format!(
+        "model-probe-builtin-v2-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let mut legacy = config();
+    legacy.builtin_rules_version = 2;
+    // 特意保留 v2 之前的默认正文，证明 v3 不会重新执行 v2 迁移。
+    legacy.rule.prompt = "请快速按顺序回答：\n1. 仅依据你的记忆，你所知道的最新一位日本首相是谁？\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。".into();
+    legacy.profiles[0].interface_mode = "responses".into();
+    legacy.profiles[0].protocol_fallback_enabled = true;
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.save_config(legacy.clone()).unwrap();
+    }
+    {
+        let mut store = Store::open(&path).unwrap();
+        let mut migrated = store.config.clone();
+        assert_eq!(migrated.builtin_rules_version, BUILTIN_RULES_VERSION);
+        assert!(!migrated
+            .rule_presets
+            .iter()
+            .any(|rule| rule.id == PELICAN_RULE_ID));
+        let preset = migrated
+            .rule_presets
+            .iter()
+            .find(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID)
+            .unwrap();
+        assert_eq!(
+            preset.name,
+            "Claude Fable 5 发布日期（仅适用于GPT 6.2系列及以上的模型）"
+        );
+        let mut profile = migrated.profiles[0].clone();
+        profile.rule_preset_id = Some(CLAUDE_FABLE_5_RULE_ID.into());
+        let date = conditions::effective_rule(&migrated, &profile).unwrap();
+        assert_eq!(date.prompt, "仅依据你的记忆，你所知道的 Anthropic 的 Claude Fable 5 的发布日期是什么时候？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。\n- 答案要求只能由年月日组成，例如：2024年11月9日、2025年8月1日、2026年5月8日，年月日之间不得有空格。");
+        assert!(date.matches("2026年6月9日"));
+        assert!(date.matches("发布日期是2026年6月9日。"));
+        assert!(!date.matches("2026年 6月9日"));
+        assert!(!date.matches("2026年6月10日"));
+        assert!(date.alternative_keywords.is_empty());
+        migrated
+            .rule_presets
+            .retain(|rule| rule.id != CLAUDE_FABLE_5_RULE_ID);
+        let version = migrated.builtin_rules_version;
+        migrated.builtin_rules_version = legacy.builtin_rules_version;
+        assert_eq!(
+            serde_json::to_value(&migrated).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+        migrated.builtin_rules_version = version;
+        store.save_config(migrated).unwrap();
+    }
+    assert_eq!(Store::open(&path).unwrap().config.rule_presets.len(), 1);
+    std::fs::remove_file(path).unwrap();
+}
+
+/// 正式版从已写盘测试包升级时同步默认名称，保留绑定、有效条件和用户主动改名或删除。
+#[test]
+fn local_test_catalog_updates_only_original_date_name() {
+    use model_probe_lib::model::{BUILTIN_RULES_VERSION, CLAUDE_FABLE_5_RULE_ID};
+    let mut local_test = config();
+    local_test.builtin_rules_version = 3;
+    let mut date = AppConfig::default()
+        .rule_presets
+        .into_iter()
+        .find(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID)
+        .unwrap();
+    date.name = "Claude Fable 5 发布日期（仅适用于GPT 6.2系列的模型）".into();
+    date.timeout_seconds = Some(180);
+    local_test.rule_presets.push(date);
+    local_test.profiles[0].rule_preset_id = Some(CLAUDE_FABLE_5_RULE_ID.into());
+    let before = conditions::condition_fingerprint(&local_test, &local_test.profiles[0]).unwrap();
+
+    let mut upgraded = local_test.clone();
+    upgraded.upgrade_builtin_rules();
+    assert_eq!(upgraded.builtin_rules_version, BUILTIN_RULES_VERSION);
+    assert_eq!(
+        upgraded.rule_presets[1].name,
+        "Claude Fable 5 发布日期（仅适用于GPT 6.2系列及以上的模型）"
+    );
+    assert_eq!(upgraded.rule_presets[1].timeout_seconds, Some(180));
+    assert_eq!(
+        upgraded.profiles[0].rule_preset_id.as_deref(),
+        Some(CLAUDE_FABLE_5_RULE_ID)
+    );
+    assert_eq!(
+        conditions::condition_fingerprint(&upgraded, &upgraded.profiles[0]).unwrap(),
+        before
+    );
+
+    local_test.rule_presets[1].name = "我的日期测试".into();
+    let mut renamed = local_test.clone();
+    renamed.upgrade_builtin_rules();
+    assert_eq!(renamed.rule_presets[1].name, "我的日期测试");
+    local_test.profiles[0].rule_preset_id = None;
+    local_test.rule_presets.pop();
+    local_test.upgrade_builtin_rules();
+    assert_eq!(local_test.rule_presets.len(), 1);
+}
+
+/// 旧备份导入沿用启动迁移：按正文判断鹈鹕是否需更新，同 ID 的日期题不覆盖或复制。
+#[test]
+fn v2_backup_updates_only_original_pelican_prompt_and_preserves_custom_date() {
+    use model_probe_lib::model::{CLAUDE_FABLE_5_RULE_ID, PELICAN_RULE_ID};
+    let original_pelican = "创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
+    for (prompt, expected, has_date) in [
+        (
+            original_pelican,
+            format!("{original_pelican}\n- 写实风格"),
+            false,
+        ),
+        ("自定义鹈鹕题面", "自定义鹈鹕题面".into(), true),
+    ] {
+        let mut legacy = AppConfig {
+            builtin_rules_version: 2,
+            ..AppConfig::default()
+        };
+        let pelican = legacy
+            .rule_presets
+            .iter_mut()
+            .find(|rule| rule.id == PELICAN_RULE_ID)
+            .unwrap();
+        pelican.prompt = prompt.into();
+        pelican.name = "自定义鹈鹕名称".into();
+        pelican.timeout_seconds = Some(600);
+        if has_date {
+            let date = legacy
+                .rule_presets
+                .iter_mut()
+                .find(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID)
+                .unwrap();
+            date.prompt = "自定义日期题面".into();
+        } else {
+            legacy
+                .rule_presets
+                .retain(|rule| rule.id != CLAUDE_FABLE_5_RULE_ID);
+        }
+        let mut document = serde_json::to_value(backup::export_backup(&legacy).unwrap()).unwrap();
+        document["version"] = json!(3);
+        let imported = backup::prepare_import(&AppConfig::default(), &document, "replace").unwrap();
+        let presets = imported.config.rule_presets;
+        let pelican = presets
+            .iter()
+            .find(|rule| rule.id == PELICAN_RULE_ID)
+            .unwrap();
+        assert_eq!(pelican.prompt, expected);
+        assert_eq!(pelican.name, "自定义鹈鹕名称");
+        assert_eq!(pelican.timeout_seconds, Some(600));
+        assert_eq!(
+            presets
+                .iter()
+                .filter(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID)
+                .count(),
+            1
+        );
+        let date = presets
+            .iter()
+            .find(|rule| rule.id == CLAUDE_FABLE_5_RULE_ID)
+            .unwrap();
+        if has_date {
+            assert_eq!(date.prompt, "自定义日期题面");
+        } else {
+            assert_eq!(date.keyword, "2026年6月9日");
+        }
+    }
 }
 
 /// 使用隔离 SQLite 文件验证重启缓存、端点隔离与更新替换，绝不访问真实凭据或服务商。
@@ -794,7 +972,7 @@ fn export_rejects_oversized_document_instead_of_creating_unimportable_backup() {
         Err(error) => error,
     };
     assert!(error.contains("4 MiB"));
-    assert_eq!(large.rule_presets.len(), 102);
+    assert_eq!(large.rule_presets.len(), 103);
 }
 
 /// 同题共享覆盖值；旧接口值彻底忽略，等效超时相同不使历史无故失效。

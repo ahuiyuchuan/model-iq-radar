@@ -26,14 +26,24 @@ pub const RULE_VERSION: &str = "literal-contains-v1";
 pub const ANY_RULE_VERSION: &str = "literal-contains-any-v1";
 pub const CANDY_RULE_ID: &str = "builtin-candy-test";
 pub const PELICAN_RULE_ID: &str = "builtin-pelican-test";
-/// 自带规则补入版本独立于 SQLite schema；v2 增加鹈鹕题目并精确迁移旧默认正文。
-pub const BUILTIN_RULES_VERSION: u8 = 2;
-/// “禁止联网/读文件”是发给被测模型的题目要求，不是客户端或开发工具的操作指令。
-pub const PELICAN_PROMPT: &str = "创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
+/// 日期预设的稳定 ID；升级、重置和自定义配额使用同一个标识。
+pub const CLAUDE_FABLE_5_RULE_ID: &str = "builtin-claude-fable-5-release-date";
+/// 自带规则目录版本独立于 SQLite schema；v4 同步本地测试包的日期题名称。
+pub const BUILTIN_RULES_VERSION: u8 = 4;
+/// 仅作适用范围提示；不限制用户选择的模型 ID。
+const CLAUDE_FABLE_5_RULE_NAME: &str = "Claude Fable 5 发布日期（仅适用于GPT 6.2系列及以上的模型）";
+/// 本地测试包使用的名称；正式版只替换完全一致的名称，保留用户改名。
+const LOCAL_TEST_FABLE_5_RULE_NAME: &str = "Claude Fable 5 发布日期（仅适用于GPT 6.2系列的模型）";
+/// 用户提供的题目原文；只发送题面，预期日期留在本机用于判定。
+const CLAUDE_FABLE_5_PROMPT: &str = "仅依据你的记忆，你所知道的 Anthropic 的 Claude Fable 5 的发布日期是什么时候？\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。\n- 答案要求只能由年月日组成，例如：2024年11月9日、2025年8月1日、2026年5月8日，年月日之间不得有空格。";
+/// 旧鹈鹕题面的精确迁移基线；“禁止联网/读文件”是发给被测模型的题目要求。
+const LEGACY_PELICAN_PROMPT: &str = "创建一个HTML，内容是SVG绘制一个黑天鹅骑自行车的2D动画，你不需要任何测试。\n\n要求：\n- 全程禁止联网、搜索互联网、读取本机文件。\n- 只能依据已有的模型知识回答，不得查询或核实实时信息。";
+/// 新建目录与旧题升级共用的要求，以换行开头，保留原有列表格式。
+const PELICAN_REALISTIC_STYLE: &str = "\n- 写实风格";
 /// 用户提供的自带题目原文；只作初始化，不覆盖已保存的修改或删除。
 pub const CANDY_PROMPT: &str = "请完成回答下面的问题，答案要求只能由数字和“颗”组成，例如10颗、20颗、30颗；数字与“颗”之间不得有空格：\n\n在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4";
 
-/// 新配置包含糖果和鹈鹕测试；HTML 识别先于关键词判定，备用关键词不评价动画质量。
+/// 新配置及规则重置共用自带预设目录；日期题的名称仅提示适用范围，不限制模型 ID。
 pub fn builtin_rule_presets() -> Vec<RulePreset> {
     vec![
         RulePreset {
@@ -48,19 +58,28 @@ pub fn builtin_rule_presets() -> Vec<RulePreset> {
         RulePreset {
             id: PELICAN_RULE_ID.into(),
             name: "鹈鹕测试".into(),
-            prompt: PELICAN_PROMPT.into(),
+            prompt: format!("{LEGACY_PELICAN_PROMPT}{PELICAN_REALISTIC_STYLE}"),
             prompt_as_image: false,
             // 沿用现有非空答案契约；仅非 HTML 回答走普通文本匹配，HTML 始终中性展示、不发信。
             keyword: "<svg".into(),
             alternative_keywords: Vec::new(),
             timeout_seconds: None,
         },
+        RulePreset {
+            id: CLAUDE_FABLE_5_RULE_ID.into(),
+            name: CLAUDE_FABLE_5_RULE_NAME.into(),
+            prompt: CLAUDE_FABLE_5_PROMPT.into(),
+            prompt_as_image: false,
+            keyword: "2026年6月9日".into(),
+            alternative_keywords: Vec::new(),
+            timeout_seconds: None,
+        },
     ]
 }
 
-/// 两个固定 ID 不占用 100 个自定义预设配额；启动、保存及备份必须使用同一规则。
+/// 固定 ID 不占用 100 个自定义预设配额；启动、保存及备份必须使用同一规则。
 pub fn is_builtin_rule_id(id: &str) -> bool {
-    matches!(id, CANDY_RULE_ID | PELICAN_RULE_ID)
+    matches!(id, CANDY_RULE_ID | PELICAN_RULE_ID | CLAUDE_FABLE_5_RULE_ID)
 }
 
 /// 默认规则名称只用于展示；旧配置缺字段时命名为日本首相测试，不参与条件摘要。
@@ -359,7 +378,8 @@ impl AppConfig {
             }
             self.builtin_rules_version = 1;
         }
-        if self.builtin_rules_version < BUILTIN_RULES_VERSION {
+        // v2 的正文和鹈鹕迁移只运行一次，后续目录升级不恢复用户删除或编辑。
+        if self.builtin_rules_version < 2 {
             if !self
                 .rule_presets
                 .iter()
@@ -374,7 +394,38 @@ impl AppConfig {
             if self.rule.prompt == LEGACY_DEFAULT_PROMPT {
                 self.rule.prompt = DEFAULT_PROMPT.into();
             }
-            self.builtin_rules_version = BUILTIN_RULES_VERSION;
+            self.builtin_rules_version = 2;
+        }
+        if self.builtin_rules_version < 3 {
+            // 只更新原版正文；改名、超时、答案和自定义题面保持原样，已删除的预设不恢复。
+            if let Some(pelican) = self
+                .rule_presets
+                .iter_mut()
+                .find(|item| item.id == PELICAN_RULE_ID && item.prompt == LEGACY_PELICAN_PROMPT)
+            {
+                pelican.prompt.push_str(PELICAN_REALISTIC_STYLE);
+            }
+            if !self
+                .rule_presets
+                .iter()
+                .any(|item| item.id == CLAUDE_FABLE_5_RULE_ID)
+            {
+                self.rule_presets.extend(
+                    builtin_rule_presets()
+                        .into_iter()
+                        .filter(|item| item.id == CLAUDE_FABLE_5_RULE_ID),
+                );
+            }
+            self.builtin_rules_version = 3;
+        }
+        if self.builtin_rules_version < 4 {
+            // 本地测试包已保存 v3。按固定 ID 和原名更新，只改展示名称，不重建已删除预设。
+            if let Some(preset) = self.rule_presets.iter_mut().find(|item| {
+                item.id == CLAUDE_FABLE_5_RULE_ID && item.name == LOCAL_TEST_FABLE_5_RULE_NAME
+            }) {
+                preset.name = CLAUDE_FABLE_5_RULE_NAME.into();
+            }
+            self.builtin_rules_version = 4;
         }
     }
 }

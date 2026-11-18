@@ -371,12 +371,12 @@ it.each([
     wrapper.unmount();
 });
 
-it('新增接口默认 Responses 并开启回退，连接与保存传入相同策略，仍允许手动关闭', async () => {
+it('新增接口默认 Chat Completions 并关闭回退，连接与保存一致，仍可切换和启用', async () => {
     const wrapper = mount(Settings);
     await flushPromises();
     await wrapper.get('[aria-label="新增接口配置"]').trigger('click');
-    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Responses');
-    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(true);
+    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Chat Completions');
+    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(false);
     await wrapper.get('#profile-name').setValue('新接口');
     await wrapper.get('#base-url').setValue('https://api.example.com/v1');
     await wrapper.get('#model-name').setValue('gpt-6.1-sol');
@@ -388,7 +388,10 @@ it('新增接口默认 Responses 并开启回退，连接与保存传入相同�
     expect(fake.call).toHaveBeenCalledWith(
         'test_connection',
         expect.objectContaining({
-            input: expect.objectContaining({ interfaceMode: 'responses', protocolFallbackEnabled: true }),
+            input: expect.objectContaining({
+                interfaceMode: 'chat_completions',
+                protocolFallbackEnabled: false,
+            }),
         }),
     );
     await wrapper.get('#profile-settings').trigger('submit');
@@ -396,15 +399,18 @@ it('新增接口默认 Responses 并开启回退，连接与保存传入相同�
     expect(fake.call).toHaveBeenCalledWith(
         'save_profile',
         expect.objectContaining({
-            input: expect.objectContaining({ interfaceMode: 'responses', protocolFallbackEnabled: true }),
+            input: expect.objectContaining({
+                interfaceMode: 'chat_completions',
+                protocolFallbackEnabled: false,
+            }),
         }),
     );
-    // 保存后的刷新由 Mock 保留旧配置；重新新建后仍可主动选择 Chat 并关闭回退。
+    // 保存后的刷新由 Mock 保留旧配置；重新新建后仍可选择另一协议和主动启用回退。
     await wrapper.get('[aria-label="新增接口配置"]').trigger('click');
-    await choose(wrapper, '接口模式', 'Chat Completions');
-    await wrapper.get('#protocol-fallback').setValue(false);
-    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Chat Completions');
-    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(false);
+    await choose(wrapper, '接口模式', 'Responses');
+    await wrapper.get('#protocol-fallback').setValue(true);
+    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Responses');
+    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(true);
     wrapper.unmount();
 });
 
@@ -1503,8 +1509,8 @@ it('没有接口配置时禁用空选择器，独立新增按钮仍可编辑草�
     expect(wrapper.get<HTMLButtonElement>('[aria-label="编辑接口配置"]').element.disabled).toBe(true);
     expect(wrapper.get('[aria-label="编辑接口配置"]').text()).toBe('新建接口配置（未保存）');
     expect(wrapper.get<HTMLButtonElement>('[aria-label="新增接口配置"]').element.disabled).toBe(false);
-    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Responses');
-    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(true);
+    expect(wrapper.get('[aria-label="接口模式"]').text()).toBe('Chat Completions');
+    expect(wrapper.get<HTMLInputElement>('#protocol-fallback').element.checked).toBe(false);
     await wrapper.get('[aria-label="新增接口配置"]').trigger('click');
     await wrapper.get('#profile-name').setValue('新的接口草稿');
     expect(wrapper.get<HTMLInputElement>('#profile-name').element.value).toBe('新的接口草稿');

@@ -64,6 +64,12 @@ Windows的`prompt_image.rs`在阻塞池内使用DirectWrite/Direct2D/WIC，32px�
 
 v1.2.0数据库/备份契约为v4，兼容旧备份1—3，声明旧格式却启用图片则拒绝。启动初始化兼容附加图片表，无外部图片路径；升级前备份完整数据目录，回退1.1.3及以前须恢复升级前目录。直接依赖仅引用已锁定base64 0.22.1/windows-numerics 0.3.1，windows仍为0.62.2，无版本升级。用户撤销了悬浮提示改动，现有原生title保持原机制，仅图片按钮文字改为全局含义。
 
+## 内置规则目录与接口默认值
+
+`builtinRulesVersion` 独立于 SQLite schema 与备份格式。启动先补齐并验证，再与历史检查同事务写盘；旧备份导入复用迁移。v2 的历史迁移保持原条件，v3 补入日期预设并仅为完整匹配旧正文的鹈鹕题追加风格，v4 只修正本地验收包中同 ID 的原版名称。保留自定义题面、改名、绑定和已删除状态。三个固定 ID 不占 100 个自定义预设名额；浏览器预览和分类重置与桌面目录同步。规则名称不参与条件摘要；鹈鹕正文更新按新条件提示重测，历史快照保持原文。
+
+接口表单初始空白与“新增接口”默认 Chat Completions、关闭回退，已有显式值继续回填。连接诊断和保存读取同一份草稿；缺字段仍兼容 Chat Completions、关闭回退。v1.2.1 保持数据库和备份 v4，回退 v1.2.0 的预设配额与旧格式限制见[使用手册](docs/USER_GUIDE.md)。
+
 ## 目录职责
 
 桌宠模块为 `src/pet`、`PetActor/PetStage/SkinManager` 与 `src-tauri/src/pet_window.rs`；皮肤包规范和制作命令见 [SKIN_PACKS.md](docs/SKIN_PACKS.md)。`python scripts/build_pet_assets.py` 从本轮四组定稿中的角色源图生成十二动作PNG及提取记录，勿手改生成结果。源图为 `source-states.png`、`source-actions.png`、`card-compact-design.png`、`card-expanded-design.png`，均在 `assets/pet/blue-whale-maid`；裁切与归一尺度可追溯到 `extraction.json`。播放器只接受 PNG 图集，普通构建直接复制 `public` 资源，EXE 打包检查也包含该目录。

@@ -182,9 +182,9 @@ export interface ProfileInput {
     /** 空字符串表示保留现有密钥；没有保存过密钥时允许留空以连接本地服务。 */
     apiKey: string;
     removeKey: boolean;
-    /** 新建表单默认 Responses；编辑旧配置时显式传入兼容后的已保存模式。 */
+    /** 新建和旧配置缺字段时默认 Chat Completions；已有显式选择照常回填。 */
     interfaceMode?: 'chat_completions' | 'responses';
-    /** 新建表单默认 true；旧调用方缺字段仍按 false 兼容，不批量启用已有配置。 */
+    /** 默认 false；只有用户显式启用时才允许失败后切换协议。 */
     protocolFallbackEnabled?: boolean;
     reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
     rulePresetId?: string | null;

@@ -1,4 +1,19 @@
-# 测智雷达 v1.2.0 验证记录
+# 测智雷达 v1.2.1 验证记录
+
+## v1.2.1 全文件复查与正式发布验证（2026-11-18）
+
+以 v1.2.0 提交 `0321a6b66fc0fb2b86e4fb033058ee16c3bc1822` 为基线，逐一复查 19 份变更：
+
+- 后端及回归 3 份：`model.rs`、`storage.rs`、`data_integrity.rs`。核对规则题面与答案、稳定 ID、自定义配额、v2/v3/v4 目录迁移、写入失败回滚、旧备份导入、分类重置、删除后重启和历史条件摘要。仅旧鹈鹕原文追加风格；本地验收包中同 ID 的原名改为新名称，不影响有效条件。
+- 前端及回归 4 份：`bridge.ts`、`Settings.vue`、`types.ts`、`settings.test.ts`。核对浏览器目录与桌面一致，初始空白和新增表单的默认值一致，测试连接与保存使用同一草稿，已有接口保留协议、回退选择和原绑定；规则选择器继续使用已有文本布局。
+- 工程和声明 6 份：npm 清单及锁文件、Cargo 清单及锁文件、Tauri 配置、第三方声明。统一版本 1.2.1；依赖与许可内容未变，无数据库或备份格式升级。
+- 使用与发布文档 6 份：README、变更记录、贡献指南、使用手册、本记录及 v1.2.1 中文发布说明。同步交互、题面、判定、迁移和回退边界，保留旧版本记录。
+
+实际执行：`npm test -- --reporter=dot`（13 个文件，359 项通过）、`cargo test --locked --manifest-path src-tauri/Cargo.toml`（174 项通过）、`cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、Rustfmt、Prettier、`git diff --check`、UTF-8 无 BOM / LF、文档链接与题面一致性检查。`npm run tauri -- build --no-bundle` 通过 Vue / TypeScript 与 Windows x64 构建。Vite 提示前端主块超过 500 kB，MSVC 输出 import library 创建提示；构建成功，未为本次功能拆包或调整工具链。
+
+`scripts/package_exe.ps1` 校验本轮新构建的 PE x64 和文件/产品版本 1.2.1，复制后摘要一致。产物 `Model-IQ-Radar-v1.2.1-Windows-x64.exe`：19438592 字节，SHA-256 `af951c10d51937cfc0ce6a84cbcd177a6535d9cda44296db4a931d1fd04c2c91`。
+
+用户已人工验收本地包；最终名称改动以回归测试和重新构建验证。按用户要求未使用 computer-use、未操作原生界面、未调用真实模型或 SMTP；自动验证不能确认实际路由、多屏或长期驻留效果。Java 手册已读取；本项目为 Vue / TypeScript / Rust / SQLite，Java、JVM 和 MyBatis 专属条款不适用。
 
 ## v1.2.0 全文件复查与正式发布验证（2026-11-10）
 
